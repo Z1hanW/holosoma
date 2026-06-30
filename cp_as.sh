@@ -20,6 +20,8 @@ set -euo pipefail
 #     Also install the primary keep bank locally at
 #     data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513, including
 #     contact_export_from_retarget, so training/distillation do not read NFS.
+#   Missing object URDF/mesh assets are fatal. This script does not synthesize
+#     object_size cuboid fallback geometry.
 #   DEDUPE_IDENTICAL=0
 #   DRY_RUN=1
 
@@ -306,7 +308,7 @@ def validate_keep_bank_copy(
 def copy_external_urdf_bundle(
     object_urdf: str,
     object_mesh: str,
-    object_size,
+    _object_size,
     *,
     source: Path,
     tmp_dir: Path,
@@ -322,69 +324,30 @@ def copy_external_urdf_bundle(
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     if not urdf_src.is_file():
-        size = np.asarray(object_size if object_size is not None else [], dtype=np.float32).reshape(-1)
-        if size.size != 3:
-            raise SystemExit(f"[ERROR] Missing external URDF for {clip_id}: {urdf_src}")
-        x, y, z = [max(float(v), 1.0e-4) for v in size.tolist()]
-        hx, hy, hz = x / 2.0, y / 2.0, z / 2.0
-        mesh_name = f"{bundle_name}.obj"
-        urdf_name = f"{bundle_name}.urdf"
-        (bundle_dir / mesh_name).write_text(
-            "\n".join(
-                [
-                    f"v {-hx:.8g} {-hy:.8g} {-hz:.8g}",
-                    f"v {hx:.8g} {-hy:.8g} {-hz:.8g}",
-                    f"v {hx:.8g} {hy:.8g} {-hz:.8g}",
-                    f"v {-hx:.8g} {hy:.8g} {-hz:.8g}",
-                    f"v {-hx:.8g} {-hy:.8g} {hz:.8g}",
-                    f"v {hx:.8g} {-hy:.8g} {hz:.8g}",
-                    f"v {hx:.8g} {hy:.8g} {hz:.8g}",
-                    f"v {-hx:.8g} {hy:.8g} {hz:.8g}",
-                    "f 1 2 3 4",
-                    "f 5 8 7 6",
-                    "f 1 5 6 2",
-                    "f 2 6 7 3",
-                    "f 3 7 8 4",
-                    "f 4 8 5 1",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
+        mesh_src = resolve_path(object_mesh, source) if object_mesh else None
+        mesh_note = f"; object_mesh_path={mesh_src}" if mesh_src is not None else ""
+        raise SystemExit(
+            f"[ERROR] Missing external URDF for {clip_id}: {urdf_src}{mesh_note}\n"
+            "[ERROR] Refusing to generate an object_size cuboid fallback. "
+            "Install/copy the real object URDF and mesh assets instead."
         )
-        mass = 0.1
-        ixx = mass * (y * y + z * z) / 12.0
-        iyy = mass * (x * x + z * z) / 12.0
-        izz = mass * (x * x + y * y) / 12.0
-        (bundle_dir / urdf_name).write_text(
-            f"""<?xml version="1.0" ?>
-<robot name="{bundle_name}">
-  <link name="{bundle_name}_link">
-    <inertial>
-      <mass value="{mass:.8g}"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="{ixx:.8g}" ixy="0" ixz="0" iyy="{iyy:.8g}" iyz="0" izz="{izz:.8g}"/>
-    </inertial>
-    <visual>
-      <origin rpy="0 0 0" xyz="0 0 0"/>
-      <geometry><mesh filename="{mesh_name}" scale="1 1 1"/></geometry>
-      <material name="mat"><color rgba="0.7 0.8 0.9 0.7"/></material>
-    </visual>
-    <collision name="{bundle_name}">
-      <origin rpy="0 0 0" xyz="0 0 0"/>
-      <geometry><mesh filename="{mesh_name}" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-</robot>
-""",
-            encoding="utf-8",
-        )
-        return str(bundle_rel / urdf_name), str(bundle_rel / mesh_name)
 
     try:
         tree = ET.parse(urdf_src)
         root = tree.getroot()
     except Exception as exc:
         raise SystemExit(f"[ERROR] Invalid external URDF for {clip_id}: {urdf_src}: {exc}") from exc
+
+    primitive_tags = [
+        tag_name
+        for tag_name in ("box", "sphere", "cylinder", "capsule")
+        if root.findall(f".//{tag_name}")
+    ]
+    if primitive_tags:
+        raise SystemExit(
+            f"[ERROR] External URDF for {clip_id} contains primitive geometry {primitive_tags}: {urdf_src}. "
+            "Use mesh geometry for realmesh object training."
+        )
 
     copied_meshes: dict[Path, str] = {}
     first_mesh_rel = ""
@@ -423,6 +386,9 @@ def copy_external_urdf_bundle(
             copied_name = copy_mesh(str(mesh_src))
             if not first_mesh_rel:
                 first_mesh_rel = str(bundle_rel / copied_name)
+
+    if not first_mesh_rel:
+        raise SystemExit(f"[ERROR] External URDF for {clip_id} contains no mesh geometry: {urdf_src}")
 
     urdf_name = sanitize_name(urdf_src.name) or f"{bundle_name}.urdf"
     urdf_dst = bundle_dir / urdf_name

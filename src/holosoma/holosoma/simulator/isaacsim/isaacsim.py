@@ -69,8 +69,6 @@ from holosoma.simulator.shared.virtual_gantry import (
     GantryCommandData,
 )
 from holosoma.simulator.shared.urdf_topology import extract_urdf_topology_signature
-from holosoma.utils.object_geometry import UrdfBoxPrimitiveMetadata, load_urdf_box_primitive_metadata
-
 from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStates, ActorPoses
 
 _OBJECT_CONTACT_MONITOR_BODY_NAMES = (
@@ -141,13 +139,20 @@ def _resolve_existing_object_urdf_path(path_like: str | pathlib.Path) -> pathlib
     if resolved.is_file():
         return resolved
 
-    if not resolved.exists():
+    if not resolved.exists() and _env_flag("HOLOSOMA_ALLOW_LEGACY_OBJECT_URDF_FALLBACK", default=False):
         for fallback in _object_urdf_compat_fallbacks(resolved):
             if fallback.is_file() and fallback.suffix.lower() == ".urdf":
                 logger.warning("Resolved missing object URDF '{}' to compatibility fallback '{}'", resolved, fallback)
                 return fallback.resolve()
 
     return resolved
+
+
+def _resolve_urdf_mesh_path(urdf_path: pathlib.Path, filename: str) -> pathlib.Path:
+    mesh_path = pathlib.Path(filename).expanduser()
+    if mesh_path.is_absolute():
+        return mesh_path.resolve()
+    return (urdf_path.parent / mesh_path).resolve()
 
 
 def _iter_config_nodes(config: Any, *, seen: set[int] | None = None):
@@ -190,7 +195,6 @@ class IsaacSim(BaseSimulator):
         self._heterogeneous_object_env_assignment = False
         self._heterogeneous_object_single_slot_enabled = False
         self._training_object_use_box_primitives = False
-        self._training_object_box_metadata_by_urdf: dict[str, UrdfBoxPrimitiveMetadata] = {}
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
         self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
@@ -325,10 +329,7 @@ class IsaacSim(BaseSimulator):
             self._heterogeneous_object_single_slot_enabled = (
                 self._heterogeneous_object_env_assignment
                 and not disable_single_slot
-                and (
-                    self._training_object_use_box_primitives
-                    or self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
-                )
+                and self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
             )
             if disable_single_slot and self._heterogeneous_object_env_assignment:
                 logger.info("Disabled heterogeneous single-slot object spawning via env override.")
@@ -543,7 +544,52 @@ class IsaacSim(BaseSimulator):
             used_names.add(name)
             unique_specs.append((name, urdf_key))
 
+        self._validate_object_specs_are_real_meshes(unique_specs)
         return unique_specs
+
+    @staticmethod
+    def _validate_object_specs_are_real_meshes(object_specs: list[tuple[str, str]]) -> None:
+        errors: list[str] = []
+        for object_name, urdf_raw in object_specs:
+            urdf_path = pathlib.Path(urdf_raw).expanduser().resolve()
+            if not urdf_path.is_file():
+                errors.append(f"{object_name}: missing object URDF {urdf_path}")
+                continue
+            try:
+                root = ET.parse(urdf_path).getroot()
+            except Exception as exc:
+                errors.append(f"{object_name}: invalid object URDF {urdf_path}: {exc}")
+                continue
+
+            primitive_tags = [
+                tag_name
+                for tag_name in ("box", "sphere", "cylinder", "capsule")
+                if root.findall(f".//{tag_name}")
+            ]
+            if primitive_tags:
+                errors.append(
+                    f"{object_name}: object URDF contains primitive geometry {primitive_tags} in {urdf_path}; "
+                    "use mesh geometry for realmesh object training"
+                )
+
+            mesh_paths: list[pathlib.Path] = []
+            for mesh_tag in root.findall(".//mesh"):
+                mesh_raw = str(mesh_tag.get("filename", "") or "").strip()
+                if not mesh_raw:
+                    errors.append(f"{object_name}: empty mesh filename in {urdf_path}")
+                    continue
+                mesh_paths.append(_resolve_urdf_mesh_path(urdf_path, mesh_raw))
+
+            if not mesh_paths:
+                errors.append(f"{object_name}: object URDF has no mesh geometry {urdf_path}")
+                continue
+
+            for mesh_path in mesh_paths:
+                if not mesh_path.is_file():
+                    errors.append(f"{object_name}: missing object mesh {mesh_path}")
+
+        if errors:
+            raise RuntimeError("Object mesh asset validation failed:\n  " + "\n  ".join(errors[:20]))
 
     @staticmethod
     def _scalar_str(value: Any) -> str:
@@ -969,10 +1015,6 @@ class IsaacSim(BaseSimulator):
         return tuple(link_names)
 
     def _append_object_contact_filter_paths(self, prim_suffix: str, object_asset_urdf_path: str) -> None:
-        if self._training_object_use_box_primitives:
-            self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}")
-            return
-
         for link_name in self._resolve_object_contact_link_names(object_asset_urdf_path):
             self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/{link_name}")
 
@@ -980,8 +1022,10 @@ class IsaacSim(BaseSimulator):
     def _resolve_object_spawn_mode() -> tuple[str, bool]:
         raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE")
         raw_mode_normalized = "" if raw_mode is None else raw_mode.strip().lower()
-        if raw_mode_normalized in {"", "primitive", "primitives", "box", "cuboid"}:
-            return "primitive", bool(raw_mode_normalized)
+        if raw_mode_normalized in {"primitive", "primitives", "box", "cuboid"}:
+            return "primitive", True
+        if raw_mode_normalized == "":
+            return "urdf", False
         if raw_mode_normalized == "auto":
             return "auto", True
         if raw_mode_normalized in {
@@ -996,10 +1040,10 @@ class IsaacSim(BaseSimulator):
         if raw_mode_normalized in {"urdf", "mesh", "off", "disable", "disabled"}:
             return "urdf", True
         logger.warning(
-            "Unknown HOLOSOMA_OBJECT_SPAWN_MODE='{}'. Falling back to 'primitive'.",
+            "Unknown HOLOSOMA_OBJECT_SPAWN_MODE='{}'. Falling back to URDF mesh spawning.",
             raw_mode,
         )
-        return "primitive", bool(raw_mode_normalized)
+        return "urdf", bool(raw_mode_normalized)
 
     @staticmethod
     def _single_slot_multi_urdf_requested() -> bool:
@@ -1013,95 +1057,23 @@ class IsaacSim(BaseSimulator):
             "heterogeneous-single-slot",
         }
 
-    def _should_use_box_primitives(self, object_specs: list[tuple[str, str]]) -> bool:
-        self._training_object_box_metadata_by_urdf = {}
+    def _should_use_box_primitives(self, _object_specs: list[tuple[str, str]]) -> bool:
         spawn_mode, spawn_mode_explicit = self._resolve_object_spawn_mode()
-        if spawn_mode == "urdf" or not object_specs:
-            return False
-
-        metadata_by_urdf: dict[str, UrdfBoxPrimitiveMetadata] = {}
-        for _object_name, object_path in object_specs:
-            metadata = load_urdf_box_primitive_metadata(object_path)
-            if metadata is None:
-                if spawn_mode == "primitive" and spawn_mode_explicit:
-                    raise ValueError(
-                        "HOLOSOMA_OBJECT_SPAWN_MODE=primitive requires every training object URDF to be a "
-                        f"simple box-like asset. Failed on: {object_path}"
-                    )
-                return False
-            metadata_by_urdf[object_path] = metadata
-
-        self._training_object_box_metadata_by_urdf = metadata_by_urdf
-        logger.info(
-            "Using Isaac Sim cuboid primitives for {} training object URDF(s).",
-            len(metadata_by_urdf),
-        )
-        return True
-
-    @staticmethod
-    def _apply_object_scale_to_extents(
-        extents: tuple[float, float, float],
-        object_scale: tuple[float, float, float] | None,
-    ) -> tuple[float, float, float]:
-        if object_scale is None:
-            return extents
-        return tuple(float(extents[idx]) * float(object_scale[idx]) for idx in range(3))
-
-    def _build_box_primitive_spawn_cfg(
-        self,
-        object_asset_urdf_path: str,
-        *,
-        object_scale: tuple[float, float, float] | None,
-    ) -> sim_utils.CuboidCfg | None:
-        metadata = self._training_object_box_metadata_by_urdf.get(object_asset_urdf_path)
-        if metadata is None:
-            return None
-        size = self._apply_object_scale_to_extents(metadata.extents, object_scale)
-        visual_color = metadata.visual_color if metadata.visual_color is not None else (0.7, 0.8, 0.9)
-        return sim_utils.CuboidCfg(
-            size=size,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=visual_color),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=metadata.static_friction,
-                dynamic_friction=metadata.dynamic_friction,
-                restitution=metadata.restitution,
-                compliant_contact_stiffness=metadata.compliant_contact_stiffness,
-                compliant_contact_damping=metadata.compliant_contact_damping,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=metadata.mass),
-            activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                retain_accelerations=False,
-                linear_damping=0.01,
-                angular_damping=0.01,
-                max_linear_velocity=1000.0,
-                max_angular_velocity=1000.0,
-                max_depenetration_velocity=1.0,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=4,
-            ),
-        )
+        if spawn_mode == "primitive":
+            raise ValueError(
+                "HOLOSOMA_OBJECT_SPAWN_MODE=primitive/box/cuboid is disabled. "
+                "Use mesh URDF object spawning so object physics stays tied to the real mesh."
+            )
+        if spawn_mode_explicit and spawn_mode == "auto":
+            logger.info("HOLOSOMA_OBJECT_SPAWN_MODE=auto now uses mesh URDF spawning; cuboid primitives are disabled.")
+        return False
 
     def _build_object_spawn_cfg(
         self,
         object_asset_urdf_path: str,
         *,
         object_scale: tuple[float, float, float] | None,
-    ) -> sim_utils.UrdfFileCfg | sim_utils.CuboidCfg:
-        if self._training_object_use_box_primitives:
-            primitive_cfg = self._build_box_primitive_spawn_cfg(
-                object_asset_urdf_path,
-                object_scale=object_scale,
-            )
-            if primitive_cfg is None:
-                raise ValueError(
-                    "Primitive object spawning was enabled, but no primitive metadata was resolved for "
-                    f"{object_asset_urdf_path}"
-                )
-            return primitive_cfg
-
+    ) -> sim_utils.UrdfFileCfg:
         collider_type_raw = os.environ.get("HOLOSOMA_OBJECT_COLLIDER_TYPE", "convex_hull").strip().lower()
         if collider_type_raw in {"convex_decomposition", "convex_decomp", "decomposition", "vhacd"}:
             collider_type = "convex_decomposition"
@@ -1239,8 +1211,9 @@ class IsaacSim(BaseSimulator):
             asset_path = robot_asset_cfg.urdf_file
             full_urdf_path = os.path.abspath(os.path.join(asset_root, asset_path))
 
-            # Get local rank to avoid race conditions in multi-GPU setups
-            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            # Use the pre-remap local rank when each torchrun child exposes only one GPU.
+            # This keeps per-rank URDF conversion directories unique on a node.
+            local_rank = int(os.environ.get("HOLOSOMA_ORIGINAL_LOCAL_RANK", os.environ.get("LOCAL_RANK", "0")))
             usd_conversion_dir = os.path.abspath(os.path.join(asset_root, f"converted_rank{local_rank}"))
             if _env_flag("HOLOSOMA_CLEAN_ROBOT_USD_CACHE", default=True):
                 conversion_path = pathlib.Path(usd_conversion_dir).resolve()

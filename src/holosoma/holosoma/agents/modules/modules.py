@@ -453,6 +453,91 @@ def build_mlp_layer(
     return nn.Sequential(*layers)
 
 
+class ConditionalFlowMLP(nn.Module):
+    """Conditional flow-matching network over action space."""
+
+    supports_flow_matching = True
+
+    def __init__(self, condition_dim: int, action_dim: int, layer_config: LayerConfig):
+        super().__init__()
+        if layer_config.hidden_dims is None:
+            raise ValueError("ConditionalFlowMLP requires hidden_dims to be set.")
+        self.condition_dim = int(condition_dim)
+        self.action_dim = int(action_dim)
+        self.integration_steps = max(1, int(getattr(layer_config, "flow_integration_steps", 4)))
+        self.train_noise_std = float(getattr(layer_config, "flow_train_noise_std", 1.0))
+        self.time_epsilon = min(max(float(getattr(layer_config, "flow_time_epsilon", 1e-4)), 0.0), 0.49)
+        self.inference_noise_std = max(0.0, float(getattr(layer_config, "flow_inference_noise_std", 0.0)))
+        self.net = build_mlp_layer(
+            self.condition_dim + self.action_dim + 1,
+            layer_config.hidden_dims,
+            self.action_dim,
+            layer_config,
+        )
+
+    @property
+    def supports_extra_input(self) -> bool:
+        return bool(getattr(self.net, "supports_extra_input", False))
+
+    def _time_column(self, t: torch.Tensor | float, batch_size: int, ref: torch.Tensor) -> torch.Tensor:
+        if not isinstance(t, torch.Tensor):
+            return torch.full((batch_size, 1), float(t), device=ref.device, dtype=ref.dtype)
+        t = t.to(device=ref.device, dtype=ref.dtype)
+        if t.ndim == 0:
+            return t.view(1, 1).expand(batch_size, 1)
+        if t.ndim == 1:
+            return t.view(-1, 1)
+        return t.view(batch_size, 1)
+
+    def velocity(
+        self,
+        condition: torch.Tensor,
+        action_t: torch.Tensor,
+        t: torch.Tensor | float,
+        extra_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        time_col = self._time_column(t, action_t.shape[0], action_t)
+        flow_input = torch.cat([condition, action_t, time_col], dim=-1)
+        if extra_input is not None:
+            if not self.supports_extra_input:
+                raise ValueError("extra_input provided but flow network is not configured for extra_input_to_hidden.")
+            if hasattr(extra_input, "is_inference") and extra_input.is_inference():
+                extra_input = extra_input.clone()
+            return self.net(flow_input, extra_input=extra_input)
+        return self.net(flow_input)
+
+    def forward(self, condition: torch.Tensor, extra_input: torch.Tensor | None = None) -> torch.Tensor:
+        if self.inference_noise_std > 0.0 and not torch.onnx.is_in_onnx_export():
+            action = torch.randn(condition.shape[0], self.action_dim, device=condition.device, dtype=condition.dtype)
+            action = action * self.inference_noise_std
+        else:
+            action = torch.zeros(condition.shape[0], self.action_dim, device=condition.device, dtype=condition.dtype)
+        dt = 1.0 / float(self.integration_steps)
+        for step in range(self.integration_steps):
+            t = float(step) * dt
+            action = action + dt * self.velocity(condition, action, t, extra_input=extra_input)
+        return action
+
+    def flow_matching_loss(
+        self,
+        condition: torch.Tensor,
+        target_action: torch.Tensor,
+        *,
+        extra_input: torch.Tensor | None = None,
+        loss_fn=F.mse_loss,
+    ) -> torch.Tensor:
+        noise = torch.randn_like(target_action) * self.train_noise_std
+        eps = self.time_epsilon
+        t = torch.rand(target_action.shape[0], 1, device=target_action.device, dtype=target_action.dtype)
+        if eps > 0.0:
+            t = t * (1.0 - 2.0 * eps) + eps
+        action_t = (1.0 - t) * noise + t * target_action
+        target_velocity = target_action - noise
+        pred_velocity = self.velocity(condition, action_t, t, extra_input=extra_input)
+        per_elem = loss_fn(pred_velocity, target_velocity, reduction="none")
+        return per_elem.mean(dim=-1)
+
+
 class GatedLinearEncoder(nn.Module):
     """Flatten + linear projection gated by a learned sigmoid."""
 
@@ -1151,6 +1236,15 @@ class BaseModule(nn.Module):
                 self.output_dim,
                 layer_config,
             )
+        elif layer_type == "FlowMLP":
+            if layer_config.perception_input_name:
+                raise ValueError("perception_input_name is not supported for FlowMLP modules.")
+            self.encoder = None
+            self.module = ConditionalFlowMLP(
+                self.input_dim,
+                self.output_dim,
+                layer_config,
+            )
         elif layer_type == "CNNEncoder":
             perception_output_dim = self._setup_perception_encoder(layer_config)
             perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
@@ -1326,6 +1420,18 @@ class BaseModule(nn.Module):
                 self.output_dim,
                 layer_config,
             )
+        elif layer_type == "FlowMLPPerceptionEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
+            if perception_output_dim == 0:
+                raise ValueError("perception_input_name must be set for FlowMLPPerceptionEncoder modules.")
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
+            self.encoder = None
+            mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
+            self.module = ConditionalFlowMLP(
+                mlp_input_dim + perception_input_dim,
+                self.output_dim,
+                layer_config,
+            )
         else:
             raise NotImplementedError(f"Unsupported layer type: {layer_type}")
 
@@ -1335,3 +1441,24 @@ class BaseModule(nn.Module):
                 raise ValueError("Extra input provided but module is not configured for extra_input_to_hidden.")
             return self.module(policy_input, extra_input=extra_input)
         return self.module(policy_input)
+
+    @property
+    def supports_flow_matching(self) -> bool:
+        return bool(getattr(self.module, "supports_flow_matching", False))
+
+    def flow_matching_loss(
+        self,
+        policy_input: torch.Tensor,
+        target_action: torch.Tensor,
+        *,
+        extra_input: torch.Tensor | None = None,
+        loss_fn=F.mse_loss,
+    ) -> torch.Tensor:
+        if not self.supports_flow_matching:
+            raise ValueError("flow_matching_loss requested for a non-flow module.")
+        return self.module.flow_matching_loss(
+            policy_input,
+            target_action,
+            extra_input=extra_input,
+            loss_fn=loss_fn,
+        )

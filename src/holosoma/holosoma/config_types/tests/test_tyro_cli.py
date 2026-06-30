@@ -12,24 +12,24 @@ def test_experiment_config():
 
 def test_perception_object_geometry_mode_accepts_hyphen_and_underscore_flags():
     cases = (
-        ["--object-geometry-mode", "primitive"],
-        ["--object_geometry_mode", "primitive"],
+        ["--object-geometry-mode", "mesh"],
+        ["--object_geometry_mode", "mesh"],
     )
 
     for args in cases:
         cfg = tyro.cli(PerceptionConfig, args=args, config=TYRO_CONIFG)
-        assert cfg.object_geometry_mode == "primitive"
+        assert cfg.object_geometry_mode == "mesh"
 
 
 def test_experiment_perception_object_geometry_mode_accepts_hyphen_and_underscore_flags():
     cases = (
-        ["--perception.object-geometry-mode", "primitive"],
-        ["--perception.object_geometry_mode", "primitive"],
+        ["--perception.object-geometry-mode", "mesh"],
+        ["--perception.object_geometry_mode", "mesh"],
     )
 
     for args in cases:
         cfg = tyro.cli(ExperimentConfig, args=args, config=TYRO_CONIFG)
-        assert cfg.perception.object_geometry_mode == "primitive"
+        assert cfg.perception.object_geometry_mode == "mesh"
 
 
 def test_mujoco_render_848x480_perception_preset():

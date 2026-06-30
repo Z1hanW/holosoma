@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.distributed as dist
 from torch import nn
+
+_GLOO_NORMALIZATION_GROUP = None
+
+
+def _gloo_normalization_enabled() -> bool:
+    return os.environ.get("HOLOSOMA_GLOO_SMALL_COLLECTIVES", "").lower() in ("1", "true", "yes", "on")
+
+
+def _get_gloo_normalization_group():
+    global _GLOO_NORMALIZATION_GROUP
+    if _GLOO_NORMALIZATION_GROUP is None:
+        _GLOO_NORMALIZATION_GROUP = dist.new_group(ranks=list(range(dist.get_world_size())), backend="gloo")
+    return _GLOO_NORMALIZATION_GROUP
 
 
 class EmpiricalNormalization(nn.Module):
@@ -52,7 +67,12 @@ class EmpiricalNormalization(nn.Module):
             local_sum_sq_shifted = torch.sum(x_shifted.pow(2), dim=0, keepdim=True)
 
             stats_to_sync = torch.cat([local_sum_shifted, local_sum_sq_shifted], dim=0)
-            dist.all_reduce(stats_to_sync, op=dist.ReduceOp.SUM)
+            if _gloo_normalization_enabled():
+                cpu_stats = stats_to_sync.detach().cpu()
+                dist.all_reduce(cpu_stats, op=dist.ReduceOp.SUM, group=_get_gloo_normalization_group())
+                stats_to_sync = cpu_stats.to(device=stats_to_sync.device, dtype=stats_to_sync.dtype)
+            else:
+                dist.all_reduce(stats_to_sync, op=dist.ReduceOp.SUM)
             global_sum_shifted, global_sum_sq_shifted = stats_to_sync
 
             batch_mean_shifted = global_sum_shifted / global_batch_size

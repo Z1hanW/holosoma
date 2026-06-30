@@ -215,8 +215,8 @@ def _update_module_config(
         perception_patch_size=perception_cfg.encoder_patch_size,
     )
 
-    if module_type == "MLP":
-        module_type = "MLPPerceptionEncoder"
+    if module_type in {"MLP", "FlowMLP"}:
+        module_type = "MLPPerceptionEncoder" if module_type == "MLP" else "FlowMLPPerceptionEncoder"
         module_inputs = tuple(name for name in input_dim if name != "perception_obs")
         layer_cfg = dataclasses.replace(
             layer_cfg,

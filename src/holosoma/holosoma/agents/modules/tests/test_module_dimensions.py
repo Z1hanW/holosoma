@@ -18,6 +18,7 @@ from holosoma.agents.modules import modules as module_impl
 from holosoma.agents.modules.modules import (
     AttentionLinearEncoder,
     BaseModule,
+    ConditionalFlowMLP,
     DeFMEfficientNetB2Encoder,
     DeFMRegNetY800MFEncoder,
     DeFMViTS14Encoder,
@@ -191,6 +192,71 @@ def test_base_module_forward_pass(simple_module_config):
 
     # Check output shape
     assert output.shape == (batch_size, 10)
+
+
+def test_flow_mlp_module_forward_and_flow_loss():
+    config = ModuleConfig(
+        type="FlowMLP",
+        input_dim=["actor_obs"],
+        output_dim=[6],
+        layer_config=LayerConfig(
+            hidden_dims=[32, 32],
+            activation="ELU",
+            flow_integration_steps=2,
+        ),
+    )
+    module = BaseModule(
+        obs_dim_dict={"actor_obs": 12},
+        module_config_dict=config,
+        history_length={"actor_obs": 1},
+    )
+
+    assert isinstance(module.module, ConditionalFlowMLP)
+    obs = torch.randn(5, 12)
+    target = torch.randn(5, 6)
+
+    actions = module(obs)
+    losses = module.flow_matching_loss(obs, target)
+
+    assert actions.shape == (5, 6)
+    assert losses.shape == (5,)
+    assert torch.isfinite(losses).all()
+
+
+def test_flow_mlp_perception_encoder_actor_forward_and_loss():
+    config = ModuleConfig(
+        type="FlowMLPPerceptionEncoder",
+        input_dim=["actor_obs"],
+        output_dim=[4],
+        layer_config=LayerConfig(
+            hidden_dims=[32, 32],
+            activation="ELU",
+            module_input_name=("actor_obs",),
+            perception_input_name="perception_obs",
+            perception_output_dim=8,
+            perception_encoder_type="gated_linear",
+            flow_integration_steps=2,
+        ),
+    )
+    actor = PPOActorEncoder(
+        obs_dim_dict={"actor_obs": 10, "perception_obs": 16},
+        module_config_dict=config,
+        num_actions=4,
+        init_noise_std=0.1,
+        history_length={"actor_obs": 1},
+    )
+    policy_state = {
+        "actor_obs": torch.randn(3, 10),
+        "perception_obs": torch.randn(3, 16),
+    }
+    target = torch.randn(3, 4)
+
+    actions = actor.act_inference(policy_state)
+    losses = actor.flow_matching_loss(policy_state, target)
+
+    assert actions.shape == (3, 4)
+    assert losses.shape == (3,)
+    assert torch.isfinite(losses).all()
 
 
 @pytest.mark.parametrize(

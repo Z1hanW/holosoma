@@ -1235,6 +1235,110 @@ def randomize_object_rigid_body_inertia_startup(
         )
 
 
+def _resolve_asset_body_ids(asset: Any, asset_cfg: Any) -> torch.Tensor:
+    if asset_cfg.body_ids == slice(None):
+        if asset_cfg.body_names is not None:
+            body_ids, _ = asset.find_bodies(asset_cfg.body_names)
+            return torch.tensor(body_ids, dtype=torch.long, device="cpu")
+        return torch.arange(asset.num_bodies, dtype=torch.long, device="cpu")
+    return torch.tensor(asset_cfg.body_ids, dtype=torch.long, device="cpu")
+
+
+def randomize_object_rigid_body_mass_inertia_scale_startup(
+    env,
+    env_ids: Sequence[int] | torch.Tensor | None = None,
+    *,
+    mass_scale_distribution_params: Sequence[float],
+    enabled: bool = True,
+    **_,
+) -> None:
+    """Scale object mass and inertia by the same sampled factor.
+
+    This preserves physical consistency for fixed geometry: changing density by
+    ``s`` scales both total mass and the inertia tensor by ``s`` while keeping
+    the center of mass fixed.
+    """
+    if not enabled:
+        return
+
+    idx = _ensure_env_ids_tensor(env, env_ids)
+    if idx.numel() == 0:
+        return
+
+    simulator = env.simulator
+    if simulator.__class__.__name__ != "IsaacSim":
+        raise RandomizerNotSupportedError(
+            f"randomize_object_rigid_body_mass_inertia_scale_startup only supports IsaacSim, got {type(simulator).__name__}"
+        )
+
+    env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
+    if env_ids_cpu.numel() == 0:
+        return
+
+    if len(mass_scale_distribution_params) != 2:
+        raise ValueError(
+            "mass_scale_distribution_params must contain [lower, upper], "
+            f"got {mass_scale_distribution_params!r}"
+        )
+    lower = float(mass_scale_distribution_params[0])
+    upper = float(mass_scale_distribution_params[1])
+    if lower <= 0.0 or upper <= 0.0 or upper < lower:
+        raise ValueError(
+            "mass_scale_distribution_params must be positive with upper >= lower, "
+            f"got {mass_scale_distribution_params!r}"
+        )
+
+    for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        if not _object_physx_view_has_env_rows(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            randomization_name="object mass/inertia scale randomization",
+        ):
+            continue
+
+        asset = simulator.scene[asset_cfg.name]
+        body_ids = _resolve_asset_body_ids(asset, asset_cfg)
+        if body_ids.numel() == 0:
+            continue
+
+        masses_original = asset.root_physx_view.get_masses()
+        inertias_original = asset.root_physx_view.get_inertias()
+
+        mass_scales = lower + (upper - lower) * torch.rand(
+            (env_ids_cpu.shape[0], 1),
+            device="cpu",
+            dtype=masses_original.dtype,
+        )
+
+        masses = masses_original.clone()
+        if masses.ndim == 1:
+            if body_ids.numel() != 1 or int(body_ids[0].item()) != 0:
+                raise ValueError(
+                    f"Cannot apply body_ids={body_ids.tolist()} to 1-D mass tensor for object '{asset_cfg.name}'"
+                )
+            masses[env_ids_cpu] = masses_original[env_ids_cpu] * mass_scales[:, 0]
+        else:
+            masses[env_ids_cpu[:, None], body_ids] = (
+                masses_original[env_ids_cpu[:, None], body_ids] * mass_scales
+            )
+        asset.root_physx_view.set_masses(masses, env_ids_cpu)
+
+        if inertias_original.ndim == 2:
+            if body_ids.numel() != 1 or int(body_ids[0].item()) != 0:
+                raise ValueError(
+                    f"Cannot apply body_ids={body_ids.tolist()} to 2-D inertia tensor for object '{asset_cfg.name}'"
+                )
+            inertias = inertias_original.clone()
+            inertias[env_ids_cpu] = inertias_original[env_ids_cpu] * mass_scales
+        else:
+            inertias = inertias_original.clone()
+            inertias[env_ids_cpu[:, None], body_ids] = (
+                inertias_original[env_ids_cpu[:, None], body_ids] * mass_scales[:, :, None]
+            )
+        asset.root_physx_view.set_inertias(inertias, env_ids_cpu)
+
+
 def configure_torque_rfi(
     env,
     env_ids,

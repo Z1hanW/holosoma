@@ -137,6 +137,19 @@ class PPO(BaseAlgo):
         self._step_timing_interval = max(1, env_int("HOLOSOMA_STEP_TIMING_INTERVAL", default=1))
         self._last_algo_step_timing: dict[str, dict[str, float]] = {}
         self._last_env_step_timing: dict[str, dict[str, float]] = {}
+        self.gpu_local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", str(self.gpu_world_size)))
+        self._hierarchical_grad_reduce_ready = False
+        self._hierarchical_grad_reduce_available = False
+        self._hierarchical_local_group = None
+        self._hierarchical_local_barrier_group = None
+        self._hierarchical_leader_group = None
+        self._hierarchical_leader_gloo_group = None
+        self._hierarchical_local_leader_rank = 0
+        self._hierarchical_is_leader_rank = False
+        self._gloo_grad_reduce_ready = False
+        self._gloo_grad_reduce_group = None
+        self._gloo_barrier_ready = False
+        self._gloo_barrier_group = None
         if self.algo_timing.enabled and self.is_main_process:
             logger.info(
                 "Step timing enabled (sync_cuda={}, interval={})",
@@ -384,11 +397,15 @@ class PPO(BaseAlgo):
         return torch.cat(parts, dim=-1)
 
     def _normalize_actor_obs(self, obs: torch.Tensor, *, update: bool) -> torch.Tensor:
+        if not self.config.normalize_actor_obs:
+            return obs
         return self._normalize_concat_obs(
             obs, self.actor_obs_keys, self.actor_obs_slices, self.actor_obs_normalizers, update=update
         )
 
     def _normalize_critic_obs(self, obs: torch.Tensor, *, update: bool) -> torch.Tensor:
+        if not self.config.normalize_critic_obs:
+            return obs
         return self._normalize_concat_obs(
             obs, self.critic_obs_keys, self.critic_obs_slices, self.critic_obs_normalizers, update=update
         )
@@ -404,6 +421,8 @@ class PPO(BaseAlgo):
             )
         if normalizers is None:
             normalizers = self.teacher_actor_obs_normalizers
+        if all(not isinstance(normalizer, EmpiricalNormalization) for normalizer in normalizers.values()):
+            return obs
         return self._normalize_concat_obs(
             obs,
             self.teacher_obs_keys,
@@ -482,9 +501,16 @@ class PPO(BaseAlgo):
     def setup(self):
         logger.info("Setting up PPO")
         self._setup_models_and_optimizer()
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} PPO.setup models/optimizers ready", self.gpu_global_rank)
         self._configure_active_observation_groups()
         logger.info("Setting up Storage")
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} PPO.setup storage begin", self.gpu_global_rank)
         self._setup_storage()
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} PPO.setup storage finished", self.gpu_global_rank)
 
         # Log curriculum synchronization status for multi-GPU training
         if self.is_multi_gpu:
@@ -492,6 +518,9 @@ class PPO(BaseAlgo):
                 logger.info(f"Multi-GPU curriculum synchronization enabled across {self.gpu_world_size} GPUs")
 
     def _setup_models_and_optimizer(self):
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} setup actor/critic begin", self.gpu_global_rank)
         self.actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
             module_config=self.config.module_dict.actor,
@@ -506,26 +535,40 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} setup actor/critic finished", self.gpu_global_rank)
         self.use_time_gru = bool(
             getattr(self.actor, "perception_time_gru", None) is not None
             or getattr(self.critic, "perception_time_gru", None) is not None
         )
 
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} setup distillation begin", self.gpu_global_rank)
         self._setup_distillation()
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} setup distillation finished", self.gpu_global_rank)
 
         if self.use_symmetry:
             self.symmetry_utils = SymmetryUtils(self.env)
 
         # Synchronize model weights across GPUs after initialization
         if self.is_multi_gpu:
+            if debug_heartbeat:
+                logger.info("Heartbeat: rank {} model weight sync begin", self.gpu_global_rank)
             self._synchronize_model_weights()
+            if debug_heartbeat:
+                logger.info("Heartbeat: rank {} model weight sync finished", self.gpu_global_rank)
 
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} optimizer setup begin", self.gpu_global_rank)
         self.actor_optimizer = instantiate(
             self.config.actor_optimizer, params=self.actor.parameters(), lr=self.actor_learning_rate
         )
         self.critic_optimizer = instantiate(
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} optimizer setup finished", self.gpu_global_rank)
 
     def _build_teacher_actor_config(self, obs_keys: list[str], base_actor_cfg: ModuleConfig | None = None):
         actor_cfg = base_actor_cfg or self.config.module_dict.actor
@@ -701,14 +744,21 @@ class PPO(BaseAlgo):
     def _load_teacher_actor(
         self, ckpt_path: str, obs_keys: list[str] | None = None
     ) -> tuple[nn.Module, dict[str, nn.Module]]:
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
         if ckpt_path.startswith("wandb://"):
             from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
 
             teacher_cache_dir = self.log_dir / ".teacher_ckpt_cache" / f"rank_{self.gpu_global_rank}"
             ckpt_path = str(load_checkpoint(ckpt_path, str(teacher_cache_dir)))
 
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher torch.load begin {}", self.gpu_global_rank, ckpt_path)
         teacher_state = torch.load(ckpt_path, map_location=self.device)
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher torch.load finished", self.gpu_global_rank)
         teacher_obs_keys = obs_keys if obs_keys is not None else self.actor_obs_keys
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher config build begin", self.gpu_global_rank)
         teacher_actor_base_cfg = self._extract_teacher_actor_config(teacher_state)
         teacher_actor_cfg = self._build_teacher_actor_config(teacher_obs_keys, base_actor_cfg=teacher_actor_base_cfg)
         self._validate_teacher_checkpoint_runtime_config(
@@ -716,6 +766,8 @@ class PPO(BaseAlgo):
             obs_keys=teacher_obs_keys,
             teacher_actor_cfg=teacher_actor_cfg,
         )
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher actor module build begin", self.gpu_global_rank)
         teacher_actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
             module_config=teacher_actor_cfg,
@@ -724,6 +776,8 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher state_dict load begin", self.gpu_global_rank)
         try:
             teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
         except RuntimeError:
@@ -736,12 +790,16 @@ class PPO(BaseAlgo):
                 raise
             logger.warning("Strict teacher load failed; retrying with strict=False for extra-input modules.")
             teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"], strict=False)
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher state_dict load finished", self.gpu_global_rank)
         teacher_actor.eval()
         for param in teacher_actor.parameters():
             if isinstance(param, UninitializedParameter):
                 continue
             param.requires_grad_(False)
 
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher normalizers build begin", self.gpu_global_rank)
         teacher_normalizers = self._build_group_normalizers(teacher_obs_keys, self.config.normalize_actor_obs)
         actor_norm_state = teacher_state.get("actor_obs_normalizer_state")
         if isinstance(actor_norm_state, dict):
@@ -750,6 +808,8 @@ class PPO(BaseAlgo):
                     teacher_normalizers[key].load_state_dict(state)
         for normalizer in teacher_normalizers.values():
             normalizer.eval()
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} teacher load finished", self.gpu_global_rank)
         return teacher_actor, teacher_normalizers
 
     def _setup_distillation(self) -> None:
@@ -1117,10 +1177,74 @@ class PPO(BaseAlgo):
                 for normalizer in normalizers.values():
                     normalizer.eval()
 
+    def _distributed_barrier(self) -> None:
+        if not self.is_multi_gpu or not torch.distributed.is_initialized():
+            return
+        if os.environ.get("HOLOSOMA_GLOO_BARRIER", "").lower() in ("1", "true", "yes", "on"):
+            gloo_group = self._setup_gloo_barrier_group()
+            if gloo_group is not None:
+                torch.distributed.barrier(group=gloo_group)
+                return
+        try:
+            torch.distributed.barrier(device_ids=[int(self.gpu_local_rank)])
+        except TypeError:
+            torch.distributed.barrier()
+
+    def _gloo_small_collectives_enabled(self) -> bool:
+        return os.environ.get("HOLOSOMA_GLOO_SMALL_COLLECTIVES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _all_reduce_small_tensor(
+        self,
+        tensor: torch.Tensor,
+        *,
+        op: torch.distributed.ReduceOp = torch.distributed.ReduceOp.SUM,
+    ) -> torch.Tensor:
+        if self._gloo_small_collectives_enabled():
+            gloo_group = self._setup_gloo_barrier_group()
+            if gloo_group is not None:
+                cpu_tensor = tensor.detach().cpu()
+                torch.distributed.all_reduce(cpu_tensor, op=op, group=gloo_group)
+                return cpu_tensor.to(device=tensor.device, dtype=tensor.dtype)
+        torch.distributed.all_reduce(tensor, op=op)
+        return tensor
+
+    def _broadcast_tensor(self, tensor: torch.Tensor, *, src: int = 0) -> None:
+        if self._gloo_small_collectives_enabled():
+            gloo_group = self._setup_gloo_barrier_group()
+            if gloo_group is not None:
+                cpu_tensor = tensor.detach().cpu()
+                torch.distributed.broadcast(cpu_tensor, src=src, group=gloo_group)
+                tensor.detach().copy_(cpu_tensor.to(device=tensor.device, dtype=tensor.dtype))
+                return
+        torch.distributed.broadcast(tensor, src=src)
+
+    def _synchronize_curriculum_metrics(self):
+        if not self.has_curricula_enabled():
+            return
+        env = self._unwrap_env()
+        if self._gloo_small_collectives_enabled():
+            gloo_group = self._setup_gloo_barrier_group()
+            if gloo_group is not None:
+                env.synchronize_curriculum_state(
+                    device="cpu",
+                    world_size=self.gpu_world_size,
+                    process_group=gloo_group,
+                )
+                return
+        env.synchronize_curriculum_state(device=self.device, world_size=self.gpu_world_size)
+
     def learn(self):
         self._train_mode()
 
+        logger.info("Entering PPO.learn at iteration {}.", self.current_learning_iteration)
+        logger.info("PPO.learn initial reset_all starting.")
         obs_dict = self.env.reset_all()
+        logger.info("PPO.learn initial reset_all finished with obs keys: {}.", sorted(obs_dict.keys()))
         self._reset_step_timing()
 
         # Initialize environments with different episode length buffers
@@ -1131,25 +1255,41 @@ class PPO(BaseAlgo):
             )
         for obs_key in obs_dict:
             obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+        logger.info("PPO.learn initial obs transfer to {} finished.", self.device)
 
         run_end_iteration = self.current_learning_iteration + self.config.num_learning_iterations
         debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        start_iteration = self.current_learning_iteration
+        skip_initial_checkpoint = os.environ.get("HOLOSOMA_SKIP_INITIAL_CHECKPOINT", "1").lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+        )
         for it in range(
             self.current_learning_iteration,
             run_end_iteration,
         ):
             self.current_learning_iteration = it
             self._reset_step_timing()
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} starting teacher/curriculum updates", it)
             self._adjust_teacher_action_mix_ratio(it)
             self._apply_ppo_start_noise_std_cap(it)
             self._sync_training_curriculum_state(
                 current_iteration=it,
                 total_iterations=run_end_iteration,
             )
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} finished teacher/curriculum state update", it)
 
             # Synchronize curriculum metrics across GPUs before rollout
             if self.is_multi_gpu:
+                if debug_heartbeat:
+                    logger.info("Heartbeat: iter {} starting curriculum metric sync", it)
                 self._synchronize_curriculum_metrics()
+                if debug_heartbeat:
+                    logger.info("Heartbeat: iter {} finished curriculum metric sync", it)
 
             if debug_heartbeat:
                 logger.info("Heartbeat: iter {} starting rollout", it)
@@ -1180,17 +1320,19 @@ class PPO(BaseAlgo):
             if self.is_main_process:
                 self._post_epoch_logging(it, loss_dict)
 
-            if it % self.config.save_interval == 0:
-                if self.is_multi_gpu and torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+            should_save_checkpoint = it % self.config.save_interval == 0
+            if should_save_checkpoint and skip_initial_checkpoint and it == start_iteration:
+                logger.info("Skipping checkpoint save at initial iteration {}.", it)
+                should_save_checkpoint = False
+
+            if should_save_checkpoint:
+                self._distributed_barrier()
                 if self.is_main_process:
                     self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
                     self._export_onnx_checkpoint(os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
-                if self.is_multi_gpu and torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+                self._distributed_barrier()
 
-        if self.is_multi_gpu and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        self._distributed_barrier()
         if self.is_main_process:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
             onnx_path = os.path.join(
@@ -1198,8 +1340,7 @@ class PPO(BaseAlgo):
                 f"model_{self.current_learning_iteration:05d}.onnx",
             )
             self._export_onnx_checkpoint(onnx_path)
-        if self.is_multi_gpu and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        self._distributed_barrier()
 
     def _should_export_onnx(self) -> bool:
         if self._experiment_config is None:
@@ -1382,6 +1523,9 @@ class PPO(BaseAlgo):
         if self.use_ppo_dagger_schedule:
             return self.ppo_coeff <= 0.0
         return self.bc_loss_coef >= 1.0
+
+    def _actor_uses_flow_matching(self) -> bool:
+        return bool(getattr(self.actor, "supports_flow_matching", False))
 
     def _rollout_step(self, obs_dict):
         debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
@@ -1723,6 +1867,37 @@ class PPO(BaseAlgo):
 
     def _training_step(self) -> dict[str, float]:
         timing = self.algo_timing if self.algo_timing.enabled else None
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        rank_label = f"{getattr(self, 'gpu_global_rank', 0)}/{getattr(self, 'gpu_world_size', 1)}"
+        minibatch_keys = {
+            "actor_obs",
+            "critic_obs",
+            "actions",
+            "values",
+            "advantages",
+            "returns",
+            "actions_log_prob",
+            "action_mean",
+            "action_sigma",
+        }
+        if self.dagger_enabled:
+            minibatch_keys.add("teacher_actions")
+            minibatch_keys.add("teacher_indices")
+            minibatch_keys.add("teacher_bc_mask")
+        if self.actor_perception_key:
+            minibatch_keys.add(self.actor_perception_key)
+        if self.critic_perception_key:
+            minibatch_keys.add(self.critic_perception_key)
+        if self.use_time_gru:
+            minibatch_keys.add("dones")
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} training_step enter (epochs={}, mini_batches={})",
+                self.current_learning_iteration,
+                rank_label,
+                self.config.num_learning_epochs,
+                self.config.num_mini_batches,
+            )
         if self.dagger_enabled and self.use_ppo_dagger_schedule:
             self._adjust_ppo_dagger_coeff(self.current_learning_iteration)
         if self.dagger_enabled and (not self.use_ppo_dagger_schedule) and self.switch_to_rl_after > 0:
@@ -1736,7 +1911,7 @@ class PPO(BaseAlgo):
                     )
                 else:
                     generator = self.storage.mini_batch_generator(
-                        self.config.num_mini_batches, self.config.num_learning_epochs
+                        self.config.num_mini_batches, self.config.num_learning_epochs, keys=minibatch_keys
                     )
         else:
             if self.use_time_gru:
@@ -1745,17 +1920,40 @@ class PPO(BaseAlgo):
                 )
             else:
                 generator = self.storage.mini_batch_generator(
-                    self.config.num_mini_batches, self.config.num_learning_epochs
+                    self.config.num_mini_batches, self.config.num_learning_epochs, keys=minibatch_keys
                 )
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} training_step generator ready",
+                self.current_learning_iteration,
+                rank_label,
+            )
 
         minibatch: Minibatch
         loss_dict = {"Value": 0.0, "Surrogate": 0.0, "Entropy": 0.0, "KL": 0.0}
+        minibatch_idx = 0
         for minibatch in generator:
+            minibatch_idx += 1
+            self._debug_current_minibatch_idx = minibatch_idx
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} minibatch {} starting update",
+                    self.current_learning_iteration,
+                    rank_label,
+                    minibatch_idx,
+                )
             if timing is not None:
                 with timing.record("training/update_algo_step"):
                     loss_dict = self._update_algo_step(minibatch, loss_dict)
             else:
                 loss_dict = self._update_algo_step(minibatch, loss_dict)
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} minibatch {} finished update",
+                    self.current_learning_iteration,
+                    rank_label,
+                    minibatch_idx,
+                )
 
         num_updates = self.config.num_learning_epochs * self.config.num_mini_batches
         for key in loss_dict:
@@ -1769,6 +1967,13 @@ class PPO(BaseAlgo):
                 self.storage.clear()
         else:
             self.storage.clear()
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} training_step exit after {} minibatches",
+                self.current_learning_iteration,
+                rank_label,
+                minibatch_idx,
+            )
         return loss_dict
 
     @staticmethod
@@ -1783,7 +1988,21 @@ class PPO(BaseAlgo):
             return 0.0
         return loss_value
 
+    @staticmethod
+    def _loss_is_finite(loss: torch.Tensor | float | int) -> bool:
+        if torch.is_tensor(loss):
+            return bool(torch.isfinite(loss).all())
+        loss_value = float(loss)
+        return loss_value == loss_value and loss_value not in (float("inf"), float("-inf"))
+
     def _accumulate_loss_dict(self, loss_dict: dict[str, float], ppo_loss_dict: dict[str, torch.Tensor]):
+        if os.environ.get("HOLOSOMA_SKIP_LOSS_DICT_ACCUMULATION", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return loss_dict
         loss_dict["Value"] += self._loss_to_float(ppo_loss_dict.get("value_loss", 0.0))
         loss_dict["Surrogate"] += self._loss_to_float(ppo_loss_dict.get("surrogate_loss", 0.0))
         loss_dict["Entropy"] += self._loss_to_float(ppo_loss_dict.get("entropy_loss", 0.0))
@@ -1821,31 +2040,187 @@ class PPO(BaseAlgo):
         return False
 
     def _update_algo_step(self, minibatch: Minibatch, loss_dict: dict[str, float]):
-        ppo_loss_dict = self._compute_ppo_loss(minibatch)
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        rank_label = f"{getattr(self, 'gpu_global_rank', 0)}/{getattr(self, 'gpu_world_size', 1)}"
+        supervised_actor_only_step = os.environ.get("HOLOSOMA_DAGGER_SUPERVISED_ACTOR_ONLY_STEP", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ) or os.environ.get("HOLOSOMA_DAGGER_SUPERVISED_ONLY", "").lower() in ("1", "true", "yes", "on")
+        stream_supervised_actor_backward = supervised_actor_only_step and os.environ.get(
+            "HOLOSOMA_SUPERVISED_ACTOR_STREAM_BACKWARD", ""
+        ).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if stream_supervised_actor_backward:
+            self.actor_optimizer.zero_grad()
+            self.critic_optimizer.zero_grad(set_to_none=True)
+        self._stream_supervised_actor_backward = stream_supervised_actor_backward
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update compute_loss begin (grad_enabled={} inference_mode={})",
+                self.current_learning_iteration,
+                rank_label,
+                torch.is_grad_enabled(),
+                torch.is_inference_mode_enabled(),
+            )
+        try:
+            with torch.inference_mode(False), torch.enable_grad():
+                ppo_loss_dict = self._compute_ppo_loss(minibatch)
+        finally:
+            self._stream_supervised_actor_backward = False
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update compute_loss finished (grad_enabled={} inference_mode={})",
+                self.current_learning_iteration,
+                rank_label,
+                torch.is_grad_enabled(),
+                torch.is_inference_mode_enabled(),
+            )
+        backward_already_done = bool(ppo_loss_dict.pop("_backward_already_done", False))
         actor_loss = ppo_loss_dict["actor_loss"]
         critic_loss = ppo_loss_dict["critic_loss"]
 
-        if not torch.isfinite(actor_loss).all() or not torch.isfinite(critic_loss).all():
-            logger.warning(
-                "Skipping optimizer step due to non-finite loss "
-                f"(actor={actor_loss.detach().float().mean().item():.6f}, "
-                f"critic={critic_loss.detach().float().mean().item():.6f})."
+        skip_loss_finite_check = os.environ.get("HOLOSOMA_SKIP_LOSS_FINITE_CHECK", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        local_loss_finite = True
+        loss_finite = True
+        if not skip_loss_finite_check:
+            local_loss_finite = self._loss_is_finite(actor_loss) and self._loss_is_finite(critic_loss)
+            loss_finite = local_loss_finite
+        if self.is_multi_gpu and torch.distributed.is_initialized() and not skip_loss_finite_check:
+            finite_flag = torch.tensor(1 if local_loss_finite else 0, device=self.device, dtype=torch.int32)
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update finite all_reduce begin local={}",
+                    self.current_learning_iteration,
+                    rank_label,
+                    local_loss_finite,
+                )
+            finite_flag = self._all_reduce_small_tensor(finite_flag, op=torch.distributed.ReduceOp.MIN)
+            loss_finite = bool(finite_flag.item())
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update finite all_reduce finished global={}",
+                    self.current_learning_iteration,
+                    rank_label,
+                    loss_finite,
+                )
+        elif debug_heartbeat and skip_loss_finite_check:
+            logger.info(
+                "Heartbeat: iter {} rank {} update finite check skipped",
+                self.current_learning_iteration,
+                rank_label,
             )
+
+        if not loss_finite:
+            if local_loss_finite:
+                logger.warning("Skipping optimizer step because another rank reported non-finite loss.")
+            else:
+                logger.warning(
+                    "Skipping optimizer step due to non-finite loss "
+                    f"(actor={self._loss_to_float(actor_loss):.6f}, "
+                    f"critic={self._loss_to_float(critic_loss):.6f})."
+                )
             self._sanitize_actor_std()
             self.actor_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
             return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
-        self.actor_optimizer.zero_grad()
-        self.critic_optimizer.zero_grad()
+        if not backward_already_done:
+            self.actor_optimizer.zero_grad()
+            if supervised_actor_only_step:
+                self.critic_optimizer.zero_grad(set_to_none=True)
+            else:
+                self.critic_optimizer.zero_grad()
 
-        ppo_loss = actor_loss + critic_loss
-        ppo_loss.backward()
+        ppo_loss = actor_loss if supervised_actor_only_step else actor_loss + critic_loss
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update backward begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
+        if backward_already_done:
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update backward skipped already_streamed",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+        else:
+            ppo_loss.backward()
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update backward finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
 
         if self.is_multi_gpu:
-            self._reduce_parameters()
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update grad all_reduce begin",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            self._reduce_parameters(include_critic=not supervised_actor_only_step)
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update grad all_reduce finished",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            if os.environ.get("HOLOSOMA_SYNC_AFTER_GRAD_ALLREDUCE", "").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                if debug_heartbeat:
+                    logger.info(
+                        "Heartbeat: iter {} rank {} update grad all_reduce cuda sync begin",
+                        self.current_learning_iteration,
+                        rank_label,
+                    )
+                torch.cuda.synchronize(self.device)
+                if debug_heartbeat:
+                    logger.info(
+                        "Heartbeat: iter {} rank {} update grad all_reduce cuda sync finished",
+                        self.current_learning_iteration,
+                        rank_label,
+                    )
 
-        if self._has_non_finite_gradients():
+        skip_grad_finite_check = os.environ.get("HOLOSOMA_SKIP_GRAD_FINITE_CHECK", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update grad finite check begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
+        has_non_finite_gradients = False if skip_grad_finite_check else self._has_non_finite_gradients()
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update grad finite check finished result={} skipped={}",
+                self.current_learning_iteration,
+                rank_label,
+                has_non_finite_gradients,
+                skip_grad_finite_check,
+            )
+        if has_non_finite_gradients:
             logger.warning("Skipping optimizer step due to non-finite gradients.")
             self._sanitize_actor_std()
             self.actor_optimizer.zero_grad(set_to_none=True)
@@ -1853,32 +2228,135 @@ class PPO(BaseAlgo):
             return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
         # Gradient step
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update actor grad clip begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
         nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update actor grad clip finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
+            logger.info(
+                "Heartbeat: iter {} rank {} update critic grad clip begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
+        if supervised_actor_only_step:
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update critic grad clip skipped actor-only",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+        else:
+            nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update critic grad clip finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
 
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update actor optimizer step begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
         self.actor_optimizer.step()
-        self.critic_optimizer.step()
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update actor optimizer step finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
+            logger.info(
+                "Heartbeat: iter {} rank {} update critic optimizer step begin",
+                self.current_learning_iteration,
+                rank_label,
+            )
+        if supervised_actor_only_step:
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update critic optimizer step skipped actor-only",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+        else:
+            self.critic_optimizer.step()
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update critic optimizer step finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
         self._apply_ppo_start_noise_std_cap(self.current_learning_iteration)
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} update optimizer step finished",
+                self.current_learning_iteration,
+                rank_label,
+            )
+        if os.environ.get("HOLOSOMA_SYNC_AFTER_OPTIMIZER_STEP", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update optimizer cuda sync begin",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            torch.cuda.synchronize(self.device)
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} update optimizer cuda sync finished",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
 
         return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
         if self.use_time_gru:
             return self._compute_ppo_loss_sequence(minibatch)
-        raw_actor_obs = minibatch["actor_obs"]
-        actions_batch = minibatch["actions"]
-        target_values_batch = minibatch["values"]
-        advantages_batch = minibatch["advantages"]
-        returns_batch = minibatch["returns"]
-        old_actions_log_prob_batch = minibatch["actions_log_prob"]
-        old_mu_batch = minibatch["action_mean"]
-        old_sigma_batch = minibatch["action_sigma"]
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        rank_label = f"{self.gpu_global_rank}/{self.gpu_world_size}" if self.is_multi_gpu else str(self.gpu_global_rank)
+        def _clone_if_inference_tensor(value):
+            if isinstance(value, torch.Tensor) and value.is_inference():
+                return value.clone()
+            return value
+
+        raw_actor_obs = _clone_if_inference_tensor(minibatch["actor_obs"])
+        actions_batch = _clone_if_inference_tensor(minibatch["actions"])
+        target_values_batch = _clone_if_inference_tensor(minibatch["values"])
+        advantages_batch = _clone_if_inference_tensor(minibatch["advantages"])
+        returns_batch = _clone_if_inference_tensor(minibatch["returns"])
+        old_actions_log_prob_batch = _clone_if_inference_tensor(minibatch["actions_log_prob"])
+        old_mu_batch = _clone_if_inference_tensor(minibatch["action_mean"])
+        old_sigma_batch = _clone_if_inference_tensor(minibatch["action_sigma"])
         actor_perception_obs = (
-            minibatch.get(self.actor_perception_key) if self.actor_perception_key else None
+            _clone_if_inference_tensor(minibatch.get(self.actor_perception_key)) if self.actor_perception_key else None
         )
         critic_perception_obs = (
-            minibatch.get(self.critic_perception_key) if self.critic_perception_key else None
+            _clone_if_inference_tensor(minibatch.get(self.critic_perception_key)) if self.critic_perception_key else None
         )
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} loss begin actor_obs={} actions={} actor_flow={}",
+                self.current_learning_iteration,
+                rank_label,
+                tuple(raw_actor_obs.shape),
+                tuple(actions_batch.shape),
+                self._actor_uses_flow_matching(),
+            )
 
         # Symmetry augmentation
         original_batch_size = actions_batch.shape[0]
@@ -1906,8 +2384,8 @@ class PPO(BaseAlgo):
             if critic_perception_obs is not None:
                 critic_perception_obs = critic_perception_obs.repeat(num_aug, 1)
         else:
-            actor_obs = minibatch["actor_obs"]
-            critic_obs = minibatch["critic_obs"]
+            actor_obs = raw_actor_obs
+            critic_obs = _clone_if_inference_tensor(minibatch["critic_obs"])
 
         if actor_perception_obs is not None and actor_perception_obs.is_inference():
             actor_perception_obs = actor_perception_obs.clone()
@@ -1916,20 +2394,289 @@ class PPO(BaseAlgo):
 
         actor_obs = self._normalize_actor_obs(actor_obs, update=True)
         critic_obs = self._normalize_critic_obs(critic_obs, update=True)
+        actor_obs = _clone_if_inference_tensor(actor_obs)
+        critic_obs = _clone_if_inference_tensor(critic_obs)
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: iter {} rank {} loss normalized obs actor={} critic={}",
+                self.current_learning_iteration,
+                rank_label,
+                tuple(actor_obs.shape),
+                tuple(critic_obs.shape),
+            )
+
+        supervised_dagger_only = os.environ.get("HOLOSOMA_DAGGER_SUPERVISED_ONLY", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if supervised_dagger_only and self.distill_mode == "dagger" and self.dagger_enabled:
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger begin",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            teacher_actions_batch = minibatch.get("teacher_actions")
+            if teacher_actions_batch is None:
+                raise ValueError("Dagger supervised-only mode requires teacher_actions in rollout storage.")
+            teacher_actions_batch = _clone_if_inference_tensor(teacher_actions_batch[:original_batch_size])
+            if self.clip_teacher_actions:
+                teacher_actions_batch = torch.clamp(
+                    teacher_actions_batch, -self.clip_actions_threshold, self.clip_actions_threshold
+                )
+
+            actor_policy_state = {"actor_obs": actor_obs[:original_batch_size]}
+            if actor_perception_obs is not None:
+                actor_policy_state[self.actor_perception_key] = actor_perception_obs[:original_batch_size]
+            teacher_bc_mask_batch = minibatch.get("teacher_bc_mask")
+            if teacher_bc_mask_batch is not None:
+                teacher_bc_mask_batch = _clone_if_inference_tensor(
+                    teacher_bc_mask_batch[:original_batch_size]
+                ).view(-1)
+            if self.use_ppo_dagger_schedule:
+                lambda_ppo = max(0.0, min(1.0, float(self.ppo_coeff)))
+                dagger_weight = self.dagger_loss_coef * (1.0 - lambda_ppo)
+            elif self.bc_loss_coef > 0.0:
+                dagger_weight = self.bc_loss_coef
+            else:
+                dagger_weight = self.dagger_loss_coef
+
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference begin",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            bc_loss = None
+            backward_already_done = False
+            if self._actor_uses_flow_matching():
+                distill_per_sample = self.actor.flow_matching_loss(
+                    actor_policy_state,
+                    teacher_actions_batch,
+                    loss_fn=self.distill_loss_fn,
+                )
+            else:
+                actor_microbatch_size = int(os.environ.get("HOLOSOMA_SUPERVISED_ACTOR_MICROBATCH", "0") or 0)
+                if actor_microbatch_size > 0 and original_batch_size > actor_microbatch_size:
+                    if debug_heartbeat:
+                        logger.info(
+                            "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch size={} batch={}",
+                            self.current_learning_iteration,
+                            rank_label,
+                            actor_microbatch_size,
+                            original_batch_size,
+                        )
+                    stream_microbatch_backward = bool(getattr(self, "_stream_supervised_actor_backward", False))
+                    distill_weighted_sum = torch.zeros((), device=self.device)
+                    valid_count = torch.zeros((), device=self.device)
+                    log_all_microbatches = os.environ.get("HOLOSOMA_DEBUG_MICROBATCH_ALL", "").lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    )
+                    sync_after_microbatch_forward = os.environ.get(
+                        "HOLOSOMA_SYNC_AFTER_MICROBATCH_FORWARD", ""
+                    ).lower() in ("1", "true", "yes", "on")
+                    if stream_microbatch_backward:
+                        with torch.no_grad():
+                            for micro_start in range(0, original_batch_size, actor_microbatch_size):
+                                micro_end = min(micro_start + actor_microbatch_size, original_batch_size)
+                                teacher_actions_micro = teacher_actions_batch[micro_start:micro_end]
+                                valid_mask_micro = torch.ones(
+                                    (micro_end - micro_start,), device=self.device, dtype=torch.bool
+                                )
+                                if teacher_bc_mask_batch is not None:
+                                    valid_mask_micro &= teacher_bc_mask_batch[micro_start:micro_end].to(
+                                        dtype=torch.bool
+                                    )
+                                if self.dagger_ignore_zero_teacher_actions:
+                                    valid_mask_micro &= ~torch.all(teacher_actions_micro == 0.0, dim=-1)
+                                valid_count = valid_count + valid_mask_micro.to(
+                                    dtype=teacher_actions_batch.dtype
+                                ).sum()
+                            valid_count = torch.clamp(valid_count, min=1.0)
+                    for micro_start in range(0, original_batch_size, actor_microbatch_size):
+                        micro_end = min(micro_start + actor_microbatch_size, original_batch_size)
+                        micro_policy_state = {
+                            key: value[micro_start:micro_end]
+                            for key, value in actor_policy_state.items()
+                        }
+                        if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                            logger.info(
+                                "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch begin {}:{} grad_enabled={} inference_mode={}",
+                                self.current_learning_iteration,
+                                rank_label,
+                                micro_start,
+                                micro_end,
+                                torch.is_grad_enabled(),
+                                torch.is_inference_mode_enabled(),
+                            )
+                        with torch.inference_mode(False), torch.enable_grad():
+                            student_actions_micro = self.actor.act_inference(micro_policy_state)
+                        if sync_after_microbatch_forward:
+                            if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                                logger.info(
+                                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch cuda sync begin {}:{}",
+                                    self.current_learning_iteration,
+                                    rank_label,
+                                    micro_start,
+                                    micro_end,
+                                )
+                            torch.cuda.synchronize(self.device)
+                            if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                                logger.info(
+                                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch cuda sync finished {}:{}",
+                                    self.current_learning_iteration,
+                                    rank_label,
+                                    micro_start,
+                                    micro_end,
+                                )
+                        if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                            logger.info(
+                                "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch finished {}:{}",
+                                self.current_learning_iteration,
+                                rank_label,
+                                micro_start,
+                                micro_end,
+                            )
+                        teacher_actions_micro = teacher_actions_batch[micro_start:micro_end]
+                        distill_per_elem_micro = self.distill_loss_fn(
+                            student_actions_micro, teacher_actions_micro, reduction="none"
+                        )
+                        if distill_per_elem_micro.ndim > 1:
+                            distill_per_sample_micro = distill_per_elem_micro.mean(dim=-1)
+                        else:
+                            distill_per_sample_micro = distill_per_elem_micro
+                        valid_mask_micro = torch.ones_like(distill_per_sample_micro, dtype=torch.bool)
+                        if teacher_bc_mask_batch is not None:
+                            valid_mask_micro &= teacher_bc_mask_batch[micro_start:micro_end].to(dtype=torch.bool)
+                        if self.dagger_ignore_zero_teacher_actions:
+                            valid_mask_micro &= ~torch.all(teacher_actions_micro == 0.0, dim=-1)
+                        valid_weight_micro = valid_mask_micro.to(dtype=distill_per_sample_micro.dtype)
+                        distill_weighted_sum_micro = (
+                            distill_per_sample_micro * valid_weight_micro
+                        ).sum()
+                        if stream_microbatch_backward:
+                            if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                                logger.info(
+                                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch backward begin {}:{}",
+                                    self.current_learning_iteration,
+                                    rank_label,
+                                    micro_start,
+                                    micro_end,
+                                )
+                            (dagger_weight * distill_weighted_sum_micro / valid_count).backward()
+                            if debug_heartbeat and (micro_start == 0 or log_all_microbatches):
+                                logger.info(
+                                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference microbatch backward finished {}:{}",
+                                    self.current_learning_iteration,
+                                    rank_label,
+                                    micro_start,
+                                    micro_end,
+                                )
+                            distill_weighted_sum = distill_weighted_sum + distill_weighted_sum_micro.detach()
+                        else:
+                            distill_weighted_sum = distill_weighted_sum + distill_weighted_sum_micro
+                            valid_count = valid_count + valid_weight_micro.sum()
+                    bc_loss = distill_weighted_sum / torch.clamp(valid_count, min=1.0)
+                    backward_already_done = stream_microbatch_backward
+                else:
+                    with torch.inference_mode(False), torch.enable_grad():
+                        student_actions = self.actor.act_inference(actor_policy_state)
+                    distill_per_elem = self.distill_loss_fn(student_actions, teacher_actions_batch, reduction="none")
+                    if distill_per_elem.ndim > 1:
+                        distill_per_sample = distill_per_elem.mean(dim=-1)
+                    else:
+                        distill_per_sample = distill_per_elem
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger actor.inference finished",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+
+            if bc_loss is None:
+                valid_mask = torch.ones_like(distill_per_sample, dtype=torch.bool)
+                if teacher_bc_mask_batch is not None:
+                    valid_mask &= teacher_bc_mask_batch.to(dtype=torch.bool)
+                if self.dagger_ignore_zero_teacher_actions:
+                    valid_mask &= ~torch.all(teacher_actions_batch == 0.0, dim=-1)
+
+                valid_weight = valid_mask.to(dtype=distill_per_sample.dtype)
+                valid_count = torch.clamp(valid_weight.sum(), min=1.0)
+                bc_loss = (distill_per_sample * valid_weight).sum() / valid_count
+
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger weight begin",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger actor_loss begin weight={}",
+                    self.current_learning_iteration,
+                    rank_label,
+                    dagger_weight,
+                )
+            actor_loss = dagger_weight * bc_loss
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger actor_loss finished",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            zero = 0.0
+            if debug_heartbeat:
+                logger.info(
+                    "Heartbeat: iter {} rank {} loss supervised_dagger finished",
+                    self.current_learning_iteration,
+                    rank_label,
+                )
+            return {
+                "actor_loss": actor_loss,
+                "critic_loss": zero,
+                "symmetry_actor_loss": zero,
+                "symmetry_critic_loss": zero,
+                "value_loss": zero,
+                "surrogate_loss": zero,
+                "entropy_loss": zero,
+                "distill_loss": bc_loss,
+                "bc_loss": bc_loss,
+                "ppo_coeff": float(self.ppo_coeff),
+                "dagger_weight": dagger_weight,
+                "kl_mean": zero,
+                "_backward_already_done": backward_already_done,
+            }
 
         actor_policy_state = {"actor_obs": actor_obs}
         if actor_perception_obs is not None:
             actor_policy_state[self.actor_perception_key] = actor_perception_obs
-        self.actor.act(actor_policy_state)
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss actor.act begin", self.current_learning_iteration, rank_label)
+        self.actor.update_distribution_from_policy_state(actor_policy_state)
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss actor.act finished", self.current_learning_iteration, rank_label)
 
         critic_policy_state = {"critic_obs": critic_obs}
         if critic_perception_obs is not None:
             critic_policy_state[self.critic_perception_key] = critic_perception_obs
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss critic.evaluate begin", self.current_learning_iteration, rank_label)
         value_batch = self.critic.evaluate(critic_policy_state)
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss critic.evaluate finished", self.current_learning_iteration, rank_label)
+            logger.info("Heartbeat: iter {} rank {} loss action log_prob begin", self.current_learning_iteration, rank_label)
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
         mu_batch = self.actor.action_mean[:original_batch_size]
         sigma_batch = self.actor.action_std[:original_batch_size]
         entropy_batch = self.actor.entropy[:original_batch_size]
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss action log_prob finished", self.current_learning_iteration, rank_label)
 
         kl_mean = torch.tensor(0.0, device=self.device)
         update_kl = not (self.dagger_enabled and self.use_ppo_dagger_schedule and self.ppo_coeff <= 0.1)
@@ -1993,6 +2740,8 @@ class PPO(BaseAlgo):
         if self.distill_mode == "dagger" and self.dagger_enabled and (
             self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule
         ):
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} rank {} loss dagger begin", self.current_learning_iteration, rank_label)
             teacher_actions_batch = minibatch.get("teacher_actions")
             if teacher_actions_batch is None:
                 raise ValueError("Dagger enabled but teacher_actions are missing from rollout storage.")
@@ -2002,11 +2751,21 @@ class PPO(BaseAlgo):
                     teacher_actions_batch, -self.clip_actions_threshold, self.clip_actions_threshold
                 )
 
-            distill_per_elem = self.distill_loss_fn(mu_batch, teacher_actions_batch, reduction="none")
-            if distill_per_elem.ndim > 1:
-                distill_per_sample = distill_per_elem.mean(dim=-1)
+            if self._actor_uses_flow_matching():
+                distill_actor_policy_state = {"actor_obs": actor_obs[:original_batch_size]}
+                if actor_perception_obs is not None:
+                    distill_actor_policy_state[self.actor_perception_key] = actor_perception_obs[:original_batch_size]
+                distill_per_sample = self.actor.flow_matching_loss(
+                    distill_actor_policy_state,
+                    teacher_actions_batch,
+                    loss_fn=self.distill_loss_fn,
+                )
             else:
-                distill_per_sample = distill_per_elem
+                distill_per_elem = self.distill_loss_fn(mu_batch, teacher_actions_batch, reduction="none")
+                if distill_per_elem.ndim > 1:
+                    distill_per_sample = distill_per_elem.mean(dim=-1)
+                else:
+                    distill_per_sample = distill_per_elem
 
             valid_mask = torch.ones_like(distill_per_sample, dtype=torch.bool)
             teacher_bc_mask = minibatch.get("teacher_bc_mask")
@@ -2023,6 +2782,8 @@ class PPO(BaseAlgo):
                 bc_loss = torch.tensor(0.0, device=self.device)
 
             if self.dagger_match_std:
+                if debug_heartbeat:
+                    logger.info("Heartbeat: iter {} rank {} loss dagger std-match begin", self.current_learning_iteration, rank_label)
                 if self.use_multi_teacher:
                     teacher_indices = minibatch.get("teacher_indices")
                     if teacher_indices is None:
@@ -2042,6 +2803,8 @@ class PPO(BaseAlgo):
                     bc_loss = bc_loss + sigma_loss[valid_mask].mean()
                 else:
                     bc_loss = bc_loss + torch.tensor(0.0, device=self.device)
+                if debug_heartbeat:
+                    logger.info("Heartbeat: iter {} rank {} loss dagger std-match finished", self.current_learning_iteration, rank_label)
 
             # In DAgger mode, distillation objective is the BC term.
             distill_loss = bc_loss
@@ -2055,14 +2818,32 @@ class PPO(BaseAlgo):
                 actor_loss = lambda_ppo * actor_loss_base + actor_regularizer + dagger_weight * bc_loss
             elif self.bc_loss_coef > 0.0:
                 actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + actor_regularizer + self.bc_loss_coef * bc_loss
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} rank {} loss dagger finished", self.current_learning_iteration, rank_label)
         elif self.distill_enabled:
             assert self.teacher_actor is not None, "Distillation enabled but teacher actor is not initialized."
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} rank {} loss distill begin", self.current_learning_iteration, rank_label)
             teacher_obs = self._normalize_teacher_actor_obs(raw_actor_obs)
             with torch.inference_mode():
                 teacher_actions = self.teacher_actor.act_inference({"actor_obs": teacher_obs})
-            distill_loss = F.mse_loss(mu_batch, teacher_actions)
+            if self._actor_uses_flow_matching():
+                distill_actor_policy_state = {"actor_obs": actor_obs[:original_batch_size]}
+                if actor_perception_obs is not None:
+                    distill_actor_policy_state[self.actor_perception_key] = actor_perception_obs[:original_batch_size]
+                distill_loss = self.actor.flow_matching_loss(
+                    distill_actor_policy_state,
+                    teacher_actions,
+                    loss_fn=self.distill_loss_fn,
+                ).mean()
+            else:
+                distill_loss = F.mse_loss(mu_batch, teacher_actions)
             actor_loss = actor_loss + self.distill_loss_coef * distill_loss
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} rank {} loss distill finished", self.current_learning_iteration, rank_label)
 
+        if debug_heartbeat:
+            logger.info("Heartbeat: iter {} rank {} loss finished", self.current_learning_iteration, rank_label)
         return {
             "actor_loss": actor_loss,
             "critic_loss": critic_loss,
@@ -2164,7 +2945,7 @@ class PPO(BaseAlgo):
             critic_obs_flat = critic_obs_aug
 
         actor_policy_state = {"actor_obs": actor_obs_flat, "extra_actor_input": actor_embed_flat}
-        self.actor.act(actor_policy_state)
+        self.actor.update_distribution_from_policy_state(actor_policy_state)
 
         critic_policy_state = {"critic_obs": critic_obs_flat, "extra_critic_input": critic_embed_flat}
         value_batch = self.critic.evaluate(critic_policy_state)
@@ -2259,7 +3040,7 @@ class PPO(BaseAlgo):
 
             # Reduce the KL divergence across all GPUs
             if self.is_multi_gpu:
-                torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
+                kl_mean = self._all_reduce_small_tensor(kl_mean, op=torch.distributed.ReduceOp.SUM)
                 kl_mean /= self.gpu_world_size
         return kl_mean
 
@@ -2276,10 +3057,28 @@ class PPO(BaseAlgo):
         for param_group in self.critic_optimizer.param_groups:
             param_group["lr"] = self.critic_learning_rate
 
+    @staticmethod
+    def _move_checkpoint_value_to_device(value, device):
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {key: PPO._move_checkpoint_value_to_device(item, device) for key, item in value.items()}
+        if isinstance(value, list):
+            return [PPO._move_checkpoint_value_to_device(item, device) for item in value]
+        if isinstance(value, tuple):
+            return tuple(PPO._move_checkpoint_value_to_device(item, device) for item in value)
+        return value
+
+    def _move_optimizer_state_to_device(self, optimizer) -> None:
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                state[key] = self._move_checkpoint_value_to_device(value, self.device)
+
     def load(self, ckpt_path: str | None) -> dict | None:
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
-            loaded_dict = torch.load(ckpt_path, map_location=self.device)
+            loaded_dict = torch.load(ckpt_path, map_location="cpu")
+            logger.info("Checkpoint deserialized on CPU; restoring tensors to {}.", self.device)
             self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
             self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
             actor_norm_state = loaded_dict.get("actor_obs_normalizer_state")
@@ -2295,11 +3094,14 @@ class PPO(BaseAlgo):
             if self.config.load_optimizer:
                 self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
                 self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
+                self._move_optimizer_state_to_device(self.actor_optimizer)
+                self._move_optimizer_state_to_device(self.critic_optimizer)
                 self.actor_learning_rate = loaded_dict["actor_optimizer_state_dict"]["param_groups"][0]["lr"]
                 self.critic_learning_rate = loaded_dict["critic_optimizer_state_dict"]["param_groups"][0]["lr"]
                 logger.info("Optimizer loaded from checkpoint")
             self.current_learning_iteration = loaded_dict["iter"]
-            self._restore_env_state(loaded_dict.get("env_state"))
+            env_state = self._move_checkpoint_value_to_device(loaded_dict.get("env_state"), self.device)
+            self._restore_env_state(env_state)
             self._apply_ppo_start_noise_std_cap(self.current_learning_iteration)
             return loaded_dict.get("infos")
         return None
@@ -2313,7 +3115,7 @@ class PPO(BaseAlgo):
         if ckpt_path is None:
             return None
         logger.info(f"Initializing actor policy parameters from checkpoint: {ckpt_path}")
-        loaded_dict = torch.load(ckpt_path, map_location=self.device)
+        loaded_dict = torch.load(ckpt_path, map_location="cpu")
         actor_state = loaded_dict.get("actor_model_state_dict")
         if not isinstance(actor_state, dict):
             raise KeyError(f"Checkpoint does not contain actor_model_state_dict: {ckpt_path}")
@@ -2491,37 +3293,283 @@ class PPO(BaseAlgo):
         # Use logging helper
         self.logging_helper.post_epoch_logging(it=it, loss_dict=loss_dict, extra_log_dicts=extra_log_dicts)
 
-    def _reduce_parameters(self):
-        grads = [
-            param.grad.view(-1)
-            for model in [self.actor, self.critic]
-            for param in model.parameters()
-            if param.grad is not None
-        ]
-        if not grads:
+    def _reduce_parameters(self, include_critic: bool = True):
+        models = [self.actor]
+        if include_critic:
+            models.append(self.critic)
+        params = [param for model in models for param in model.parameters()]
+        if not params:
             return
-        all_grads = torch.cat(grads)
 
-        torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
-        all_grads /= self.gpu_world_size
+        debug_grad_reduce = os.environ.get("HOLOSOMA_DEBUG_GRAD_REDUCE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        rank_label = f"{getattr(self, 'gpu_global_rank', 0)}/{getattr(self, 'gpu_world_size', 1)}"
+        total_numel = sum(param.numel() for param in params)
+        first_grad = next((param.grad for param in params if param.grad is not None), None)
+        dtype = first_grad.dtype if first_grad is not None else params[0].dtype
+        device = params[0].device
+        all_grads = torch.zeros(total_numel, device=device, dtype=dtype)
+        grad_mask = torch.zeros(len(params), device=device, dtype=dtype)
 
         offset = 0
-        for model in [self.actor, self.critic]:
-            for param in model.parameters():
-                if param.grad is not None:
-                    numel = param.numel()
-                    param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad))
-                    offset += numel
+        local_grad_param_count = 0
+        local_grad_numel = 0
+        first_missing_param_idx = None
+        for param_idx, param in enumerate(params):
+            numel = param.numel()
+            if param.grad is not None:
+                grad = param.grad.detach()
+                all_grads[offset : offset + numel].copy_(grad.reshape(-1).to(dtype=dtype))
+                grad_mask[param_idx] = 1.0
+                local_grad_param_count += 1
+                local_grad_numel += numel
+            elif first_missing_param_idx is None:
+                first_missing_param_idx = param_idx
+            offset += numel
+
+        debug_minibatch_idx = getattr(self, "_debug_current_minibatch_idx", None)
+        if debug_grad_reduce:
+            print(
+                "GradReducePrint "
+                f"iter={self.current_learning_iteration} rank={rank_label} minibatch={debug_minibatch_idx} "
+                f"phase=begin include_critic={include_critic} "
+                f"local_grad_params={local_grad_param_count}/{len(params)} "
+                f"local_grad_numel={local_grad_numel}/{total_numel} "
+                f"first_missing_param_idx={first_missing_param_idx}",
+                flush=True,
+            )
+            logger.info(
+                "GradReduce: iter {} rank {} begin include_critic={} local_grad_params={}/{} "
+                "local_grad_numel={}/{} first_missing_param_idx={}",
+                self.current_learning_iteration,
+                rank_label,
+                include_critic,
+                local_grad_param_count,
+                len(params),
+                local_grad_numel,
+                total_numel,
+                first_missing_param_idx,
+            )
+
+        payload = torch.cat((all_grads, grad_mask))
+        reduce_path = self._all_reduce_grad_payload(payload)
+        reduced_grads = payload[:total_numel].div_(self.gpu_world_size)
+        grad_counts = payload[total_numel:].detach().cpu()
+
+        if debug_grad_reduce:
+            global_grad_param_count = int((grad_counts > 0).sum().item())
+            print(
+                "GradReducePrint "
+                f"iter={self.current_learning_iteration} rank={rank_label} minibatch={debug_minibatch_idx} "
+                f"phase=finished path={reduce_path} global_grad_params={global_grad_param_count}/{len(params)}",
+                flush=True,
+            )
+            logger.info(
+                "GradReduce: iter {} rank {} reduced path={} global_grad_params={}/{}",
+                self.current_learning_iteration,
+                rank_label,
+                reduce_path,
+                global_grad_param_count,
+                len(params),
+            )
+
+        offset = 0
+        for param_idx, param in enumerate(params):
+            numel = param.numel()
+            if grad_counts[param_idx].item() > 0:
+                reduced_view = reduced_grads[offset : offset + numel].view_as(param)
+                if param.grad is None:
+                    param.grad = torch.empty_like(param, memory_format=torch.preserve_format)
+                param.grad.detach().copy_(reduced_view.to(dtype=param.grad.dtype))
+            else:
+                param.grad = None
+            offset += numel
+
+    def _hierarchical_grad_reduce_enabled(self) -> bool:
+        return os.environ.get("HOLOSOMA_HIERARCHICAL_GRAD_REDUCE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _gloo_grad_reduce_enabled(self) -> bool:
+        return os.environ.get("HOLOSOMA_GLOO_GRAD_REDUCE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _setup_gloo_grad_reduce_group(self):
+        if self._gloo_grad_reduce_ready:
+            return self._gloo_grad_reduce_group
+        self._gloo_grad_reduce_ready = True
+        if not self.is_multi_gpu or not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return None
+        if self._gloo_barrier_group is not None:
+            self._gloo_grad_reduce_group = self._gloo_barrier_group
+        else:
+            self._gloo_grad_reduce_group = torch.distributed.new_group(
+                ranks=list(range(self.gpu_world_size)),
+                backend="gloo",
+            )
+        if self.is_main_process:
+            logger.info("Gloo CPU gradient reduce enabled across {} ranks.", self.gpu_world_size)
+        return self._gloo_grad_reduce_group
+
+    def _setup_gloo_barrier_group(self):
+        if self._gloo_barrier_ready:
+            return self._gloo_barrier_group
+        self._gloo_barrier_ready = True
+        if not self.is_multi_gpu or not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return None
+        if self._gloo_grad_reduce_group is not None:
+            self._gloo_barrier_group = self._gloo_grad_reduce_group
+        else:
+            self._gloo_barrier_group = torch.distributed.new_group(
+                ranks=list(range(self.gpu_world_size)),
+                backend="gloo",
+            )
+        if self.is_main_process:
+            logger.info("Gloo distributed barrier enabled across {} ranks.", self.gpu_world_size)
+        return self._gloo_barrier_group
+
+    def _hierarchical_grad_reduce_cpu_leader_enabled(self) -> bool:
+        return os.environ.get("HOLOSOMA_HIERARCHICAL_GRAD_REDUCE_CPU_LEADER", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _setup_hierarchical_grad_reduce_groups(self) -> bool:
+        if self._hierarchical_grad_reduce_ready:
+            return self._hierarchical_grad_reduce_available
+
+        self._hierarchical_grad_reduce_ready = True
+        if (
+            not self.is_multi_gpu
+            or not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+            or self.gpu_local_world_size <= 1
+            or self.gpu_world_size <= self.gpu_local_world_size
+            or self.gpu_world_size % self.gpu_local_world_size != 0
+        ):
+            return False
+
+        node_count = self.gpu_world_size // self.gpu_local_world_size
+        local_node_idx = self.gpu_global_rank // self.gpu_local_world_size
+        for node_idx in range(node_count):
+            start_rank = node_idx * self.gpu_local_world_size
+            local_ranks = list(range(start_rank, start_rank + self.gpu_local_world_size))
+            local_group = torch.distributed.new_group(ranks=local_ranks)
+            local_barrier_group = torch.distributed.new_group(ranks=local_ranks, backend="gloo")
+            if node_idx == local_node_idx:
+                self._hierarchical_local_group = local_group
+                self._hierarchical_local_barrier_group = local_barrier_group
+                self._hierarchical_local_leader_rank = start_rank
+
+        leader_ranks = list(range(0, self.gpu_world_size, self.gpu_local_world_size))
+        self._hierarchical_leader_group = torch.distributed.new_group(ranks=leader_ranks)
+        self._hierarchical_leader_gloo_group = torch.distributed.new_group(ranks=leader_ranks, backend="gloo")
+        self._hierarchical_is_leader_rank = self.gpu_global_rank in leader_ranks
+        self._hierarchical_grad_reduce_available = (
+            self._hierarchical_local_group is not None
+            and self._hierarchical_local_barrier_group is not None
+            and self._hierarchical_leader_gloo_group is not None
+        )
+        if self.is_main_process:
+            logger.info(
+                "Hierarchical gradient reduce enabled: world_size={} local_world_size={} nodes={}",
+                self.gpu_world_size,
+                self.gpu_local_world_size,
+                node_count,
+            )
+        return self._hierarchical_grad_reduce_available
+
+    def _all_reduce_grad_payload(self, payload: torch.Tensor) -> str:
+        if self._gloo_grad_reduce_enabled():
+            gloo_group = self._setup_gloo_grad_reduce_group()
+            if gloo_group is not None:
+                cpu_payload = payload.detach().cpu()
+                torch.distributed.all_reduce(
+                    cpu_payload,
+                    op=torch.distributed.ReduceOp.SUM,
+                    group=gloo_group,
+                )
+                payload.copy_(cpu_payload.to(device=payload.device, dtype=payload.dtype))
+                return "gloo_cpu"
+
+        if self._hierarchical_grad_reduce_enabled() and self._setup_hierarchical_grad_reduce_groups():
+            torch.distributed.reduce(
+                payload,
+                dst=self._hierarchical_local_leader_rank,
+                op=torch.distributed.ReduceOp.SUM,
+                group=self._hierarchical_local_group,
+            )
+            if self._hierarchical_is_leader_rank:
+                if self._hierarchical_grad_reduce_cpu_leader_enabled():
+                    cpu_payload = payload.detach().cpu()
+                    torch.distributed.all_reduce(
+                        cpu_payload,
+                        op=torch.distributed.ReduceOp.SUM,
+                        group=self._hierarchical_leader_gloo_group,
+                    )
+                    payload.copy_(cpu_payload.to(device=payload.device, dtype=payload.dtype))
+                else:
+                    torch.distributed.all_reduce(
+                        payload,
+                        op=torch.distributed.ReduceOp.SUM,
+                        group=self._hierarchical_leader_group,
+                    )
+            torch.distributed.barrier(group=self._hierarchical_local_barrier_group)
+            torch.distributed.broadcast(
+                payload,
+                src=self._hierarchical_local_leader_rank,
+                group=self._hierarchical_local_group,
+            )
+            if self._hierarchical_grad_reduce_cpu_leader_enabled():
+                return "hierarchical_cpu_leader"
+            return "hierarchical"
+
+        torch.distributed.all_reduce(payload, op=torch.distributed.ReduceOp.SUM)
+        return "flat"
 
     def _synchronize_model_weights(self):
         """Synchronize actor and critic weights across all GPUs."""
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
         # Broadcast actor weights from rank 0 to all other ranks
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} broadcast actor begin", self.gpu_global_rank)
         for param in self.actor.parameters():
-            torch.distributed.broadcast(param.data, src=0)
+            self._broadcast_tensor(param.data, src=0)
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} broadcast actor finished", self.gpu_global_rank)
+
+        skip_critic_weight_sync = os.environ.get("HOLOSOMA_SKIP_CRITIC_WEIGHT_SYNC", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if skip_critic_weight_sync:
+            if debug_heartbeat:
+                logger.info("Heartbeat: rank {} broadcast critic skipped by HOLOSOMA_SKIP_CRITIC_WEIGHT_SYNC", self.gpu_global_rank)
+            logger.info(f"Synchronized actor weights across {self.gpu_world_size} GPUs; skipped critic weight sync")
+            return
 
         # Broadcast critic weights from rank 0 to all other ranks
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} broadcast critic begin", self.gpu_global_rank)
         for param in self.critic.parameters():
-            torch.distributed.broadcast(param.data, src=0)
+            self._broadcast_tensor(param.data, src=0)
+        if debug_heartbeat:
+            logger.info("Heartbeat: rank {} broadcast critic finished", self.gpu_global_rank)
 
         logger.info(f"Synchronized model weights across {self.gpu_world_size} GPUs")
 
@@ -2532,7 +3580,7 @@ class PPO(BaseAlgo):
                 (advantages**2).mean(),
             ]
         )
-        torch.distributed.all_reduce(local_stats, op=torch.distributed.ReduceOp.SUM)
+        local_stats = self._all_reduce_small_tensor(local_stats, op=torch.distributed.ReduceOp.SUM)
 
         global_mean = local_stats[0] / self.gpu_world_size
         global_sq_mean = local_stats[1] / self.gpu_world_size

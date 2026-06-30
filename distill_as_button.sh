@@ -42,6 +42,12 @@ Useful env vars:
   BOX_RESUME_CKPT=<checkpoint>  box policy initializer
   BAD_TRACKING_THRESHOLD_AUGMENT=1.0|1.1|1.2|1.4
                                   scale bad-tracking termination thresholds from gt/generalist strict values
+  STUDENT_POLICY_TYPE=mlp|flow   student actor type; mlp is the default
+  STUDENT_FLOW_STEPS=4           Euler steps for flow actor inference when STUDENT_POLICY_TYPE=flow
+  STUDENT_FLOW_TRAIN_NOISE_STD=1.0
+                                  base Gaussian std for flow-matching training targets
+  STUDENT_FLOW_INFERENCE_NOISE_STD=0.0
+                                  keep 0 for deterministic policy export/deployment
   RUN_NAME=<name>               override W&B run display name
   TRAINING_NAME=<name>          override log/checkpoint training name
   DRY_RUN=1                     forwarded to the delegated launcher if supported
@@ -117,6 +123,15 @@ normalize_bool() {
 
 AS_SUCCESS133_FINAL0P5="$(normalize_bool AS_SUCCESS133_FINAL0P5 "${AS_SUCCESS133_FINAL0P5:-0}")"
 RESUME_FROM_BOX="$(normalize_bool RESUME_FROM_BOX "${RESUME_FROM_BOX:-0}")"
+STUDENT_POLICY_TYPE="$(echo "${STUDENT_POLICY_TYPE:-mlp}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+case "${STUDENT_POLICY_TYPE}" in
+  mlp|flow)
+    ;;
+  *)
+    echo "[ERROR] STUDENT_POLICY_TYPE must be one of: mlp|flow. Got: ${STUDENT_POLICY_TYPE}" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369-recovered"}
@@ -129,6 +144,7 @@ fi
 
 export AS_SUCCESS133_FINAL0P5
 export RESUME_FROM_BOX
+export STUDENT_POLICY_TYPE
 if [[ "${CORL_128:-0}" == "1" ]]; then
   export AS_SUCCESS133_BANK_NAME
   export OMOMO_EXPECTED_TOTAL
@@ -186,6 +202,17 @@ if [[ "${STUDENT_ACTOR_INPUTS}" == *"actor_obs_pickup_button"* ]]; then
   echo "[INFO] pickup_button_interface=1 pickup_button=1_before_t1_0_from_t1_to_end"
 fi
 echo "[INFO] drop_button_interface=1 drop_button=0_before_t2_1_from_t2_to_end"
+echo "[INFO] student_policy_type=${STUDENT_POLICY_TYPE}"
+if [[ "${STUDENT_POLICY_TYPE}" == "flow" ]]; then
+  export STUDENT_FLOW_STEPS="${STUDENT_FLOW_STEPS:-4}"
+  export STUDENT_FLOW_TRAIN_NOISE_STD="${STUDENT_FLOW_TRAIN_NOISE_STD:-1.0}"
+  export STUDENT_FLOW_TIME_EPSILON="${STUDENT_FLOW_TIME_EPSILON:-1e-4}"
+  export STUDENT_FLOW_INFERENCE_NOISE_STD="${STUDENT_FLOW_INFERENCE_NOISE_STD:-0.0}"
+  echo "[INFO] student_flow steps=${STUDENT_FLOW_STEPS} train_noise_std=${STUDENT_FLOW_TRAIN_NOISE_STD} time_epsilon=${STUDENT_FLOW_TIME_EPSILON} inference_noise_std=${STUDENT_FLOW_INFERENCE_NOISE_STD}"
+  if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+    echo "[WARN] Flow student can only initialize tensors whose names and shapes match the box MLP checkpoint; expect the flow network itself to train from scratch."
+  fi
+fi
 echo "[INFO] HOLOSOMA_MOTION_METRICS_INTERVAL=${HOLOSOMA_MOTION_METRICS_INTERVAL}"
 
 exec bash "${SCRIPT_DIR}/distill_as_perception.sh" "${POSITIONAL[@]}"

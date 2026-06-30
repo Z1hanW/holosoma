@@ -304,6 +304,25 @@ fi
 
 STUDENT_ACTOR_INPUTS_EXPLICIT=0
 [[ -n "${STUDENT_ACTOR_INPUTS+x}" ]] && STUDENT_ACTOR_INPUTS_EXPLICIT=1
+STUDENT_ACTOR_HIDDEN_DIMS_EXPLICIT=0
+[[ -n "${STUDENT_ACTOR_HIDDEN_DIMS+x}" ]] && STUDENT_ACTOR_HIDDEN_DIMS_EXPLICIT=1
+STUDENT_POLICY_TYPE="$(echo "${STUDENT_POLICY_TYPE:-mlp}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+case "${STUDENT_POLICY_TYPE}" in
+  mlp)
+    STUDENT_ACTOR_MODULE_TYPE="MLP"
+    ;;
+  flow)
+    STUDENT_ACTOR_MODULE_TYPE="FlowMLP"
+    STUDENT_FLOW_STEPS="${STUDENT_FLOW_STEPS:-4}"
+    STUDENT_FLOW_TRAIN_NOISE_STD="${STUDENT_FLOW_TRAIN_NOISE_STD:-1.0}"
+    STUDENT_FLOW_TIME_EPSILON="${STUDENT_FLOW_TIME_EPSILON:-1e-4}"
+    STUDENT_FLOW_INFERENCE_NOISE_STD="${STUDENT_FLOW_INFERENCE_NOISE_STD:-0.0}"
+    ;;
+  *)
+    echo "[ERROR] STUDENT_POLICY_TYPE must be one of: mlp|flow. Got: ${STUDENT_POLICY_TYPE}" >&2
+    exit 2
+    ;;
+esac
 
 DS_DATA_ROOT_EXPLICIT=0
 [[ -n "${DS_DATA_ROOT+x}" ]] && DS_DATA_ROOT_EXPLICIT=1
@@ -799,7 +818,9 @@ if [[ -f "${OBJECT_MAP_PATH}" ]]; then
 from __future__ import annotations
 
 import json
+import os
 import sys
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
@@ -814,6 +835,12 @@ payload = json.loads(object_map.read_text(encoding="utf-8"))
 clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
 if not isinstance(clips, dict) or not clips:
     raise SystemExit(f"[ERROR] Invalid clip-object map payload: {object_map}")
+require_mesh_assets = os.environ.get("HOLOSOMA_REQUIRE_OBJECT_MESH_ASSETS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 active_clip_ids = [path.stem for path in sorted(motion_dir.glob("*.npz"))]
 if not active_clip_ids:
@@ -821,6 +848,7 @@ if not active_clip_ids:
 
 resolved_urdfs: list[str] = []
 missing: list[str] = []
+asset_errors: list[str] = []
 for clip_id in active_clip_ids:
     entry = clips.get(clip_id)
     urdf = ""
@@ -850,12 +878,56 @@ for clip_id in active_clip_ids:
             urdf_candidate = Path(resolve_data_file_path(urdf)).expanduser().resolve()
     else:
         urdf_candidate = Path(resolve_data_file_path(urdf)).expanduser().resolve()
+
+    if require_mesh_assets:
+        if not urdf_candidate.is_file():
+            asset_errors.append(f"{clip_id}: missing object URDF {urdf_candidate}")
+        else:
+            try:
+                root = ET.parse(urdf_candidate).getroot()
+            except Exception as exc:
+                asset_errors.append(f"{clip_id}: invalid object URDF {urdf_candidate}: {exc}")
+            else:
+                primitive_tags = [
+                    tag_name
+                    for tag_name in ("box", "sphere", "cylinder", "capsule")
+                    if root.findall(f".//{tag_name}")
+                ]
+                if primitive_tags:
+                    asset_errors.append(
+                        f"{clip_id}: object URDF contains primitive geometry {primitive_tags} in {urdf_candidate}; "
+                        "use mesh geometry for realmesh object training"
+                    )
+                mesh_paths: list[Path] = []
+                for mesh_tag in root.findall(".//mesh"):
+                    mesh_raw = str(mesh_tag.get("filename", "")).strip()
+                    if not mesh_raw:
+                        asset_errors.append(f"{clip_id}: empty mesh filename in {urdf_candidate}")
+                        continue
+                    mesh_path = Path(mesh_raw).expanduser()
+                    if not mesh_path.is_absolute():
+                        mesh_path = (urdf_candidate.parent / mesh_path).resolve()
+                    mesh_paths.append(mesh_path)
+                if not mesh_paths:
+                    asset_errors.append(
+                        f"{clip_id}: object URDF has no mesh geometry {urdf_candidate}; "
+                        "fallback box/cuboid URDFs are not allowed"
+                    )
+                for mesh_path in mesh_paths:
+                    if not mesh_path.is_file():
+                        asset_errors.append(f"{clip_id}: missing object mesh {mesh_path}")
     resolved_urdfs.append(str(urdf_candidate))
 
 if missing:
     preview = ", ".join(missing[:10])
     raise SystemExit(
         f"[ERROR] Active motion clips missing object_urdf_path resolution in {object_map}: {preview}"
+    )
+if asset_errors:
+    preview = "\n  ".join(asset_errors[:20])
+    raise SystemExit(
+        "[ERROR] Active object bank is not self-contained for mesh-object training. "
+        f"object_map={object_map}\n  {preview}"
     )
 
 counts = Counter(resolved_urdfs)
@@ -962,6 +1034,7 @@ PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 EXPORT_ONNX=${EXPORT_ONNX:-True}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"}
+STUDENT_ACTOR_HIDDEN_DIMS=${STUDENT_ACTOR_HIDDEN_DIMS:-}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
@@ -1065,13 +1138,13 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   PERCEPTION_INTO_CRITIC_MODULES_EXPLICIT=1
   PPO_START_EPOCH=0
   PPO_START_EPOCH_EXPLICIT=1
-  DAGGER_END_EPOCH=4000
+  DAGGER_END_EPOCH=6300
   DAGGER_END_EPOCH_EXPLICIT=1
-  PPO_START_COEFF=0.1
+  PPO_START_COEFF=0.0
   PPO_START_COEFF_EXPLICIT=1
   PPO_TARGET_COEFF=0.9
   PPO_TARGET_COEFF_EXPLICIT=1
-  PPO_SCHEDULE_STEP_EPOCHS=500
+  PPO_SCHEDULE_STEP_EPOCHS=700
   PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
   DAGGER_LOSS_COEF=1.0
   DAGGER_LOSS_COEF_EXPLICIT=1
@@ -1086,7 +1159,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
   SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
   SCHEDULE_NAME_EXPLICIT=1
-  SCHEDULE_NOTES="PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1."
+  SCHEDULE_NOTES="PPO-first hybrid: DAgger/BC is fully weighted at iteration 0. PPO starts at 0.0 and increases by 0.1 every 700 iterations until 0.9 at 6300; effective DAgger/BC weight starts at 1.0 and decreases to 0.1."
   SCHEDULE_NOTES_EXPLICIT=1
   START_AT_TIMESTEP_ZERO_PROB=0.2
   START_AT_TIMESTEP_ZERO_PROB_END=None
@@ -1140,9 +1213,8 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
     default|preset|null|none)
       ;;
     1|true|yes|on|primitive|primitives|box|cuboid)
-      OBJECT_GEOMETRY_MODE_NORM="primitive"
-      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
-      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      echo "[ERROR] OBJECT_GEOMETRY_MODE=primitive/box/cuboid is disabled. Use mesh URDF object geometry." >&2
+      exit 2
       ;;
     0|false|no|off|mesh|urdf|disable|disabled)
       OBJECT_GEOMETRY_MODE_NORM="mesh"
@@ -1152,7 +1224,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
       ;;
     *)
-      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: default/on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: default/off/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
       exit 2
       ;;
   esac
@@ -1261,16 +1333,16 @@ case "${SCHEDULE_VARIANT}" in
       PPO_START_EPOCH=0
     fi
     if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
-      DAGGER_END_EPOCH=4000
+      DAGGER_END_EPOCH=6300
     fi
     if [[ "${PPO_START_COEFF_EXPLICIT}" -eq 0 ]]; then
-      PPO_START_COEFF=0.1
+      PPO_START_COEFF=0.0
     fi
     if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
       PPO_TARGET_COEFF=0.9
     fi
     if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
-      PPO_SCHEDULE_STEP_EPOCHS=500
+      PPO_SCHEDULE_STEP_EPOCHS=700
     fi
     if [[ "${DAGGER_LOSS_COEF_EXPLICIT}" -eq 0 ]]; then
       DAGGER_LOSS_COEF=1.0
@@ -1279,7 +1351,7 @@ case "${SCHEDULE_VARIANT}" in
       SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1."
+      SCHEDULE_NOTES="PPO-first hybrid: DAgger/BC is fully weighted at iteration 0. PPO starts at 0.0 and increases by 0.1 every 700 iterations until 0.9 at 6300; effective DAgger/BC weight starts at 1.0 and decreases to 0.1."
     fi
     ;;
   *)
@@ -1526,7 +1598,20 @@ echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
+echo "[INFO] student_policy_type=${STUDENT_POLICY_TYPE} actor_module_type=${STUDENT_ACTOR_MODULE_TYPE}"
+if [[ "${STUDENT_POLICY_TYPE}" == "flow" ]]; then
+  echo "[INFO] student_flow steps=${STUDENT_FLOW_STEPS} train_noise_std=${STUDENT_FLOW_TRAIN_NOISE_STD} time_epsilon=${STUDENT_FLOW_TIME_EPSILON} inference_noise_std=${STUDENT_FLOW_INFERENCE_NOISE_STD}"
+fi
+if [[ -n "${STUDENT_ACTOR_HIDDEN_DIMS}" ]]; then
+  echo "[INFO] student_actor_hidden_dims=${STUDENT_ACTOR_HIDDEN_DIMS}"
+fi
 echo "[INFO] num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
+if [[ -n "${NUM_MINI_BATCHES:-}" ]]; then
+  echo "[INFO] num_mini_batches=${NUM_MINI_BATCHES}"
+fi
+if [[ -n "${NUM_LEARNING_EPOCHS:-}" ]]; then
+  echo "[INFO] num_learning_epochs=${NUM_LEARNING_EPOCHS}"
+fi
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
   echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
@@ -1542,6 +1627,12 @@ echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
   echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
+  if [[ -n "${OFFLINE_CONTACT_REGION_NAMES:-}" ]]; then
+    echo "[INFO] offline_contact_region_names=${OFFLINE_CONTACT_REGION_NAMES}"
+  fi
+  if [[ -n "${OFFLINE_WRIST_REGION_NAMES:-}" ]]; then
+    echo "[INFO] offline_wrist_region_names=${OFFLINE_WRIST_REGION_NAMES}"
+  fi
 fi
 echo "[INFO] uniform_t1_window_sampling=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED} half_width=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS} density_boost=${UNIFORM_T1_WINDOW_DENSITY_BOOST}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
@@ -1603,6 +1694,16 @@ if [[ -n "${STUDENT_ACTION_HISTORY_LENGTH:-}" ]]; then
     --observation.groups.actor_obs_actions.history-length="${STUDENT_ACTION_HISTORY_LENGTH}"
   )
 fi
+if [[ -n "${NUM_MINI_BATCHES:-}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --algo.config.num-mini-batches="${NUM_MINI_BATCHES}"
+  )
+fi
+if [[ -n "${NUM_LEARNING_EPOCHS:-}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --algo.config.num-learning-epochs="${NUM_LEARNING_EPOCHS}"
+  )
+fi
 if [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --observation.groups.critic_proprio_history.history-length="${CRITIC_PROPRIO_HISTORY_LENGTH}"
@@ -1612,6 +1713,22 @@ if [[ -n "${PPO_START_NOISE_STD}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --algo.config.distill.ppo-start-noise-std="${PPO_START_NOISE_STD}"
     --algo.config.distill.ppo-start-noise-std-until-coeff="${PPO_START_NOISE_STD_UNTIL_COEFF}"
+  )
+fi
+if [[ -n "${STUDENT_ACTOR_HIDDEN_DIMS}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --algo.config.module-dict.actor.layer-config.hidden-dims="${STUDENT_ACTOR_HIDDEN_DIMS}"
+  )
+fi
+EXTRA_DISTILL_ARGS+=(
+  --algo.config.module-dict.actor.type="${STUDENT_ACTOR_MODULE_TYPE}"
+)
+if [[ "${STUDENT_POLICY_TYPE}" == "flow" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --algo.config.module-dict.actor.layer-config.flow-integration-steps="${STUDENT_FLOW_STEPS}"
+    --algo.config.module-dict.actor.layer-config.flow-train-noise-std="${STUDENT_FLOW_TRAIN_NOISE_STD}"
+    --algo.config.module-dict.actor.layer-config.flow-time-epsilon="${STUDENT_FLOW_TIME_EPSILON}"
+    --algo.config.module-dict.actor.layer-config.flow-inference-noise-std="${STUDENT_FLOW_INFERENCE_NOISE_STD}"
   )
 fi
 if [[ "${EXPORT_ONNX_EXPLICIT}" -eq 1 || "${EXPORT_ONNX}" == "False" || "${EXPORT_ONNX}" == "false" ]]; then
@@ -1632,9 +1749,32 @@ if [[ "${DATA_MODE}" == "pure-real" ]]; then
   )
 fi
 if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
-  EXTRA_DISTILL_ARGS+=(
-    --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
-  )
+  case "$(echo "${ENABLE_OFFLINE_CONTACT_GUIDANCE:-True}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      EXTRA_DISTILL_ARGS+=(
+        --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
+      )
+      if [[ -n "${OFFLINE_CONTACT_REGION_NAMES:-}" ]]; then
+        EXTRA_DISTILL_ARGS+=(
+          --reward.terms.offline-contact-guidance.params.contact-region-names="${OFFLINE_CONTACT_REGION_NAMES}"
+        )
+      fi
+      if [[ -n "${OFFLINE_WRIST_REGION_NAMES:-}" ]]; then
+        EXTRA_DISTILL_ARGS+=(
+          --reward.terms.offline-contact-guidance.params.wrist-region-names="${OFFLINE_WRIST_REGION_NAMES}"
+        )
+      fi
+      ;;
+    0|false|no|off)
+      EXTRA_DISTILL_ARGS+=(
+        --reward.terms.offline-contact-guidance.weight=0.0
+      )
+      ;;
+    *)
+      echo "[ERROR] ENABLE_OFFLINE_CONTACT_GUIDANCE must be a boolean. Got: ${ENABLE_OFFLINE_CONTACT_GUIDANCE}" >&2
+      exit 2
+      ;;
+  esac
   if [[ "${EXP}" == *"r2s-rollout-ref"* ]]; then
     EXTRA_DISTILL_ARGS+=(
       --reward.terms.motion-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"

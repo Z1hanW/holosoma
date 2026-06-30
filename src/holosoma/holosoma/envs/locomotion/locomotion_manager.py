@@ -221,19 +221,19 @@ class LeggedRobotLocomotionManager(BaseTask):
             else:
                 self.reward_penalty_scale = float(penalty_state)
 
-    def synchronize_curriculum_state(self, *, device: str, world_size: int) -> None:
+    def synchronize_curriculum_state(self, *, device: str, world_size: int, process_group=None) -> None:
         if world_size <= 1:
             return
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return
         tracker = self._get_average_episode_tracker()
         avg_tensor = tracker.get_average().clone().detach().to(device)
-        torch.distributed.broadcast(avg_tensor, src=0)
+        torch.distributed.broadcast(avg_tensor, src=0, group=process_group)
         tracker.set_average(avg_tensor.to(self.device), suppress_update=False)
 
         if hasattr(self, "reward_penalty_scale"):
             penalty_tensor = torch.tensor(float(self.reward_penalty_scale), device=device, dtype=torch.float)
-            torch.distributed.broadcast(penalty_tensor, src=0)
+            torch.distributed.broadcast(penalty_tensor, src=0, group=process_group)
             self.reward_penalty_scale = float(penalty_tensor.item())
 
     def _push_robots(self, env_ids):

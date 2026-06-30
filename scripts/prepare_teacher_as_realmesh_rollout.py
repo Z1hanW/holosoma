@@ -92,6 +92,22 @@ def _parse_csv_set(raw: str) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _relative_top_level_dirs(entries: list[dict[str, Any]]) -> set[str]:
+    dirs: set[str] = set()
+    for entry in entries:
+        for key in ("object_urdf_path", "object_mesh_path"):
+            raw = str(entry.get(key, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.is_absolute() or raw.startswith(("package://", "http://", "https://", "file://")):
+                continue
+            parts = path.parts
+            if len(parts) > 1:
+                dirs.add(parts[0])
+    return dirs
+
+
 def _summary_row_success(row: dict[str, str]) -> bool:
     return str(row.get("success", "")).strip().lower() == "true"
 
@@ -119,7 +135,18 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def _copy_clip_dir_with_bank_metadata(src: Path, dst: Path) -> None:
+def _resolve_entry_path(raw: str, *, base_dir: Path) -> Path:
+    path = Path(str(raw).strip()).expanduser()
+    return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+
+
+def _copy_clip_dir_with_bank_metadata(
+    src: Path,
+    dst: Path,
+    *,
+    object_entry: dict[str, Any] | None,
+    target_bank: Path,
+) -> None:
     shutil.copytree(src, dst, symlinks=False)
     metadata_path = dst / "metadata.json"
     if not metadata_path.is_file():
@@ -127,6 +154,14 @@ def _copy_clip_dir_with_bank_metadata(src: Path, dst: Path) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     clip_id = str(metadata.get("clip_id") or _infer_clip_id_from_dir_name(dst.name))
     metadata["teacher_rollout_motion_bank_path"] = str(Path("..") / ".." / ".." / "_single_slot_motion_bank" / f"{clip_id}.npz")
+    if object_entry:
+        if object_entry.get("object_name"):
+            metadata["object_name"] = str(object_entry["object_name"])
+        if object_entry.get("object_size"):
+            metadata["primitive_extents_xyz"] = object_entry["object_size"]
+        raw_urdf = str(object_entry.get("object_urdf_path", "")).strip()
+        if raw_urdf:
+            metadata["object_urdf_path"] = str(_resolve_entry_path(raw_urdf, base_dir=target_bank))
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -241,6 +276,11 @@ def prepare_shards(args: argparse.Namespace) -> None:
         objects_dir = source_bank / "objects"
         if objects_dir.exists():
             _copy_or_symlink(objects_dir, shard_dir / "objects", symlink=True)
+        shard_entries = [clips[clip_id] for clip_id in shard_ids if isinstance(clips[clip_id], dict)]
+        for rel_dir in sorted(_relative_top_level_dirs(shard_entries)):
+            src_dir = source_bank / rel_dir
+            if src_dir.is_dir() and not (shard_dir / rel_dir).exists():
+                _copy_or_symlink(src_dir, shard_dir / rel_dir, symlink=True)
         for clip_id in shard_ids:
             _copy_or_symlink(source_bank / f"{clip_id}.npz", shard_dir / f"{clip_id}.npz", symlink=True)
         shard_payload = dict(metadata)
@@ -285,6 +325,10 @@ def merge_outputs(args: argparse.Namespace) -> None:
     failure_rows: list[dict[str, str]] = []
     clip_object_map: dict[str, Any] = {}
     success_clip_dirs: dict[str, Path] = {}
+    source_map_path = source_bank / "_clip_object_urdf_map.json"
+    source_clip_map: dict[str, Any] = {}
+    if source_map_path.is_file():
+        _, source_clip_map = _load_clip_map(source_map_path)
 
     for shard_output in sorted(path for path in shards_root.glob("shard_*") if path.is_dir()):
         summary_csv = shard_output / "summary.csv"
@@ -307,7 +351,8 @@ def merge_outputs(args: argparse.Namespace) -> None:
                 if len(matches) != 1:
                     raise SystemExit(f"[ERROR] Expected one clip dir for {clip_id}, found {len(matches)} in {clips_src}")
                 success_clip_dirs[clip_id] = matches[0]
-                clip_object_map[clip_id] = shard_map[clip_id]
+                source_entry = source_clip_map.get(clip_id)
+                clip_object_map[clip_id] = source_entry if isinstance(source_entry, dict) else shard_map[clip_id]
                 shutil.copy2(motion_src / f"{clip_id}.npz", merged_motion / f"{clip_id}.npz")
                 shutil.copytree(matches[0], merged_clips / matches[0].name)
             else:
@@ -341,15 +386,27 @@ def merge_outputs(args: argparse.Namespace) -> None:
     source_objects = source_bank / "objects"
     if source_objects.exists():
         _copy_or_symlink(source_objects, target_bank / "objects", symlink=True)
+    for rel_dir in sorted(_relative_top_level_dirs([entry for entry in clip_object_map.values() if isinstance(entry, dict)])):
+        src_dir = source_bank / rel_dir
+        if src_dir.is_dir() and not (target_bank / rel_dir).exists():
+            _copy_or_symlink(src_dir, target_bank / rel_dir, symlink=True)
 
     contact_root = target_bank / contact_export_name / "clips"
     contact_root.mkdir(parents=True, exist_ok=True)
+    copied_contact_dirs: dict[str, Path] = {}
     for clip_id, source_clip_dir in sorted(success_clip_dirs.items()):
-        _copy_clip_dir_with_bank_metadata(source_clip_dir, contact_root / source_clip_dir.name)
+        copied_dir = contact_root / source_clip_dir.name
+        _copy_clip_dir_with_bank_metadata(
+            source_clip_dir,
+            copied_dir,
+            object_entry=clip_object_map.get(clip_id) if isinstance(clip_object_map.get(clip_id), dict) else None,
+            target_bank=target_bank,
+        )
+        copied_contact_dirs[clip_id] = copied_dir
 
     if args.save_visualization:
         vis_root = target_bank / "object_frame_contact_vis" / "clips"
-        for source_clip_dir in sorted(success_clip_dirs.values()):
+        for source_clip_dir in sorted(copied_contact_dirs.values()):
             _save_object_frame_visualization(
                 source_clip_dir,
                 vis_root / source_clip_dir.name,

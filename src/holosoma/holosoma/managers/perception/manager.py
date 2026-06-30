@@ -21,7 +21,6 @@ from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_
 from holosoma.utils import warp_utils
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
-from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
 from holosoma.utils.rotations import (
     matrix_to_quaternion,
     quat_apply,
@@ -174,9 +173,11 @@ class PerceptionManager:
         if normalized in {"", "mesh", "urdf", "off", "false", "0", "no"}:
             return "mesh"
         if normalized in {"primitive", "primitives", "box", "cuboid", "on", "true", "1", "yes"}:
-            return "primitive"
+            raise ValueError(
+                "Primitive/box object perception geometry is disabled. Use mesh URDF object geometry."
+            )
         raise ValueError(
-            "Unsupported perception object_geometry_mode. Supported values: 'mesh' or 'primitive'. "
+            "Unsupported perception object_geometry_mode. Supported value: 'mesh'. "
             f"Got: {raw_value}"
         )
 
@@ -1506,12 +1507,10 @@ class PerceptionManager:
             self._object_geometry_mode,
         )
 
-        registered_object_primitives = self._collect_registered_sim_object_primitives()
         # Include all registered non-robot simulator objects (e.g., training box)
         # so they participate in depth raycasting alongside terrain/robot meshes.
-        registered_object_meshes = self._collect_registered_sim_object_meshes(
-            excluded_object_names=set(registered_object_primitives.keys())
-        )
+        registered_object_primitives: dict[str, dict[str, Any]] = {}
+        registered_object_meshes = self._collect_registered_sim_object_meshes()
         for slot_name, slot_spec in registered_object_meshes.items():
             if slot_name in ray_cast_bodies:
                 continue
@@ -1520,16 +1519,6 @@ class PerceptionManager:
             raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
         if not self._camera_include_robot_mesh:
             (self.logger or logger).info("far_tracking_warp robot visual mesh raycast disabled by configuration.")
-        if registered_object_primitives:
-            primitive_source_names = sorted(
-                {str(slot_spec["source_name"]) for slot_spec in registered_object_primitives.values()}
-            )
-            (self.logger or logger).info(
-                "far_tracking_warp: added {} analytic primitive body(ies) from {} object(s): {}",
-                len(registered_object_primitives),
-                len(primitive_source_names),
-                ", ".join(primitive_source_names),
-            )
         if registered_object_meshes:
             registered_source_names = sorted(
                 {str(slot_spec["source_name"]) for slot_spec in registered_object_meshes.values()}
@@ -1641,11 +1630,6 @@ class PerceptionManager:
             raise RuntimeError(
                 f"ray_cast body '{name}' is neither a robot body nor a registered object with mesh."
             )
-
-        for primitive_name, primitive_spec in registered_object_primitives.items():
-            primitive_source_indices.append(_register_object_source(str(primitive_spec["source_name"])))
-            primitive_half_extents.append(primitive_spec["half_extents"])
-            primitive_active.append(primitive_spec["active"])
 
         self._far_tracking_camera_sensor = FarTrackingCameraSensor(
             self.num_envs,
@@ -1847,25 +1831,6 @@ class PerceptionManager:
             self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, slot_tensor_idx] = inactive_pos
             self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, slot_tensor_idx] = inactive_quat
 
-    def _collect_registered_sim_object_primitives(self) -> dict[str, dict[str, Any]]:
-        """Resolve analytic box specs for registered simulator objects when primitive mode is enabled."""
-        primitive_map: dict[str, dict[str, Any]] = {}
-        if self._object_geometry_mode != "primitive":
-            return primitive_map
-
-        simulator = getattr(self.env, "simulator", None)
-        object_registry = getattr(simulator, "object_registry", None)
-        if object_registry is None:
-            return primitive_map
-
-        for name, obj_type, _position_in_type, _indices, _initial_poses in getattr(object_registry, "objects", []):
-            if obj_type == "robot":
-                continue
-            primitive_spec = self._resolve_registered_object_primitive_spec(name)
-            if primitive_spec is not None:
-                primitive_map[name] = primitive_spec
-        return primitive_map
-
     def _collect_registered_sim_object_meshes(
         self,
         *,
@@ -1896,63 +1861,6 @@ class PerceptionManager:
                     name,
                 )
         return mesh_map
-
-    def _resolve_registered_object_primitive_spec(self, object_name: str) -> dict[str, Any] | None:
-        """Resolve per-env analytic box extents for a registered simulator object."""
-        asset_candidates = self._resolve_registered_object_asset_candidates(object_name)
-        if not asset_candidates:
-            return None
-
-        half_extents = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
-        active = torch.zeros((self.num_envs,), device=self.device, dtype=torch.int32)
-        object_scale = self._get_registered_object_scale_xyz()
-
-        for asset_candidate in asset_candidates:
-            candidate_path = str(asset_candidate["asset_path"])
-            candidate_half_extents = self._resolve_registered_object_box_half_extents_from_asset_path(
-                candidate_path,
-                object_scale=object_scale,
-            )
-            if candidate_half_extents is None:
-                return None
-            half_extents_value = torch.tensor(candidate_half_extents, device=self.device, dtype=torch.float32)
-            env_ids = asset_candidate.get("env_ids")
-            if env_ids is None:
-                half_extents[:] = half_extents_value
-                active[:] = 1
-                continue
-            if len(env_ids) == 0:
-                continue
-            env_ids_tensor = torch.tensor(env_ids, dtype=torch.long, device=self.device)
-            half_extents[env_ids_tensor] = half_extents_value
-            active[env_ids_tensor] = 1
-
-        if int(torch.count_nonzero(active).item()) == 0:
-            return None
-        return {
-            "source_name": object_name,
-            "half_extents": half_extents,
-            "active": active,
-        }
-
-    def _resolve_registered_object_box_half_extents_from_asset_path(
-        self,
-        candidate_path: str,
-        *,
-        object_scale: tuple[float, float, float] | None,
-    ) -> tuple[float, float, float] | None:
-        resolved_path = resolve_data_file_path(candidate_path)
-        if os.path.splitext(resolved_path)[1].lower() != ".urdf":
-            return None
-
-        metadata = load_urdf_box_primitive_metadata(resolved_path)
-        if metadata is None:
-            return None
-
-        extents = tuple(float(v) for v in metadata.extents)
-        if object_scale is not None:
-            extents = tuple(float(extents[idx]) * float(object_scale[idx]) for idx in range(3))
-        return tuple(max(0.5 * float(extents[idx]), 5.0e-5) for idx in range(3))
 
     def _resolve_registered_object_mesh_specs(self, object_name: str) -> dict[str, dict[str, Any]]:
         """Resolve one or more raycast slots for a registered simulator object."""

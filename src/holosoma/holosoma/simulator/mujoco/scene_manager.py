@@ -3263,7 +3263,13 @@ class MujocoSceneManager:
         if resolved.is_file() and resolved.suffix.lower() == ".urdf":
             return resolved
 
-        if not resolved.exists():
+        allow_legacy_fallback = os.environ.get("HOLOSOMA_ALLOW_LEGACY_OBJECT_URDF_FALLBACK", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not resolved.exists() and allow_legacy_fallback:
             for fallback in _object_urdf_compat_fallbacks(resolved):
                 if fallback.is_file() and fallback.suffix.lower() == ".urdf":
                     logger.warning("Resolved missing object URDF '{}' to compatibility fallback '{}'", resolved, fallback)

@@ -75,25 +75,10 @@ object_state_dr_at_setup = {
             "restitution_range": [0.0, 1.0],
         },
     ),
-    "randomize_object_rigid_body_mass_startup": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_mass_startup",
+    "randomize_object_rigid_body_mass_inertia_scale_startup": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_mass_inertia_scale_startup",
         params={
-            "mass_distribution_params": [1.0, 4.0],
-        },
-    ),
-    "randomize_object_rigid_body_inertia_startup": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_inertia_startup",
-        params={
-            "inertia_distribution_params_dict": {
-                # In beyondmimic, only Ixx is randomized, which is probably a bug instead of a feature.
-                # Here, we want to reproduce their work. User should feel free to randomize all terms.
-                "Ixx": [0.5, 1.5],
-                "Iyy": [1.0, 1.0],
-                "Izz": [1.0, 1.0],
-                "Ixy": [1.0, 1.0],
-                "Iyz": [1.0, 1.0],
-                "Ixz": [1.0, 1.0],
-            }
+            "mass_scale_distribution_params": [0.5, 1.5],
         },
     ),
 }

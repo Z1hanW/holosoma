@@ -611,4 +611,17 @@ class LoggingHelper:
         """Saves file to wandb if run is initialized."""
         if wandb.run is None:
             return
+        if os.environ.get("HOLOSOMA_SKIP_WANDB_FILE_UPLOAD", "").lower() in ("1", "true", "yes", "on"):
+            logger.info("Skipping wandb file upload for {} due to HOLOSOMA_SKIP_WANDB_FILE_UPLOAD.", file_path)
+            return
+        if (
+            os.environ.get("HOLOSOMA_SKIP_WANDB_CHECKPOINT_UPLOAD", "").lower() in ("1", "true", "yes", "on")
+            and pathlib.Path(file_path).name.startswith("model_")
+            and pathlib.Path(file_path).suffix == ".pt"
+        ):
+            logger.info(
+                "Skipping wandb checkpoint upload for {} due to HOLOSOMA_SKIP_WANDB_CHECKPOINT_UPLOAD.",
+                file_path,
+            )
+            return
         wandb.save(file_path, base_path=self.log_dir)

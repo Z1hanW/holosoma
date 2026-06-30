@@ -175,22 +175,23 @@ PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on|primitive|primitives|box|cuboid)
-      OBJECT_SPAWN_MODE="primitive"
-      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      echo "[ERROR] OBJECT_GEOMETRY_MODE=primitive/box/cuboid is disabled. Use mesh URDF object geometry." >&2
+      exit 2
       ;;
     0|false|no|off|mesh|urdf|disable|disabled)
       OBJECT_SPAWN_MODE="urdf"
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
       ;;
     *)
-      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: off/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
       exit 2
       ;;
   esac
 else
   case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
     primitive|primitives|box|cuboid)
-      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      echo "[ERROR] HOLOSOMA_OBJECT_SPAWN_MODE=primitive/box/cuboid is disabled. Use mesh URDF object spawning." >&2
+      exit 2
       ;;
     urdf|mesh|off|disable|disabled|single_slot_multi_urdf|single-slot-multi-urdf|single_slot|single-slot|heterogeneous_single_slot|heterogeneous-single-slot)
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
@@ -770,74 +771,6 @@ if missing:
     raise SystemExit(f"[ERROR] Object map has missing URDFs in {path}: {sample}")
 
 print(f"[INFO] Validated clip-object URDF map: {path} ({len(payload)} clips)")
-PY
-}
-
-validate_object_spec_primitives() {
-  local map_path="$1"
-  PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" - "${map_path}" "${SCRIPT_DIR}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-from holosoma.utils.path import resolve_data_file_path
-from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
-
-path = Path(sys.argv[1]).expanduser().resolve()
-repo_root = Path(sys.argv[2]).expanduser().resolve()
-payload = json.loads(path.read_text(encoding="utf-8"))
-if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
-    payload = payload["clips"]
-if not isinstance(payload, dict) or not payload:
-    raise SystemExit(f"[ERROR] Invalid or empty object map: {path}")
-
-def resolve_urdf(raw: str) -> Path:
-    raw = raw.strip()
-    candidate = Path(raw).expanduser()
-    if candidate.is_absolute() or raw.startswith("holosoma/data"):
-        resolved_data = Path(resolve_data_file_path(raw)).expanduser().resolve()
-        if resolved_data.is_file():
-            return resolved_data
-
-    candidates = []
-    if candidate.is_absolute():
-        candidates.append(candidate)
-    else:
-        candidates.append(path.parent / candidate)
-        candidates.append(repo_root / candidate)
-        candidates.append(repo_root / "src" / "holosoma" / candidate)
-    for item in candidates:
-        resolved = item.resolve()
-        if resolved.is_file():
-            return resolved
-    return candidates[0].resolve()
-
-unique_urdfs: dict[str, str] = {}
-for clip_id, entry in payload.items():
-    if isinstance(entry, str):
-        urdf = entry.strip()
-    elif isinstance(entry, dict):
-        urdf = str(entry.get("object_urdf_path", "")).strip()
-    else:
-        urdf = ""
-    if not urdf:
-        raise SystemExit(f"[ERROR] Object map entry has no URDF: {clip_id}")
-    resolved = resolve_urdf(urdf)
-    unique_urdfs[str(resolved)] = clip_id
-
-bad = []
-for urdf in sorted(unique_urdfs):
-    if load_urdf_box_primitive_metadata(urdf) is None:
-        bad.append(urdf)
-
-if bad:
-    sample = "\n  ".join(bad[:10])
-    raise SystemExit(
-        "[ERROR] HOLOSOMA_OBJECT_SPAWN_MODE=primitive requires every object URDF to be "
-        f"simple box-like. Failed {len(bad)} URDF(s):\n  {sample}"
-    )
-
-print(f"[INFO] Validated primitive object spawning metadata: {len(unique_urdfs)} unique URDF(s)")
 PY
 }
 
@@ -2121,7 +2054,8 @@ fi
 validate_object_spec_map "${OBJECT_SPEC_PATH}"
 case "$(echo "${HOLOSOMA_OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
   primitive|primitives|box|cuboid)
-    validate_object_spec_primitives "${OBJECT_SPEC_PATH}"
+    echo "[ERROR] HOLOSOMA_OBJECT_SPAWN_MODE=primitive/box/cuboid is disabled. Use mesh URDF object spawning." >&2
+    exit 2
     ;;
 esac
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import Tensor
 
@@ -112,7 +114,7 @@ class RolloutStorage:
         """Clear the buffer and reset the step counter."""
         self.step = 0
 
-    def mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8):
+    def mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8, keys: set[str] | None = None):
         """Generate randomized mini-batches for training.
 
         This flattens the time and environment dimensions and creates random mini-batches.
@@ -127,20 +129,31 @@ class RolloutStorage:
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
 
-        # Create random permutation for sampling
-        indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
+        selected_keys = list(keys) if keys is not None else list(self._buffers)
+        selected_keys = [key for key in selected_keys if key in self._buffers]
+        use_contiguous = os.environ.get("HOLOSOMA_CONTIGUOUS_MINIBATCHES", "").lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+        )
+
+        if not use_contiguous:
+            # Create random permutation for sampling
+            indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
 
         # Flatten all buffers: [num_transitions_per_env, num_envs, ...] -> [batch_size, ...]
-        flattened = {key: buf.flatten(0, 1) for key, buf in self._buffers.items()}
+        flattened = {key: self._buffers[key].flatten(0, 1) for key in selected_keys}
 
         for _ in range(num_epochs):
             for i in range(num_mini_batches):
                 start = i * mini_batch_size
                 end = (i + 1) * mini_batch_size
-                batch_indices = indices[start:end]
-
-                # Extract mini-batch for each buffer
-                mini_batch = {key: flattened[key][batch_indices] for key in self._buffers}
+                if use_contiguous:
+                    mini_batch = {key: flattened[key][start:end] for key in selected_keys}
+                else:
+                    batch_indices = indices[start:end]
+                    mini_batch = {key: flattened[key][batch_indices] for key in selected_keys}
                 yield mini_batch
 
     def sequence_mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 1):

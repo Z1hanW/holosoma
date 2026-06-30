@@ -7,9 +7,9 @@ set -euo pipefail
 # bank and MotionLoader must see the same URDF set, otherwise fixed
 # env-to-clip assignment will fail for single-slot AS training.
 #
-# The default source prefers the CoRL solid80 bank produced by cp_corl.sh when
-# it exists locally. Otherwise it falls back to the teacher-rollout success155
-# final0p5 primitive-proj bank and filters it down to solid clips:
+# The default source prefers the mesh-physics solid bank when it exists locally.
+# Otherwise it falls back to the normal success133 AS distill bank and filters it
+# down to solid clips:
 #   strict success_contact_and_final_position
 #   box/bin/barrel/ball only
 #   excludes scale__any_bin_3, scale__any_bin_8, box_21, box_39 falldown/suspect clips
@@ -27,9 +27,9 @@ Allowed object categories:
   box, bin, barrel, ball
 
 Behavior:
-  Prefers the repo-local CoRL solid80 bank copied by cp_corl.sh. If that bank
-  is unavailable, uses the normal distill_as_button.sh AS bank selection as the
-  source, then creates a repo-local solid-only symlink bank and launches from it.
+  Prefers the repo-local mesh-physics solid bank. If that bank is unavailable,
+  uses the normal distill_as_button.sh AS bank selection as the source, then
+  creates a repo-local solid-only symlink bank and launches from it.
   This keeps simulator object assignment and MotionLoader clip filtering
   consistent.
 
@@ -345,11 +345,12 @@ print(json.dumps(normalized))
 PY
 )
 
-DEFAULT_AS_SUCCESS155_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj"
-CORL_SOLID80_BANK_NAME=${CORL_SOLID80_BANK_NAME:-"${DEFAULT_AS_SUCCESS155_BANK_NAME}_solid80_clean_box_bin_barrel_ball"}
+DEFAULT_AS_SUCCESS133_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5"
+DEFAULT_MESHPHYS_SOLID_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_solid80_clean_box_bin_barrel_ball_meshphys_v1"
+CORL_SOLID80_BANK_NAME=${CORL_SOLID80_BANK_NAME:-"${DEFAULT_MESHPHYS_SOLID_BANK_NAME}"}
 USER_SET_AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME+x}
 USER_SET_OMOMO_DATA_DIR=${OMOMO_DATA_DIR+x}
-AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-"${DEFAULT_AS_SUCCESS155_BANK_NAME}"}
+AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-"${DEFAULT_AS_SUCCESS133_BANK_NAME}"}
 if [[ -z "${USER_SET_AS_SUCCESS133_BANK_NAME}" && -z "${USER_SET_OMOMO_DATA_DIR}" ]]; then
   CORL_SOLID80_BANK="${SCRIPT_DIR}/data/ds_as_data/${CORL_SOLID80_BANK_NAME}"
   if [[ -d "${CORL_SOLID80_BANK}" ]]; then
@@ -358,6 +359,13 @@ if [[ -z "${USER_SET_AS_SUCCESS133_BANK_NAME}" && -z "${USER_SET_OMOMO_DATA_DIR}
 fi
 SOLID_SOURCE_BANK=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/${AS_SUCCESS133_BANK_NAME}"}
 SOLID_SOURCE_MAP=${OMOMO_OBJECT_MAP:-"${SOLID_SOURCE_BANK}/_clip_object_urdf_map.json"}
+case "${SOLID_SOURCE_BANK}:${SOLID_SOURCE_MAP}:${AS_SUCCESS133_BANK_NAME}:${CORL_SOLID80_BANK_NAME}" in
+  *primitiveproj*)
+    echo "[ERROR] Refusing primitiveproj object bank for solid AS distill." >&2
+    echo "[ERROR] Generate/use a mesh-physics bank instead." >&2
+    exit 2
+    ;;
+esac
 SOLID_CONTACT_EXPORT_NAME=${SOLID_CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
 DEFAULT_SOLID_CLIP_LIST="${SOLID_SOURCE_BANK}/clean80_strict_success_solid_no_falldown_clips.txt"
 if [[ -z "${SOLID_CLIP_LIST:-}" && -f "${DEFAULT_SOLID_CLIP_LIST}" ]]; then
@@ -481,6 +489,7 @@ import os
 import re
 import shutil
 import sys
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
@@ -599,7 +608,78 @@ for clip_id in sorted(selected):
     target_npz = target_bank / f"{clip_id}.npz"
     target_npz.symlink_to(os.path.relpath(source_npz, start=target_bank))
 
-filtered_payload = {"clips": {clip_id: selected[clip_id] for clip_id in sorted(selected)}}
+def absolutize_entry_paths(entry: object) -> object:
+    if not isinstance(entry, dict):
+        raw = str(entry).strip()
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (source_map.parent / candidate).resolve()
+        return str(candidate)
+    updated = dict(entry)
+    for key in ("object_urdf_path", "object_mesh_path"):
+        raw = str(updated.get(key, "")).strip()
+        if not raw:
+            continue
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (source_map.parent / candidate).resolve()
+        updated[key] = str(candidate)
+    return updated
+
+
+def validate_mesh_urdf(clip_id: str, entry: object) -> dict:
+    updated = absolutize_entry_paths(entry)
+    if not isinstance(updated, dict):
+        raise SystemExit(f"[ERROR] Solid object map entry for {clip_id} must be a dict with object_urdf_path.")
+
+    urdf_raw = str(updated.get("object_urdf_path", "")).strip()
+    if not urdf_raw:
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} is missing object_urdf_path.")
+    urdf = Path(urdf_raw).expanduser()
+    if not urdf.is_file():
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF is missing: {urdf}")
+
+    try:
+        root = ET.parse(urdf).getroot()
+    except Exception as exc:
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF is invalid: {urdf}: {exc}") from exc
+
+    primitive_tags = [
+        tag_name
+        for tag_name in ("box", "sphere", "cylinder", "capsule")
+        if root.findall(f".//{tag_name}")
+    ]
+    if primitive_tags:
+        raise SystemExit(
+            f"[ERROR] Solid clip {clip_id} object URDF contains primitive geometry {primitive_tags}: {urdf}. "
+            "Use mesh geometry for realmesh object training."
+        )
+
+    mesh_refs: list[Path] = []
+    for mesh_tag in root.findall(".//mesh"):
+        raw_mesh = str(mesh_tag.get("filename", "")).strip()
+        if not raw_mesh:
+            raise SystemExit(f"[ERROR] Solid clip {clip_id} has an empty mesh filename in {urdf}")
+        mesh_path = Path(raw_mesh).expanduser()
+        if not mesh_path.is_absolute():
+            mesh_path = (urdf.parent / mesh_path).resolve()
+        mesh_refs.append(mesh_path)
+
+    if not mesh_refs:
+        raise SystemExit(
+            f"[ERROR] Solid clip {clip_id} object URDF has no mesh geometry: {urdf}. "
+            "Refusing fallback box/cuboid URDFs for solid AS distill."
+        )
+
+    missing_meshes = [path for path in mesh_refs if not path.is_file()]
+    if missing_meshes:
+        preview = ", ".join(str(path) for path in missing_meshes[:6])
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF references missing mesh file(s): {preview}")
+
+    return updated
+
+
+filtered_payload = {"clips": {clip_id: validate_mesh_urdf(clip_id, selected[clip_id]) for clip_id in sorted(selected)}}
 (target_bank / "_clip_object_urdf_map.json").write_text(
     json.dumps(filtered_payload, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
@@ -651,6 +731,7 @@ export OMOMO_OBJECT_MAP="${SOLID_OBJECT_MAP}"
 export OMOMO_EXPECTED_TOTAL="${SOLID_SELECTED_CLIP_COUNT}"
 export RESUME_FROM_BOX_EXPECTED_TOTAL="${SOLID_SELECTED_CLIP_COUNT}"
 export AS_CONTACT_EXPORT_ROOT="${SOLID_BANK_DIR}/${SOLID_CONTACT_EXPORT_NAME}"
+export HOLOSOMA_REQUIRE_OBJECT_MESH_ASSETS="${HOLOSOMA_REQUIRE_OBJECT_MESH_ASSETS:-1}"
 
 echo "[INFO] solid_allowed_object_categories=${SOLID_ALLOWED_OBJECT_CATEGORIES}"
 echo "[INFO] source_bank=${SOLID_SOURCE_BANK}"

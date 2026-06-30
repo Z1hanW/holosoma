@@ -66,6 +66,15 @@ class MultGPUConfig(TypedDict):
     world_size: int
 
 
+def _distributed_barrier(dist_module: Any, distributed_conf: MultGPUConfig | None) -> None:
+    if distributed_conf is None or not dist_module.is_initialized():
+        return
+    try:
+        dist_module.barrier(device_ids=[int(distributed_conf["local_rank"])])
+    except TypeError:
+        dist_module.barrier()
+
+
 def _collect_object_bank_wandb_metadata() -> dict[str, int | str]:
     """Collect launcher-computed object-bank stats for W&B config/summary."""
     prefix = "HOLOSOMA_OBJECT_BANK_"
@@ -154,8 +163,12 @@ def configure_multi_gpu() -> MultGPUConfig | None:
     if gpu_global_rank >= gpu_world_size:
         raise ValueError(f"Global rank '{gpu_global_rank}' is greater than or equal to world size '{gpu_world_size}'.")
 
+    dist_backend = os.getenv("TORCH_DIST_BACKEND", "nccl").strip().lower()
+    if dist_backend not in ("nccl", "gloo"):
+        raise ValueError(f"Unsupported TORCH_DIST_BACKEND={dist_backend!r}; expected 'nccl' or 'gloo'.")
+
     if not torch.cuda.is_available():
-        raise RuntimeError("Distributed NCCL training requested but CUDA is not available.")
+        raise RuntimeError("Distributed CUDA training requested but CUDA is not available.")
 
     visible_gpu_count = torch.cuda.device_count()
     if gpu_local_rank >= visible_gpu_count:
@@ -168,12 +181,17 @@ def configure_multi_gpu() -> MultGPUConfig | None:
     dist_timeout_sec = int(os.getenv("TORCH_DIST_TIMEOUT_SEC", "600"))
     if dist_timeout_sec <= 0:
         raise ValueError(f"TORCH_DIST_TIMEOUT_SEC must be positive, got {dist_timeout_sec}.")
-    torch.distributed.init_process_group(
-        backend="nccl",
-        rank=gpu_global_rank,
-        world_size=gpu_world_size,
-        timeout=timedelta(seconds=dist_timeout_sec),
-    )
+    import inspect
+
+    init_kwargs: dict[str, Any] = {
+        "backend": dist_backend,
+        "rank": gpu_global_rank,
+        "world_size": gpu_world_size,
+        "timeout": timedelta(seconds=dist_timeout_sec),
+    }
+    if dist_backend == "nccl" and "device_id" in inspect.signature(torch.distributed.init_process_group).parameters:
+        init_kwargs["device_id"] = torch.device(f"cuda:{gpu_local_rank}")
+    torch.distributed.init_process_group(**init_kwargs)
 
     multi_gpu_config: MultGPUConfig = {
         "global_rank": gpu_global_rank,
@@ -181,6 +199,17 @@ def configure_multi_gpu() -> MultGPUConfig | None:
         "world_size": gpu_world_size,
     }
     logger.info(f"Running with multi-GPU parameters: {multi_gpu_config}")
+    logger.info(
+        "Distributed CUDA setup: global_rank={} local_rank={} local_world_size={} "
+        "visible_gpu_count={} current_device={} cuda_visible_devices={}",
+        gpu_global_rank,
+        gpu_local_rank,
+        gpu_local_world_size,
+        visible_gpu_count,
+        torch.cuda.current_device(),
+        os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    )
+    logger.info("Distributed process group backend: {}", dist_backend)
 
     return multi_gpu_config
 
@@ -564,8 +593,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 if config_path is not None:
                     wandb.save(str(config_path), base_path=experiment_save_dir)
 
-        if is_distributed and dist.is_initialized():
-            dist.barrier()
+        _distributed_barrier(dist, distributed_conf)
 
         env_target = tyro_config.env_class
 
@@ -590,7 +618,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                     max_steps=max_debug_steps,
                 )
             if is_distributed:
-                dist.barrier()
+                _distributed_barrier(dist, distributed_conf)
                 logger.info("Shutting down distributed processes...")
                 dist.destroy_process_group()
             if is_main_process and wandb_enabled:

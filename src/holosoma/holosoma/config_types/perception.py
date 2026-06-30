@@ -28,7 +28,7 @@ class PerceptionConfig:
     """Camera source for camera_depth output. Supported: 'far_tracking_warp', 'rendered', 'rendered_depth_sensor'."""
 
     object_geometry_mode: str | None = None
-    """Registered-object geometry mode for far_tracking_warp. Supported: 'mesh' or 'primitive'."""
+    """Registered-object geometry mode for far_tracking_warp. Only mesh URDF object geometry is supported."""
 
     camera_strict_warp: bool | None = None
     """When set, force strict warp camera ray convention instead of env-var defaults."""

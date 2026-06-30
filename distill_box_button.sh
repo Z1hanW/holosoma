@@ -971,14 +971,7 @@ CAMERA_WARP_DEPTH_OFFSET_STD=${CAMERA_WARP_DEPTH_OFFSET_STD:-}
 OBJECT_GEOMETRY_MODE_EXPLICIT=0
 [[ -n "${OBJECT_GEOMETRY_MODE+x}" ]] && OBJECT_GEOMETRY_MODE_EXPLICIT=1
 if [[ "${OBJECT_GEOMETRY_MODE_EXPLICIT}" -eq 0 ]]; then
-  if [[ "${HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT:-0}" =~ ^[0-9]+$ \
-        && "${HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT:-0}" -gt 0 \
-        && "${HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT:-0}" =~ ^[0-9]+$ \
-        && "${HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT:-0}" -eq 0 ]]; then
-    OBJECT_GEOMETRY_MODE=primitive
-  else
-    OBJECT_GEOMETRY_MODE=default
-  fi
+  OBJECT_GEOMETRY_MODE=default
 fi
 
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
@@ -1104,9 +1097,8 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
       HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="auto"
       ;;
     1|true|yes|on|primitive|primitives|box|cuboid)
-      OBJECT_GEOMETRY_MODE_NORM="primitive"
-      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
-      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      echo "[ERROR] OBJECT_GEOMETRY_MODE=primitive/box/cuboid is disabled. Use mesh URDF object geometry." >&2
+      exit 2
       ;;
     0|false|no|off|mesh|urdf|disable|disabled)
       OBJECT_GEOMETRY_MODE_NORM="mesh"
@@ -1114,7 +1106,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
       ;;
     *)
-      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: default/on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: default/off/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
       exit 2
       ;;
   esac

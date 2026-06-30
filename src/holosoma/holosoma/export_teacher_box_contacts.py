@@ -205,7 +205,6 @@ class ExportConfig:
     contact_voxel_size: float = 0.01
     success_position_threshold: float = 0.10
     max_rollout_steps: int | None = None
-    project_contact_to_mesh: bool = True
     require_final_position_success_for_success: bool = False
     require_no_middle_foot_object_contact_for_success: bool = False
     middle_foot_contact_start_frac: float = 0.20
@@ -361,24 +360,6 @@ def _write_text_list(path: Path, values: list[str]) -> None:
     path.write_text("\n".join(values) + ("\n" if values else ""), encoding="utf-8")
 
 
-def _project_point_to_box_surface(point_xyz: np.ndarray, extents_xyz: np.ndarray) -> np.ndarray:
-    point = np.asarray(point_xyz, dtype=np.float64).reshape(3)
-    half = 0.5 * np.asarray(extents_xyz, dtype=np.float64).reshape(3)
-
-    outside = np.abs(point) > half
-    if np.any(outside):
-        return np.clip(point, -half, half).astype(np.float32)
-
-    distances = half - np.abs(point)
-    axis = int(np.argmin(distances))
-    projected = point.copy()
-    sign = 1.0 if projected[axis] >= 0.0 else -1.0
-    if abs(projected[axis]) < 1.0e-8:
-        sign = 1.0
-    projected[axis] = sign * half[axis]
-    return projected.astype(np.float32)
-
-
 def _project_point_to_mesh_surface(point_xyz: np.ndarray, object_mesh: Any) -> np.ndarray:
     import trimesh  # type: ignore[import-not-found]
 
@@ -399,9 +380,12 @@ def _project_point_to_object_surface(
         except Exception as exc:
             raise RuntimeError(
                 f"Mesh contact projection failed for clip '{accumulator.clip_id}'. "
-                "Run with --no-project-contact-to-mesh only when primitive-box contact points are intended."
+                "Primitive-box contact projection is disabled."
             ) from exc
-    return _project_point_to_box_surface(point_xyz, accumulator.extents_xyz)
+    raise RuntimeError(
+        f"Mesh contact projection requested for clip '{accumulator.clip_id}', but no object mesh is loaded. "
+        "Primitive-box contact projection is disabled."
+    )
 
 
 def _quantize_point(point_xyz: np.ndarray, voxel_size: float) -> tuple[int, int, int]:
@@ -740,7 +724,7 @@ def _save_overlay_assets(
 
         box_mesh = trimesh.creation.box(extents=np.asarray(extents_xyz, dtype=np.float64))
         box_mesh.visual.vertex_colors = _BOX_COLOR
-        scene.add_geometry(box_mesh, node_name="primitive_box")
+        scene.add_geometry(box_mesh, node_name="object_extent_box")
 
         visual_region_points: dict[str, np.ndarray] = {}
         if region_points_by_label is not None:
@@ -1118,7 +1102,6 @@ def _make_clip_accumulator(
     motion_fps: float,
     clip_length: int,
     has_object: bool,
-    project_contact_to_mesh: bool,
 ) -> ClipAccumulator:
     clip_dir = output_dir / "clips" / f"{clip_idx:04d}_{_sanitize_name(clip_id)}"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -1188,7 +1171,7 @@ def _make_clip_accumulator(
         rollout_motion["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
         rollout_motion["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
     object_surface_mesh = None
-    if project_contact_to_mesh:
+    if has_object:
         object_surface_mesh = _load_object_overlay_mesh(
             clip_id=clip_id,
             object_name=object_name,
@@ -1197,8 +1180,7 @@ def _make_clip_accumulator(
         if object_surface_mesh is None:
             raise RuntimeError(
                 f"Mesh contact projection requested for clip '{clip_id}', but no mesh could be loaded from "
-                f"object URDF '{object_urdf_path}'. Run with --no-project-contact-to-mesh only when "
-                "primitive-box contact points are intended."
+                f"object URDF '{object_urdf_path}'. Primitive-box contact projection is disabled."
             )
     return ClipAccumulator(
         clip_id=clip_id,
@@ -1209,7 +1191,7 @@ def _make_clip_accumulator(
         env_id=env_id,
         extents_xyz=np.asarray(extents_xyz, dtype=np.float32),
         object_surface_mesh=object_surface_mesh,
-        contact_surface_projection="mesh" if object_surface_mesh is not None else "primitive_box",
+        contact_surface_projection="mesh",
         clip_dir=clip_dir,
         region_point_counts={spec["label"]: defaultdict(int) for spec in _REGION_SPECS.values()},
         region_force_sums={spec["label"]: 0.0 for spec in _REGION_SPECS.values()},
@@ -1969,7 +1951,6 @@ def _collect_batch(
             motion_fps=motion_fps,
             clip_length=int(clip_lengths[clip_idx]),
             has_object=bool(motion_command.motion.has_object),
-            project_contact_to_mesh=export_cfg.project_contact_to_mesh,
         )
         finished[env_id] = False
 

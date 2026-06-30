@@ -40,6 +40,17 @@ fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
+flag_enabled() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # Resolve wandb:// teacher checkpoint once per launcher (node), then pass a local absolute path to all ranks.
 if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
   TEACHER_CACHE_ROOT=${TEACHER_CACHE_ROOT:-"${SCRIPT_DIR}/.teacher_checkpoints"}
@@ -165,8 +176,8 @@ fi
 
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
-ACTOR_LR=${ACTOR_LR:-7e-5}
-CRITIC_LR=${CRITIC_LR:-7e-5}
+ACTOR_LR=${ACTOR_LR:-1e-3}
+CRITIC_LR=${CRITIC_LR:-1e-3}
 # Distillation is sensitive to exploration noise; keep student near-deterministic by default.
 ACTOR_MIN_NOISE_STD=${ACTOR_MIN_NOISE_STD:-0.01}
 INIT_NOISE_STD=${INIT_NOISE_STD:-0.01}
@@ -266,6 +277,7 @@ if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_E
 fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} nnodes=${NNODES} nproc_per_node=${NPROC} global_world_size=${GLOBAL_WORLD_SIZE} per_gpu_envs=${PER_GPU_ENVS}"
+echo "[INFO] learning_rate actor=${ACTOR_LR} critic=${CRITIC_LR}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
 echo "[INFO] physx_gpu_buffers found_lost_pairs=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY} found_lost_aggregate_pairs=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} total_aggregate_pairs=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} collision_stack=${PHYSX_GPU_COLLISION_STACK_SIZE}"
 echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"
@@ -289,6 +301,12 @@ run_distill_stage() {
   echo "[INFO]   reset_noise_scale=${stage_reset_noise_scale}"
   echo "[INFO]   distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC}"
 
+  local train_entry="src/holosoma/holosoma/train_agent.py"
+  if flag_enabled "${HOLOSOMA_RANK_VISIBLE_DEVICES:-0}"; then
+    train_entry="src/holosoma/holosoma/train_agent_rank_visible.py"
+  fi
+  echo "[INFO]   train_entry=${train_entry} rank_visible_devices=${HOLOSOMA_RANK_VISIBLE_DEVICES:-0}"
+
   local cmd=(
     torchrun
     --nnodes="${NNODES}"
@@ -297,7 +315,7 @@ run_distill_stage() {
     --nproc_per_node="${NPROC}"
     --max_restarts="${MAX_RESTARTS}"
     --master_port="${stage_master_port}"
-    src/holosoma/holosoma/train_agent.py
+    "${train_entry}"
     "exp:${EXP}"
     --algo.config.distill.enabled="${DISTILL_ENABLED}"
     --algo.config.distill.mode="${DISTILL_MODE}"
@@ -381,6 +399,7 @@ run_distill_stage() {
     printf '[INFO] final_train_command:'
     printf ' %q' \
       HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
+      HOLOSOMA_RANK_VISIBLE_DEVICES="${HOLOSOMA_RANK_VISIBLE_DEVICES:-0}" \
       TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \
       CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
       "${cmd[@]}"
@@ -391,6 +410,7 @@ run_distill_stage() {
   fi
 
   HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
+  HOLOSOMA_RANK_VISIBLE_DEVICES="${HOLOSOMA_RANK_VISIBLE_DEVICES:-0}" \
   TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   "${cmd[@]}"

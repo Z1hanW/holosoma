@@ -1,14 +1,39 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 
 import torch
 from torch import nn
 from torch.distributions import Normal
+from loguru import logger
 
 from holosoma.config_types.algo import ModuleConfig
 
 from .modules import BaseModule, PerceptionTimeGRU
+
+
+def _debug_actor_log(message: str, *args) -> None:
+    if os.environ.get("HOLOSOMA_DEBUG_ACTOR", "").lower() in ("", "0", "false", "no"):
+        return
+    rank = os.environ.get("RANK", "?")
+    if os.environ.get("HOLOSOMA_DEBUG_ACTOR_ALL", "").lower() in ("", "0", "false", "no") and rank not in (
+        "0",
+        "?",
+    ):
+        return
+    logger.info("HeartbeatActor rank {} pid {} " + message, rank, os.getpid(), *args)
+
+
+def _tensor_debug_summary(tensor: torch.Tensor | None) -> str:
+    if tensor is None:
+        return "None"
+    is_inference = tensor.is_inference() if hasattr(tensor, "is_inference") else False
+    return (
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
+        f"contiguous={tensor.is_contiguous()} requires_grad={tensor.requires_grad} "
+        f"inference={is_inference}"
+    )
 
 
 class PPOActor(nn.Module):
@@ -96,8 +121,15 @@ class PPOActor(nn.Module):
         return torch.clamp(scale, min=1e-6)
 
     def update_distribution(self, actor_obs, extra_input: torch.Tensor | None = None):
+        _debug_actor_log(
+            "update_distribution begin actor_obs={} extra_input={}",
+            tuple(actor_obs.shape),
+            None if extra_input is None else tuple(extra_input.shape),
+        )
         mean = self.actor(actor_obs, extra_input=extra_input)
+        _debug_actor_log("update_distribution actor forward finished mean={}", tuple(mean.shape))
         mean = torch.nan_to_num(mean, nan=0.0, posinf=1e3, neginf=-1e3)
+        _debug_actor_log("update_distribution nan_to_num finished")
         safe_std = self._safe_std()
         if self.min_noise_std:
             clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
@@ -115,23 +147,63 @@ class PPOActor(nn.Module):
         else:
             scale = self._sanitize_scale(self._expand_std_like(safe_std, mean))
             self.distribution = Normal(mean, scale)
+        _debug_actor_log("update_distribution normal built loc={} scale={}", tuple(mean.shape), tuple(scale.shape))
 
-    def act(self, policy_state_dict):
-        extra_input = policy_state_dict.get("extra_actor_input")
-        self.update_distribution(policy_state_dict["actor_obs"], extra_input=extra_input)
+    def _sanitize_distribution(self):
         # Defensive guard: rebuild distribution with sanitized scale if any corruption remains.
         if self.distribution is not None:
+            _debug_actor_log("sanitize_distribution begin")
             loc = torch.nan_to_num(self.distribution.loc, nan=0.0, posinf=1e3, neginf=-1e3)
             scale = self._sanitize_scale(self.distribution.scale)
             self.distribution = Normal(loc, scale)
-        return self.distribution.sample()
+            _debug_actor_log("sanitize_distribution finished")
+
+    def update_distribution_from_policy_state(self, policy_state_dict):
+        extra_input = policy_state_dict.get("extra_actor_input")
+        self.update_distribution(policy_state_dict["actor_obs"], extra_input=extra_input)
+        self._sanitize_distribution()
+
+    def act(self, policy_state_dict):
+        _debug_actor_log("act begin")
+        extra_input = policy_state_dict.get("extra_actor_input")
+        self.update_distribution(policy_state_dict["actor_obs"], extra_input=extra_input)
+        self._sanitize_distribution()
+        _debug_actor_log("act sample begin")
+        sample = self.distribution.sample()
+        _debug_actor_log("act sample finished sample={}", tuple(sample.shape))
+        return sample
 
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, policy_state_dict):
         extra_input = policy_state_dict.get("extra_actor_input")
-        return self.actor(policy_state_dict["actor_obs"], extra_input=extra_input)
+        actor_obs = policy_state_dict["actor_obs"]
+        _debug_actor_log(
+            "act_inference base begin actor_obs={} extra_input={} grad_enabled={} inference_mode={}",
+            tuple(actor_obs.shape),
+            None if extra_input is None else tuple(extra_input.shape),
+            torch.is_grad_enabled(),
+            torch.is_inference_mode_enabled(),
+        )
+        actions = self.actor(actor_obs, extra_input=extra_input)
+        _debug_actor_log("act_inference base actor forward finished actions={}", tuple(actions.shape))
+        return actions
+
+    @property
+    def supports_flow_matching(self) -> bool:
+        return bool(getattr(self.actor_module, "supports_flow_matching", False))
+
+    def flow_matching_loss(self, policy_state_dict, target_actions, loss_fn=torch.nn.functional.mse_loss):
+        if not self.supports_flow_matching:
+            raise ValueError("flow_matching_loss requested for a non-flow actor.")
+        extra_input = policy_state_dict.get("extra_actor_input")
+        return self.actor_module.flow_matching_loss(
+            policy_state_dict["actor_obs"],
+            target_actions,
+            extra_input=extra_input,
+            loss_fn=loss_fn,
+        )
 
     def to_cpu(self):
         self.actor = deepcopy(self.actor).to("cpu")
@@ -206,8 +278,15 @@ class PPOActorEncoder(PPOActor):
             perception_obs = policy_state_dict[self.perception_input_name]
         else:
             raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
+        _debug_actor_log(
+            "{} perception obs selected key={} {}",
+            source,
+            self.perception_input_name,
+            _tensor_debug_summary(perception_obs),
+        )
         if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
             perception_obs = perception_obs.clone()
+            _debug_actor_log("{} perception obs cloned from inference {}", source, _tensor_debug_summary(perception_obs))
         return perception_obs
 
     def _get_terrain_transformer_input(
@@ -250,11 +329,21 @@ class PPOActorEncoder(PPOActor):
         return input_actor, None
 
     def _get_input(self, actor_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+        _debug_actor_log(
+            "_get_input enter module_type={} module_inputs={} encoder_input={} perception_key={} perception_encoder_type={} actor_obs={}",
+            self.module_type,
+            self.module_input_name,
+            self.encoder_input_name,
+            self.perception_input_name,
+            self.perception_encoder_type,
+            _tensor_debug_summary(actor_obs),
+        )
         if actor_obs.shape[-1] != self.actor_module.input_dim:
             raise ValueError(f"Actor Obs must be {self.actor_module.input_dim}, got {actor_obs.shape[-1]}")
         if self.module_type == "TerrainTransformerObsTokenEncoder":
             return self._get_terrain_transformer_input(actor_obs, policy_state_dict)
 
+        _debug_actor_log("_get_input encoder selection begin")
         self.encoder_obs = (
             actor_obs[..., self.actor_module.input_indices_dict[self.encoder_input_name]]
             if self.encoder_input_name
@@ -273,6 +362,7 @@ class PPOActorEncoder(PPOActor):
                 if self.actor_module.encoder is not None and self.encoder_obs is not None
                 else self.encoder_obs
             )
+        _debug_actor_log("_get_input encoder selection finished actor_encoder_obs={}", _tensor_debug_summary(self.actor_encoder_obs))
 
         parts = []
         if self.actor_encoder_obs is not None:
@@ -280,6 +370,11 @@ class PPOActorEncoder(PPOActor):
         perception_encoder = getattr(self.actor_module, "perception_encoder", None)
         perception_embed = None
         external_extra = policy_state_dict.get("extra_actor_input") if policy_state_dict else None
+        _debug_actor_log(
+            "_get_input perception branch check perception_encoder={} external_extra={}",
+            type(perception_encoder).__name__ if perception_encoder is not None else None,
+            _tensor_debug_summary(external_extra),
+        )
         if self.perception_input_name:
             if self.perception_encoder_type == "time_gru":
                 if external_extra is not None:
@@ -295,12 +390,25 @@ class PPOActorEncoder(PPOActor):
                         perception_obs = perception_obs.clone()
                     perception_embed = self.perception_time_gru.step(perception_obs)
             elif perception_encoder is not None:
+                _debug_actor_log("_get_input perception obs fetch begin")
                 perception_obs = self._get_perception_obs(actor_obs, policy_state_dict, source="actor")
+                if not perception_obs.is_contiguous():
+                    _debug_actor_log("_get_input perception obs contiguous copy begin {}", _tensor_debug_summary(perception_obs))
+                    perception_obs = perception_obs.contiguous()
+                    _debug_actor_log("_get_input perception obs contiguous copy finished {}", _tensor_debug_summary(perception_obs))
+                _debug_actor_log(
+                    "_get_input perception encoder begin encoder={} obs={}",
+                    type(perception_encoder).__name__,
+                    _tensor_debug_summary(perception_obs),
+                )
                 perception_embed = perception_encoder(perception_obs)
+                _debug_actor_log("_get_input perception encoder finished embed={}", _tensor_debug_summary(perception_embed))
                 if hasattr(perception_embed, "is_inference") and perception_embed.is_inference():
                     perception_embed = perception_embed.clone()
+                    _debug_actor_log("_get_input perception embed cloned {}", _tensor_debug_summary(perception_embed))
 
         if self.module_input_name:
+            _debug_actor_log("_get_input actor_state cat begin")
             self.actor_state_obs = torch.cat(
                 [
                     actor_obs[..., self.actor_module.input_indices_dict[actor_input_name]]
@@ -308,6 +416,7 @@ class PPOActorEncoder(PPOActor):
                 ],
                 -1,
             )
+            _debug_actor_log("_get_input actor_state cat finished {}", _tensor_debug_summary(self.actor_state_obs))
             parts.append(self.actor_state_obs)
 
         supports_extra = getattr(self.actor_module.module, "supports_extra_input", False)
@@ -317,25 +426,72 @@ class PPOActorEncoder(PPOActor):
         if len(parts) == 1:
             input_actor = parts[0]
         else:
+            _debug_actor_log("_get_input final cat begin parts={}", [_tensor_debug_summary(part) for part in parts])
             input_actor = torch.cat(parts, dim=-1)
+            _debug_actor_log("_get_input final cat finished {}", _tensor_debug_summary(input_actor))
 
         extra_input = perception_embed if supports_extra else None
         if external_extra is not None and external_extra is not perception_embed:
             if hasattr(external_extra, "is_inference") and external_extra.is_inference():
                 external_extra = external_extra.clone()
             if supports_extra:
+                _debug_actor_log(
+                    "_get_input external extra cat begin extra_input={} external_extra={}",
+                    _tensor_debug_summary(extra_input),
+                    _tensor_debug_summary(external_extra),
+                )
                 extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
+                _debug_actor_log("_get_input external extra cat finished {}", _tensor_debug_summary(extra_input))
         return input_actor, extra_input
 
     def act(self, policy_state_dict):
         actor_obs = policy_state_dict["actor_obs"]
+        _debug_actor_log("encoder act _get_input begin actor_obs={}", tuple(actor_obs.shape))
         input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        _debug_actor_log(
+            "encoder act _get_input finished input_actor={} extra_input={}",
+            tuple(input_actor.shape),
+            None if extra_input is None else tuple(extra_input.shape),
+        )
         return super().act({"actor_obs": input_actor, "extra_actor_input": extra_input})
+
+    def update_distribution_from_policy_state(self, policy_state_dict):
+        actor_obs = policy_state_dict["actor_obs"]
+        _debug_actor_log("encoder update _get_input begin actor_obs={}", tuple(actor_obs.shape))
+        input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        _debug_actor_log(
+            "encoder update _get_input finished input_actor={} extra_input={}",
+            tuple(input_actor.shape),
+            None if extra_input is None else tuple(extra_input.shape),
+        )
+        return super().update_distribution_from_policy_state(
+            {"actor_obs": input_actor, "extra_actor_input": extra_input}
+        )
 
     def act_inference(self, policy_state_dict):
         actor_obs = policy_state_dict["actor_obs"]
+        _debug_actor_log(
+            "encoder act_inference _get_input begin actor_obs={} grad_enabled={} inference_mode={}",
+            tuple(actor_obs.shape),
+            torch.is_grad_enabled(),
+            torch.is_inference_mode_enabled(),
+        )
         input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        _debug_actor_log(
+            "encoder act_inference _get_input finished input_actor={} extra_input={}",
+            tuple(input_actor.shape),
+            None if extra_input is None else tuple(extra_input.shape),
+        )
         return super().act_inference({"actor_obs": input_actor, "extra_actor_input": extra_input})
+
+    def flow_matching_loss(self, policy_state_dict, target_actions, loss_fn=torch.nn.functional.mse_loss):
+        actor_obs = policy_state_dict["actor_obs"]
+        input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        return super().flow_matching_loss(
+            {"actor_obs": input_actor, "extra_actor_input": extra_input},
+            target_actions,
+            loss_fn=loss_fn,
+        )
 
 
 class PPOCriticEncoder(PPOCritic):

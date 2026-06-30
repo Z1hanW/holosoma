@@ -129,6 +129,18 @@ class LayerConfig:
     extra_input_to_hidden: bool = False
     """Whether to add an extra input projection to the first hidden layer."""
 
+    flow_integration_steps: int = 4
+    """Number of Euler integration steps used by flow actor inference."""
+
+    flow_train_noise_std: float = 1.0
+    """Standard deviation of the base Gaussian used for flow-matching targets."""
+
+    flow_time_epsilon: float = 1e-4
+    """Minimum distance from 0/1 when sampling flow-matching time values."""
+
+    flow_inference_noise_std: float = 0.0
+    """Initial noise std for flow actor inference; 0 keeps deployment deterministic."""
+
 
 @dataclass(frozen=True)
 class ModuleConfig:
