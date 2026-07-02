@@ -162,9 +162,9 @@ TEACHER_CHECKPOINT=logs/holosomatest/20260629_043623-ip-10-0-73-59_g1_29dof_wbt_
 ./csp_depth_distill.sh
 ```
 
-The script defaults to 8 GPUs and 1024 envs per GPU. Depth camera ray-casting is much heavier than the height scan, so this is intentionally lower than the 4096 env/GPU tracking default; override with `ENVS_PER_GPU=4096` only after confirming memory headroom. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.
+The script defaults to 8 GPUs and 1024 envs per GPU. Depth camera ray-casting is much heavier than the height scan, so this is intentionally lower than the 4096 env/GPU tracking default; override with `ENVS_PER_GPU=4096` only after confirming memory headroom. In hybrid mode, `NUM_ITERATIONS=20000` means 20000 outer PPO/DAgger updates, not 20000 single physics steps; each update collects `NUM_STEPS_PER_UPDATE=24` physics steps per env. `SAVE_INTERVAL` and `LOGGING_INTERVAL` are also counted in outer updates. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.
 
-Hybrid distillation defaults to `NUM_STEPS_PER_UPDATE=24`, `NUM_LEARNING_EPOCHS=4`, `NUM_MINI_BATCHES=4`, `GAMMA=0.998`, `GAE_LAMBDA=0.95`, `DAGGER_LOSS_COEF=10.0`, and ramps `ppo_coeff` from `0.0` to `0.9` between `PPO_START_STEP=0` and `DAGGER_END_STEP=10000`. The depth encoder uses separate weight decay `DEPTH_WEIGHT_DECAY=1e-2`, matching the far-tracking split between depth backbone and MLP/critic parameters.
+Hybrid distillation defaults now mirror far-tracking more closely: `NUM_STEPS_PER_UPDATE=24`, `NUM_LEARNING_EPOCHS=2`, `NUM_MINI_BATCHES=96`, `INIT_NOISE_STD=0.01`, `GAMMA=0.99`, `GAE_LAMBDA=0.95`, `ENTROPY_COEF=0.001`, `DAGGER_LOSS_COEF=10.0`, and ramps `ppo_coeff` from `0.0` to `0.9` between `PPO_START_EPOCH=0` and `DAGGER_END_EPOCH=10000`. The depth encoder uses separate weight decay `DEPTH_WEIGHT_DECAY=1e-2`, matching the far-tracking split between depth backbone and MLP/critic parameters. Legacy env vars `PPO_START_STEP` and `DAGGER_END_STEP` are still accepted as fallbacks, but the schedule is update/epoch based.
 
 Run the same hybrid distillation across two remote nodes, 8 GPUs per node, with 1024 envs per GPU:
 

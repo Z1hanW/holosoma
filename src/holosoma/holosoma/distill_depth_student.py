@@ -181,7 +181,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--teacher-checkpoint", required=True, help="Local checkpoint path or wandb:// checkpoint URI.")
     parser.add_argument("--num-envs", type=int, default=8192, help="Total env count across all GPUs.")
-    parser.add_argument("--iterations", type=int, default=20000, help="Number of distillation rollout steps.")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=20000,
+        help="BC rollout steps, or hybrid learning iterations/updates.",
+    )
     parser.add_argument("--training-mode", default="hybrid", choices=["hybrid", "bc"])
     parser.add_argument("--save-interval", type=int, default=500, help="Checkpoint save interval in distill steps.")
     parser.add_argument("--logging-interval", type=int, default=25, help="Metric logging interval in distill steps.")
@@ -191,20 +196,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--student-rollout-prob", type=float, default=0.0)
     parser.add_argument("--student-hidden-dims", type=int, nargs="+", default=[2048, 1024, 512, 256, 128])
-    parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[1024, 512, 256])
+    parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[512, 256, 128])
     parser.add_argument("--depth-latent-dim", type=int, default=32)
-    parser.add_argument("--init-noise-std", type=float, default=0.1)
+    parser.add_argument("--init-noise-std", type=float, default=0.01)
     parser.add_argument("--num-steps-per-update", type=int, default=24)
-    parser.add_argument("--num-learning-epochs", type=int, default=4)
-    parser.add_argument("--num-mini-batches", type=int, default=4)
+    parser.add_argument("--num-learning-epochs", type=int, default=2)
+    parser.add_argument("--num-mini-batches", type=int, default=96)
     parser.add_argument("--clip-param", type=float, default=0.2)
-    parser.add_argument("--gamma", type=float, default=0.998)
+    parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--value-loss-coef", type=float, default=1.0)
-    parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--entropy-coef", type=float, default=0.001)
     parser.add_argument("--dagger-loss-coef", type=float, default=10.0)
-    parser.add_argument("--ppo-start-step", type=int, default=0)
-    parser.add_argument("--dagger-end-step", type=int, default=10000)
+    parser.add_argument("--ppo-start-epoch", "--ppo-start-step", dest="ppo_start_epoch", type=int, default=0)
+    parser.add_argument("--dagger-end-epoch", "--dagger-end-step", dest="dagger_end_epoch", type=int, default=10000)
     parser.add_argument("--depth-height", type=int, default=58)
     parser.add_argument("--depth-width", type=int, default=87)
     parser.add_argument("--depth-min-range", type=float, default=0.3)
@@ -577,13 +582,13 @@ def _normal_entropy_per_env(std: Any, batch_size: int) -> Any:
     return entropy.expand(batch_size)
 
 
-def _ppo_coeff(global_step: int, args: argparse.Namespace) -> float:
-    if global_step < args.ppo_start_step:
+def _ppo_coeff(update_idx: int, args: argparse.Namespace) -> float:
+    if update_idx < args.ppo_start_epoch:
         return 0.0
-    if global_step >= args.dagger_end_step:
+    if update_idx >= args.dagger_end_epoch:
         return 0.9
-    total_steps = max(1, args.dagger_end_step - args.ppo_start_step)
-    return min((global_step - args.ppo_start_step) / total_steps, 0.9)
+    total_epochs = max(1, args.dagger_end_epoch - args.ppo_start_epoch)
+    return min((update_idx - args.ppo_start_epoch) / total_epochs, 0.9)
 
 
 def _compute_gae(rewards: Any, dones: Any, values: Any, last_value: Any, gamma: float, lam: float) -> tuple[Any, Any]:
@@ -852,9 +857,9 @@ def main() -> None:
                         )
         else:
             global_step = 0
-            next_save_step = args.save_interval if args.save_interval > 0 else None
-            while global_step < args.iterations:
-                rollout_len = min(args.num_steps_per_update, args.iterations - global_step)
+            for update_idx in range(args.iterations):
+                iteration = update_idx + 1
+                rollout_len = args.num_steps_per_update
                 proprio_buffer: list[Any] = []
                 depth_buffer: list[Any] = []
                 critic_obs_buffer: list[Any] = []
@@ -920,7 +925,7 @@ def main() -> None:
                 flat_advantages = _flatten_time_env(advantages.detach())
                 flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-8)
 
-                ppo_coeff = _ppo_coeff(global_step, args)
+                ppo_coeff = _ppo_coeff(update_idx, args)
                 _set_log_std_lr(optimizer, args, ppo_coeff)
                 total_samples = flat_actions.shape[0]
                 mini_batch_size = max(1, total_samples // args.num_mini_batches)
@@ -996,7 +1001,7 @@ def main() -> None:
                             approx_kl_sum += float((flat_old_log_prob[batch_idx] - batch_log_prob.detach()).mean().item())
                             update_count += 1
 
-                if global_step % args.logging_interval < rollout_len or global_step == rollout_len:
+                if iteration % args.logging_interval == 0 or iteration == 1:
                     denom = max(1, update_count)
                     total_loss_value = _distributed_mean(torch.tensor(total_loss_sum / denom, device=device), distributed_conf)
                     value_loss_value = _distributed_mean(torch.tensor(value_loss_sum / denom, device=device), distributed_conf)
@@ -1015,6 +1020,7 @@ def main() -> None:
                         elapsed_s = time.time() - start_time
                         metrics = {
                             "global_step": global_step,
+                            "iteration": iteration,
                             "distill/loss_total": total_loss_value,
                             "distill/dagger_loss": dagger_loss_value,
                             "distill/action_l1": action_l1,
@@ -1026,24 +1032,25 @@ def main() -> None:
                             "rollout/reward_mean": reward_value,
                             "rollout/done_rate": done_value,
                             "rollout/action_std_mean": action_std_value,
+                            "rollout/global_step": global_step,
                             "time/elapsed_s": elapsed_s,
                         }
                         logger.info(
-                            f"iter={global_step:07d} mode=hybrid loss={total_loss_value:.6f} "
+                            f"iter={iteration:07d} global_step={global_step:07d} mode=hybrid loss={total_loss_value:.6f} "
                             f"dagger={dagger_loss_value:.6f} ppo_coeff={ppo_coeff:.3f} "
                             f"value={value_loss_value:.6f} surrogate={surrogate_loss_value:.6f} "
                             f"action_l1={action_l1:.6f} reward={reward_value:.4f} done={done_value:.4f}"
                         )
                         if wandb_run is not None:
-                            wandb_run.log(metrics, step=global_step)
+                            wandb_run.log(metrics, step=iteration)
 
-                if is_main_process and next_save_step is not None and global_step >= next_save_step:
-                    ckpt_path = log_dir / f"student_{global_step:07d}.pt"
+                if is_main_process and args.save_interval > 0 and iteration % args.save_interval == 0:
+                    ckpt_path = log_dir / f"student_{iteration:07d}.pt"
                     save_student_checkpoint(
                         ckpt_path,
                         student,
                         optimizer,
-                        global_step,
+                        iteration,
                         args,
                         distill_config,
                         teacher_checkpoint,
@@ -1054,14 +1061,12 @@ def main() -> None:
                     )
                     if args.export_onnx:
                         export_student_onnx(
-                            log_dir / f"student_{global_step:07d}.onnx",
+                            log_dir / f"student_{iteration:07d}.onnx",
                             student,
                             proprio_dim,
                             depth_shape,
                             device,
                         )
-                    while next_save_step <= global_step:
-                        next_save_step += args.save_interval
 
         if is_main_process:
             final_path = log_dir / f"student_{args.iterations:07d}.pt"
