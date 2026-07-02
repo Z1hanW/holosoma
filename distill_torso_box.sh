@@ -278,6 +278,7 @@ fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} nnodes=${NNODES} nproc_per_node=${NPROC} global_world_size=${GLOBAL_WORLD_SIZE} per_gpu_envs=${PER_GPU_ENVS}"
 echo "[INFO] learning_rate actor=${ACTOR_LR} critic=${CRITIC_LR}"
+echo "[INFO] hybrid_flags supervised_only=${HOLOSOMA_DAGGER_SUPERVISED_ONLY:-<unset>} actor_only_step=${HOLOSOMA_DAGGER_SUPERVISED_ACTOR_ONLY_STEP:-<unset>} skip_critic_weight_sync=${HOLOSOMA_SKIP_CRITIC_WEIGHT_SYNC:-<unset>} skip_loss_dict_accumulation=${HOLOSOMA_SKIP_LOSS_DICT_ACCUMULATION:-<unset>}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
 echo "[INFO] physx_gpu_buffers found_lost_pairs=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY} found_lost_aggregate_pairs=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} total_aggregate_pairs=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} collision_stack=${PHYSX_GPU_COLLISION_STACK_SIZE}"
 echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"
