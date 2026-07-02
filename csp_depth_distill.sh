@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill the latest terrain-aware tracking teacher into a depth-based student.
+# Distill a trained PPO/FastSAC tracking teacher into a depth-based student.
 # The rollout is a true IsaacSim/PhysX rollout: teacher actions step the env,
 # while the student learns to match those actions from proprioception + depth.
 
@@ -55,9 +55,10 @@ DEPTH_MAX_RANGE="${DEPTH_MAX_RANGE:-2.0}"
 DEPTH_HORIZONTAL_FOV_DEG="${DEPTH_HORIZONTAL_FOV_DEG:-101.41}"
 DEPTH_CAMERA_BODY_NAME="${DEPTH_CAMERA_BODY_NAME:-torso_link}"
 DEPTH_CAMERA_DEBUG_VIS="${DEPTH_CAMERA_DEBUG_VIS:-0}"
+DISTILL_TAG="${DISTILL_TAG:-tracking}"
 
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${1:-}}"
-RUN_NAME="${RUN_NAME:-${HOSTNAME_SHORT}_g1_29dof_depth_student_distill_motionstairs16_${NUM_GPUS}gpu_${ENVS_PER_GPU}env_${TIMESTAMP}}"
+RUN_NAME="${RUN_NAME:-${HOSTNAME_SHORT}_g1_29dof_depth_student_distill_${DISTILL_TAG}_${NUM_GPUS}gpu_${ENVS_PER_GPU}env_${TIMESTAMP}}"
 SESSION="${SESSION:-csp_depth_distill_${TIMESTAMP}}"
 LOG_DIR="${LOG_DIR:-logs/run_commands}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/${SESSION}.log}"
@@ -72,7 +73,7 @@ if [[ "${1:-}" != "--run" && "${RUN_IN_TMUX:-1}" == "1" ]]; then
   mkdir -p "${LOG_DIR}"
   printf "%s\n" "${RUN_NAME}" > "${LOG_DIR}/${SESSION}.run_name"
 
-  TMUX_ENV="RUN_IN_TMUX=0 TIMESTAMP=$(quote "${TIMESTAMP}") HOSTNAME_SHORT=$(quote "${HOSTNAME_SHORT}") WANDB_ENTITY=$(quote "${WANDB_ENTITY}") WANDB_PROJECT=$(quote "${WANDB_PROJECT}") NUM_GPUS=$(quote "${NUM_GPUS}") ENVS_PER_GPU=$(quote "${ENVS_PER_GPU}") TOTAL_ENVS=$(quote "${TOTAL_ENVS}") NUM_ITERATIONS=$(quote "${NUM_ITERATIONS}") SAVE_INTERVAL=$(quote "${SAVE_INTERVAL}") LOGGING_INTERVAL=$(quote "${LOGGING_INTERVAL}") LEARNING_RATE=$(quote "${LEARNING_RATE}") WEIGHT_DECAY=$(quote "${WEIGHT_DECAY}") MAX_GRAD_NORM=$(quote "${MAX_GRAD_NORM}") STUDENT_ROLLOUT_PROB=$(quote "${STUDENT_ROLLOUT_PROB}") DEPTH_HEIGHT=$(quote "${DEPTH_HEIGHT}") DEPTH_WIDTH=$(quote "${DEPTH_WIDTH}") RAW_DEPTH_HEIGHT=$(quote "${RAW_DEPTH_HEIGHT}") RAW_DEPTH_WIDTH=$(quote "${RAW_DEPTH_WIDTH}") DEPTH_MIN_RANGE=$(quote "${DEPTH_MIN_RANGE}") DEPTH_MAX_RANGE=$(quote "${DEPTH_MAX_RANGE}") DEPTH_HORIZONTAL_FOV_DEG=$(quote "${DEPTH_HORIZONTAL_FOV_DEG}") DEPTH_CAMERA_BODY_NAME=$(quote "${DEPTH_CAMERA_BODY_NAME}") DEPTH_CAMERA_DEBUG_VIS=$(quote "${DEPTH_CAMERA_DEBUG_VIS}") TEACHER_CHECKPOINT=$(quote "${TEACHER_CHECKPOINT}") RUN_NAME=$(quote "${RUN_NAME}") SESSION=$(quote "${SESSION}") LOG_DIR=$(quote "${LOG_DIR}") LOG_FILE=$(quote "${LOG_FILE}") MASTER_PORT=$(quote "${MASTER_PORT}")"
+  TMUX_ENV="RUN_IN_TMUX=0 TIMESTAMP=$(quote "${TIMESTAMP}") HOSTNAME_SHORT=$(quote "${HOSTNAME_SHORT}") WANDB_ENTITY=$(quote "${WANDB_ENTITY}") WANDB_PROJECT=$(quote "${WANDB_PROJECT}") NUM_GPUS=$(quote "${NUM_GPUS}") ENVS_PER_GPU=$(quote "${ENVS_PER_GPU}") TOTAL_ENVS=$(quote "${TOTAL_ENVS}") NUM_ITERATIONS=$(quote "${NUM_ITERATIONS}") SAVE_INTERVAL=$(quote "${SAVE_INTERVAL}") LOGGING_INTERVAL=$(quote "${LOGGING_INTERVAL}") LEARNING_RATE=$(quote "${LEARNING_RATE}") WEIGHT_DECAY=$(quote "${WEIGHT_DECAY}") MAX_GRAD_NORM=$(quote "${MAX_GRAD_NORM}") STUDENT_ROLLOUT_PROB=$(quote "${STUDENT_ROLLOUT_PROB}") DEPTH_HEIGHT=$(quote "${DEPTH_HEIGHT}") DEPTH_WIDTH=$(quote "${DEPTH_WIDTH}") RAW_DEPTH_HEIGHT=$(quote "${RAW_DEPTH_HEIGHT}") RAW_DEPTH_WIDTH=$(quote "${RAW_DEPTH_WIDTH}") DEPTH_MIN_RANGE=$(quote "${DEPTH_MIN_RANGE}") DEPTH_MAX_RANGE=$(quote "${DEPTH_MAX_RANGE}") DEPTH_HORIZONTAL_FOV_DEG=$(quote "${DEPTH_HORIZONTAL_FOV_DEG}") DEPTH_CAMERA_BODY_NAME=$(quote "${DEPTH_CAMERA_BODY_NAME}") DEPTH_CAMERA_DEBUG_VIS=$(quote "${DEPTH_CAMERA_DEBUG_VIS}") DISTILL_TAG=$(quote "${DISTILL_TAG}") TEACHER_CHECKPOINT=$(quote "${TEACHER_CHECKPOINT}") RUN_NAME=$(quote "${RUN_NAME}") SESSION=$(quote "${SESSION}") LOG_DIR=$(quote "${LOG_DIR}") LOG_FILE=$(quote "${LOG_FILE}") MASTER_PORT=$(quote "${MASTER_PORT}")"
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     TMUX_ENV="CUDA_VISIBLE_DEVICES=$(quote "${CUDA_VISIBLE_DEVICES}") ${TMUX_ENV}"
   fi
@@ -86,6 +87,7 @@ if [[ "${1:-}" != "--run" && "${RUN_IN_TMUX:-1}" == "1" ]]; then
   echo "  master_port: ${MASTER_PORT}"
   echo "  total_envs: ${TOTAL_ENVS} (${NUM_GPUS} x ${ENVS_PER_GPU})"
   echo "  teacher_checkpoint: ${TEACHER_CHECKPOINT}"
+  echo "  distill_tag: ${DISTILL_TAG}"
   echo "  depth: ${DEPTH_HEIGHT}x${DEPTH_WIDTH} from raw ${RAW_DEPTH_HEIGHT}x${RAW_DEPTH_WIDTH}"
   echo "  physics_rollout: true"
   exit 0

@@ -140,15 +140,24 @@ For multi-terrain debugging, the script defaults `USE_ADAPTIVE_TIMESTEPS_SAMPLER
 
 ### CSP Depth Student Distillation
 
-`csp_depth_distill.sh` distills a trained terrain-aware FastSAC tracking teacher into a depth-based student. This is a true physics rollout, not kinematics replay: IsaacSim/PhysX steps the robot and static OBJ terrain, the frozen teacher produces rollout actions from its original tracking observations, and the student learns an MSE action loss from proprioception plus a ray-cast depth image.
+`csp_depth_distill.sh` distills a trained PPO or FastSAC tracking teacher into a depth-based student. This is a true physics rollout, not kinematics replay: IsaacSim/PhysX steps the robot and static OBJ terrain, the frozen teacher produces rollout actions from its original tracking observations, and the student learns an MSE action loss from proprioception plus a ray-cast depth image. The teacher policy is frozen; only the student proprio MLP and depth encoder are optimized.
 
-The depth camera follows the far-tracking ZED2i-style setup: raw `106x60`, horizontal FOV `101.41` degrees, range `[0.3, 2.0]`, mounted on `torso_link` with offset `[0.125, 0.06, 0.04]` and RPY `[0, 71, 0]` degrees. IsaacLab's pinhole ray pattern already converts optical camera rays into the robotics camera frame, so we do not apply far-tracking's `offset_rot_base=[-90, 0, -90]` a second time. Distillation resizes the normalized depth to `58x87` before the student CNN.
+The depth camera follows the far-tracking ZED2i-style setup: raw `106x60`, horizontal FOV `101.41` degrees, range `[0.3, 2.0]`, mounted on `torso_link` with offset `[0.125, 0.06, 0.04]` and RPY `[0, 71, 0]` degrees. IsaacLab's pinhole ray pattern already converts optical camera rays into the robotics camera frame, so we do not apply far-tracking's `offset_rot_base=[-90, 0, -90]` a second time. Distillation resizes the normalized depth to `58x87` and uses the same backbone structure as far-tracking's `DepthOnlyFCBackbone58x87Small`: `Conv2d(1,16,5,stride=2,pad=2)`, `Conv2d(16,32,3,stride=2,pad=1)`, `Conv2d(32,64,3,stride=2,pad=1)`, global average pooling, then a `32`-dim latent by default.
 
 Run distillation from an explicit teacher checkpoint:
 
 ```bash
 cd /home/ubuntu/FAR/holosoma
 TEACHER_CHECKPOINT=logs/holosomatest/.../model_01000.pt ./csp_depth_distill.sh
+```
+
+Run distillation from the first successful slope teacher:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+DISTILL_TAG=slope \
+TEACHER_CHECKPOINT=logs/holosomatest/20260629_043623-ip-10-0-73-59_g1_29dof_wbt_slope_climbing_8gpu_4096env_20260629_043601-locomotion/model_20000.pt \
+./csp_depth_distill.sh
 ```
 
 The script defaults to 8 GPUs and 1024 envs per GPU. Depth camera ray-casting is much heavier than the height scan, so this is intentionally lower than the 4096 env/GPU tracking default; override with `ENVS_PER_GPU=4096` only after confirming memory headroom. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.

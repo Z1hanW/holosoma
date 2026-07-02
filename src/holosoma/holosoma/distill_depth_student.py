@@ -14,8 +14,10 @@ from loguru import logger
 
 from holosoma.agents.fast_sac.fast_sac import Actor, CNNActor
 from holosoma.agents.fast_sac.fast_sac_agent import FastSACEnv
-from holosoma.agents.fast_sac.fast_sac_utils import EmpiricalNormalization
-from holosoma.config_types.algo import FastSACConfig
+from holosoma.agents.fast_sac.fast_sac_utils import EmpiricalNormalization as FastSACEmpiricalNormalization
+from holosoma.agents.modules.module_utils import setup_ppo_actor_module
+from holosoma.agents.ppo.ppo import EmpiricalNormalization as PPOEmpiricalNormalization
+from holosoma.config_types.algo import FastSACConfig, PPOConfig
 from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
@@ -56,16 +58,18 @@ class DepthStudentPolicy(_import_torch()[2].Module):
         self.action_dim = action_dim
         self.depth_shape = depth_shape
 
+        # Matches far-tracking's DepthOnlyFCBackbone58x87Small, with a channel
+        # dimension already present in this pipeline.
         self.depth_encoder = nn.Sequential(
             nn.Conv2d(channels, 16, kernel_size=5, stride=2, padding=2),
             nn.ELU(),
-            nn.Conv2d(16, 32, kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.ELU(),
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ELU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(32 * 4 * 4, depth_latent_dim),
+            nn.Linear(64, depth_latent_dim),
             nn.ELU(),
         )
 
@@ -104,7 +108,7 @@ class DepthStudentPolicy(_import_torch()[2].Module):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Distill a terrain-aware FastSAC tracking teacher into a depth-based student using true physics rollout."
+            "Distill a trained tracking teacher into a depth-based student using true physics rollout."
         )
     )
     parser.add_argument("--teacher-checkpoint", required=True, help="Local checkpoint path or wandb:// checkpoint URI.")
@@ -214,13 +218,24 @@ def get_actor_term_slices(env: Any, group_name: str = "actor_obs") -> dict[str, 
     return slices
 
 
+def _student_proprio_terms(term_slices: dict[str, slice]) -> list[str]:
+    excluded_terms = {"height_scan", "depth_camera"}
+    return [name for name in sorted(term_slices) if name not in excluded_terms]
+
+
 def select_student_proprio(actor_obs: Any, term_slices: dict[str, slice]) -> Any:
     torch, _, _, _, _ = _import_torch()
-    excluded_terms = {"height_scan", "depth_camera"}
-    parts = [actor_obs[:, term_slices[name]] for name in sorted(term_slices) if name not in excluded_terms]
+    parts = [actor_obs[:, term_slices[name]] for name in _student_proprio_terms(term_slices)]
     if not parts:
         raise RuntimeError("No proprioceptive actor observation terms remain after excluding terrain terms.")
     return torch.cat(parts, dim=-1)
+
+
+def _get_actor_obs_group(obs_dict: dict[str, Any]) -> Any:
+    try:
+        return obs_dict["actor_obs"]
+    except KeyError as exc:
+        raise RuntimeError("Depth student distillation expects an 'actor_obs' observation group.") from exc
 
 
 def _concat_obs(obs_dict: dict[str, Any], keys: list[str]) -> Any:
@@ -278,7 +293,7 @@ def build_teacher_policy(env: Any, teacher_checkpoint: Path, sac_cfg: FastSACCon
     )
     obs_normalizer: nn.Module
     if sac_cfg.obs_normalization:
-        obs_normalizer = EmpiricalNormalization(shape=actor_obs_dim, device=device)
+        obs_normalizer = FastSACEmpiricalNormalization(shape=actor_obs_dim, device=device)
     else:
         obs_normalizer = nn.Identity()
 
@@ -297,6 +312,70 @@ def build_teacher_policy(env: Any, teacher_checkpoint: Path, sac_cfg: FastSACCon
         return actor(normalized_obs)[0]
 
     return policy, action_dim, sac_cfg.actor_obs_keys
+
+
+def _ppo_obs_dim(env: Any, obs_keys: list[str]) -> int:
+    algo_obs_dim_dict = env.observation_manager.get_obs_dims()
+    obs_dim = 0
+    for obs_key in obs_keys:
+        key_dim = algo_obs_dim_dict[obs_key]
+        if not isinstance(key_dim, int):
+            raise RuntimeError(f"PPO actor observation key '{obs_key}' resolved to non-flat dims: {key_dim}")
+        obs_dim += key_dim
+    return obs_dim
+
+
+def _ppo_history_length(env: Any) -> dict[str, int]:
+    return {
+        group_name: group_cfg.history_length
+        for group_name, group_cfg in env.observation_manager.cfg.groups.items()
+    }
+
+
+def build_ppo_teacher_policy(env: Any, teacher_checkpoint: Path, ppo_cfg: PPOConfig, device: str):
+    torch, _, nn, _, _ = _import_torch()
+    obs_dim_dict = env.observation_manager.get_obs_dims()
+    actor_obs_keys = list(ppo_cfg.module_dict.actor.input_dim)
+    actor_obs_dim = _ppo_obs_dim(env, actor_obs_keys)
+    action_dim = env.robot_config.actions_dim
+
+    actor = setup_ppo_actor_module(
+        obs_dim_dict=obs_dim_dict,
+        module_config=copy.deepcopy(ppo_cfg.module_dict.actor),
+        num_actions=action_dim,
+        init_noise_std=ppo_cfg.init_noise_std,
+        device=device,
+        history_length=_ppo_history_length(env),
+    )
+
+    if ppo_cfg.empirical_normalization:
+        obs_normalizer: nn.Module = PPOEmpiricalNormalization(shape=actor_obs_dim, device=device)
+    else:
+        obs_normalizer = nn.Identity()
+
+    checkpoint = torch.load(teacher_checkpoint, map_location=device, weights_only=False)
+    actor.load_state_dict(checkpoint["actor_model_state_dict"])
+    if ppo_cfg.empirical_normalization and checkpoint.get("actor_obs_normalizer_state_dict") is not None:
+        obs_normalizer.load_state_dict(checkpoint["actor_obs_normalizer_state_dict"])
+
+    actor.eval()
+    obs_normalizer.eval()
+
+    @torch.no_grad()
+    def policy(obs_dict: dict[str, Any]) -> Any:
+        actor_obs = _concat_obs(obs_dict, actor_obs_keys).to(device=device, dtype=torch.float)
+        normalized_obs = obs_normalizer(actor_obs, update=False) if ppo_cfg.empirical_normalization else actor_obs
+        return actor.act_inference({"actor_obs": normalized_obs})
+
+    return policy, action_dim, actor_obs_keys
+
+
+def build_tracking_teacher_policy(env: Any, teacher_checkpoint: Path, algo_cfg: Any, device: str):
+    if isinstance(algo_cfg, FastSACConfig):
+        return build_teacher_policy(env, teacher_checkpoint, algo_cfg, device)
+    if isinstance(algo_cfg, PPOConfig):
+        return build_ppo_teacher_policy(env, teacher_checkpoint, algo_cfg, device)
+    raise RuntimeError(f"Depth distillation does not support teacher algo config type: {type(algo_cfg)}")
 
 
 def _distributed_mean(value: Any, distributed_conf: dict[str, int] | None) -> float:
@@ -399,10 +478,6 @@ def main() -> None:
 
     try:
         saved_config, saved_wandb_path = load_saved_experiment_config(CheckpointConfig(args.teacher_checkpoint))
-        if not isinstance(saved_config.algo.config, FastSACConfig):
-            raise RuntimeError(
-                f"Depth distillation currently expects a FastSAC teacher, got {type(saved_config.algo.config)}"
-            )
 
         if args.run_name is None:
             teacher_name = Path(str(args.teacher_checkpoint)).stem
@@ -453,7 +528,7 @@ def main() -> None:
 
         env = get_class(distill_config.env_class)(get_tyro_env_config(distill_config), device=device)
         teacher_checkpoint = load_checkpoint(args.teacher_checkpoint, str(log_dir))
-        teacher_policy, action_dim, actor_obs_keys = build_teacher_policy(
+        teacher_policy, action_dim, actor_obs_keys = build_tracking_teacher_policy(
             env,
             teacher_checkpoint,
             distill_config.algo.config,
@@ -461,7 +536,7 @@ def main() -> None:
         )
 
         obs_dict = env.reset_all()
-        actor_obs = _concat_obs(obs_dict, actor_obs_keys).to(device=device, dtype=torch.float)
+        actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
         term_slices = get_actor_term_slices(env, "actor_obs")
         proprio = select_student_proprio(actor_obs, term_slices)
         proprio_dim = proprio.shape[1]
@@ -490,13 +565,14 @@ def main() -> None:
                 f"Depth student dims: proprio={proprio_dim}, depth={depth_shape}, action={action_dim}, "
                 f"student_rollout_prob={args.student_rollout_prob}"
             )
+            logger.info(f"Student proprio terms: {_student_proprio_terms(term_slices)}")
 
         start_time = time.time()
         student.train()
         for iteration in range(1, args.iterations + 1):
             with torch.no_grad():
                 teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
-                actor_obs = _concat_obs(obs_dict, actor_obs_keys).to(device=device, dtype=torch.float)
+                actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
                 proprio = select_student_proprio(actor_obs, term_slices)
                 depth = depth_camera_obs(
                     env,
