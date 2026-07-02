@@ -140,7 +140,9 @@ For multi-terrain debugging, the script defaults `USE_ADAPTIVE_TIMESTEPS_SAMPLER
 
 ### CSP Depth Student Distillation
 
-`csp_depth_distill.sh` distills a trained PPO or FastSAC tracking teacher into a depth-based student. This is a true physics rollout, not kinematics replay: IsaacSim/PhysX steps the robot and static OBJ terrain, the frozen teacher produces rollout actions from its original tracking observations, and the student learns an MSE action loss from proprioception plus a ray-cast depth image. The teacher policy is frozen; only the student proprio MLP and depth encoder are optimized.
+`csp_depth_distill.sh` distills a trained PPO or FastSAC tracking teacher into a depth-based student. The default is far-tracking-style hybrid DAgger + RL, not pure behavior cloning. This is a true physics rollout, not kinematics replay: IsaacSim/PhysX steps the robot and static OBJ terrain using the depth student's sampled actions. The frozen teacher still evaluates the same visited states, but only supplies privileged action targets for the DAgger loss. A privileged critic reads `critic_obs`, computes GAE returns from real rollout rewards, and trains the student with PPO value/surrogate losses plus `(1 - ppo_coeff) * dagger_loss_coef * MSE(student_mean, teacher_action)`.
+
+The old W&B run `y9zvox6k` finished quickly because it used the earlier pure BC path: teacher actions stepped the env and the student only minimized action MSE on those teacher-visited states. That is useful as an ablation/debug mode, but it is not the far-tracking distillation philosophy. Use `TRAINING_MODE=bc` only when intentionally reproducing that behavior; the launcher defaults to `TRAINING_MODE=hybrid`.
 
 The depth camera follows the far-tracking ZED2i-style setup: raw `106x60`, horizontal FOV `101.41` degrees, range `[0.3, 2.0]`, mounted on `torso_link` with offset `[0.125, 0.06, 0.04]` and RPY `[0, 71, 0]` degrees. IsaacLab's pinhole ray pattern already converts optical camera rays into the robotics camera frame, so we do not apply far-tracking's `offset_rot_base=[-90, 0, -90]` a second time. Distillation resizes the normalized depth to `58x87` and uses the same backbone structure as far-tracking's `DepthOnlyFCBackbone58x87Small`: `Conv2d(1,16,5,stride=2,pad=2)`, `Conv2d(16,32,3,stride=2,pad=1)`, `Conv2d(32,64,3,stride=2,pad=1)`, global average pooling, then a `32`-dim latent by default.
 
@@ -161,6 +163,15 @@ TEACHER_CHECKPOINT=logs/holosomatest/20260629_043623-ip-10-0-73-59_g1_29dof_wbt_
 ```
 
 The script defaults to 8 GPUs and 1024 envs per GPU. Depth camera ray-casting is much heavier than the height scan, so this is intentionally lower than the 4096 env/GPU tracking default; override with `ENVS_PER_GPU=4096` only after confirming memory headroom. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.
+
+Hybrid distillation defaults to `NUM_STEPS_PER_UPDATE=24`, `NUM_LEARNING_EPOCHS=4`, `NUM_MINI_BATCHES=4`, `GAMMA=0.998`, `GAE_LAMBDA=0.95`, `DAGGER_LOSS_COEF=10.0`, and ramps `ppo_coeff` from `0.0` to `0.9` between `PPO_START_STEP=0` and `DAGGER_END_STEP=10000`. The depth encoder uses separate weight decay `DEPTH_WEIGHT_DECAY=1e-2`, matching the far-tracking split between depth backbone and MLP/critic parameters.
+
+Run the same hybrid distillation across two remote nodes, 8 GPUs per node, with 1024 envs per GPU:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+./csp_multinode_depth_distill.sh
+```
 
 To start distillation from the latest checkpoint of the current multi-terrain tracking run after a delay:
 

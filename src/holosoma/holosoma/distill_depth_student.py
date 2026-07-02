@@ -4,6 +4,7 @@ import argparse
 import copy
 import dataclasses
 import json
+import math
 import sys
 import time
 import traceback
@@ -105,6 +106,73 @@ class DepthStudentPolicy(_import_torch()[2].Module):
         return self.action_head(torch.cat([proprio, depth_latent], dim=-1))
 
 
+class DepthValueFunction(_import_torch()[2].Module):
+    """Privileged critic used for hybrid PPO + DAgger distillation."""
+
+    def __init__(self, critic_obs_dim: int, hidden_dims: list[int]):
+        torch, _, nn, _, _ = _import_torch()
+        super().__init__()
+        layers: list[nn.Module] = []
+        last_dim = critic_obs_dim
+        for hidden_dim in hidden_dims:
+            layers.extend([nn.Linear(last_dim, hidden_dim), nn.ELU()])
+            last_dim = hidden_dim
+        layers.append(nn.Linear(last_dim, 1))
+        self.value_head = nn.Sequential(*layers)
+        self.apply(self._init_weights)
+        torch.nn.init.zeros_(self.value_head[-1].weight)
+        torch.nn.init.zeros_(self.value_head[-1].bias)
+
+    @staticmethod
+    def _init_weights(module: Any) -> None:
+        torch, _, nn, _, _ = _import_torch()
+        if isinstance(module, nn.Linear):
+            torch.nn.init.orthogonal_(module.weight, gain=1.0)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+
+    def forward(self, critic_obs: Any) -> Any:
+        return self.value_head(critic_obs).squeeze(-1)
+
+
+class DepthStudentActorCritic(_import_torch()[2].Module):
+    """Depth actor plus privileged critic for far-tracking-style hybrid distillation."""
+
+    def __init__(
+        self,
+        proprio_dim: int,
+        critic_obs_dim: int,
+        action_dim: int,
+        depth_shape: tuple[int, int, int],
+        actor_hidden_dims: list[int],
+        critic_hidden_dims: list[int],
+        depth_latent_dim: int,
+        init_noise_std: float,
+    ):
+        torch, _, nn, _, _ = _import_torch()
+        super().__init__()
+        if init_noise_std <= 0.0:
+            raise ValueError(f"init_noise_std must be positive, got {init_noise_std}")
+        self.actor = DepthStudentPolicy(
+            proprio_dim=proprio_dim,
+            action_dim=action_dim,
+            depth_shape=depth_shape,
+            hidden_dims=actor_hidden_dims,
+            depth_latent_dim=depth_latent_dim,
+        )
+        self.critic = DepthValueFunction(critic_obs_dim=critic_obs_dim, hidden_dims=critic_hidden_dims)
+        self.log_std = nn.Parameter(torch.full((action_dim,), math.log(init_noise_std)))
+
+    def forward(self, proprio: Any, depth: Any, critic_obs: Any | None = None) -> tuple[Any, Any | None]:
+        action_mean = self.actor(proprio, depth)
+        value = self.critic(critic_obs) if critic_obs is not None else None
+        return action_mean, value
+
+    def action_std(self) -> Any:
+        torch, _, _, _, _ = _import_torch()
+        return torch.exp(self.log_std).clamp(min=1e-4)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -113,15 +181,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--teacher-checkpoint", required=True, help="Local checkpoint path or wandb:// checkpoint URI.")
     parser.add_argument("--num-envs", type=int, default=8192, help="Total env count across all GPUs.")
-    parser.add_argument("--iterations", type=int, default=20000, help="Number of distillation rollout/update steps.")
+    parser.add_argument("--iterations", type=int, default=20000, help="Number of distillation rollout steps.")
+    parser.add_argument("--training-mode", default="hybrid", choices=["hybrid", "bc"])
     parser.add_argument("--save-interval", type=int, default=500, help="Checkpoint save interval in distill steps.")
     parser.add_argument("--logging-interval", type=int, default=25, help="Metric logging interval in distill steps.")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--depth-weight-decay", type=float, default=1e-2)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--student-rollout-prob", type=float, default=0.0)
     parser.add_argument("--student-hidden-dims", type=int, nargs="+", default=[2048, 1024, 512, 256, 128])
+    parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[1024, 512, 256])
     parser.add_argument("--depth-latent-dim", type=int, default=32)
+    parser.add_argument("--init-noise-std", type=float, default=0.1)
+    parser.add_argument("--num-steps-per-update", type=int, default=24)
+    parser.add_argument("--num-learning-epochs", type=int, default=4)
+    parser.add_argument("--num-mini-batches", type=int, default=4)
+    parser.add_argument("--clip-param", type=float, default=0.2)
+    parser.add_argument("--gamma", type=float, default=0.998)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--value-loss-coef", type=float, default=1.0)
+    parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--dagger-loss-coef", type=float, default=10.0)
+    parser.add_argument("--ppo-start-step", type=int, default=0)
+    parser.add_argument("--dagger-end-step", type=int, default=10000)
     parser.add_argument("--depth-height", type=int, default=58)
     parser.add_argument("--depth-width", type=int, default=87)
     parser.add_argument("--depth-min-range", type=float, default=0.3)
@@ -236,6 +319,13 @@ def _get_actor_obs_group(obs_dict: dict[str, Any]) -> Any:
         return obs_dict["actor_obs"]
     except KeyError as exc:
         raise RuntimeError("Depth student distillation expects an 'actor_obs' observation group.") from exc
+
+
+def _get_critic_obs_group(obs_dict: dict[str, Any]) -> Any:
+    try:
+        return obs_dict["critic_obs"]
+    except KeyError as exc:
+        raise RuntimeError("Hybrid depth distillation expects a 'critic_obs' observation group.") from exc
 
 
 def _concat_obs(obs_dict: dict[str, Any], keys: list[str]) -> Any:
@@ -402,6 +492,7 @@ def save_student_checkpoint(
     proprio_dim: int,
     action_dim: int,
     depth_shape: tuple[int, int, int],
+    critic_obs_dim: int | None = None,
 ) -> None:
     torch, _, _, _, _ = _import_torch()
     module = _unwrap_model(model)
@@ -411,6 +502,7 @@ def save_student_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "teacher_checkpoint": str(teacher_checkpoint),
         "proprio_dim": proprio_dim,
+        "critic_obs_dim": critic_obs_dim,
         "action_dim": action_dim,
         "depth_shape": depth_shape,
         "args": vars(args),
@@ -428,7 +520,7 @@ def export_student_onnx(
     device: str,
 ) -> None:
     torch, _, _, _, _ = _import_torch()
-    module = copy.deepcopy(_unwrap_model(model)).to(device)
+    module = copy.deepcopy(_actor_from_model(model)).to(device)
     module.eval()
     dummy_proprio = torch.zeros(1, proprio_dim, device=device)
     dummy_depth = torch.zeros(1, *depth_shape, device=device)
@@ -455,6 +547,9 @@ def init_wandb(args: argparse.Namespace, log_dir: Path, config: ExperimentConfig
 
     wandb_dir = log_dir / ".wandb"
     wandb_dir.mkdir(parents=True, exist_ok=True)
+    tags = ["depth-student", "distillation", "physics-rollout", args.training_mode]
+    if args.training_mode == "hybrid":
+        tags.append("hybrid-dagger-rl")
     return wandb.init(
         entity=args.wandb_entity,
         project=args.wandb_project,
@@ -466,8 +561,105 @@ def init_wandb(args: argparse.Namespace, log_dir: Path, config: ExperimentConfig
             "teacher_checkpoint": str(teacher_checkpoint),
             "teacher_experiment": config.to_serializable_dict(),
         },
-        tags=["depth-student", "distillation", "physics-rollout"],
+        tags=tags,
     )
+
+
+def _normal_log_prob(actions: Any, mean: Any, std: Any) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    log_std = torch.log(std)
+    return (-0.5 * (((actions - mean) / std).pow(2) + 2.0 * log_std + math.log(2.0 * math.pi))).sum(dim=-1)
+
+
+def _normal_entropy_per_env(std: Any, batch_size: int) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    entropy = (torch.log(std) + 0.5 * (1.0 + math.log(2.0 * math.pi))).sum()
+    return entropy.expand(batch_size)
+
+
+def _ppo_coeff(global_step: int, args: argparse.Namespace) -> float:
+    if global_step < args.ppo_start_step:
+        return 0.0
+    if global_step >= args.dagger_end_step:
+        return 0.9
+    total_steps = max(1, args.dagger_end_step - args.ppo_start_step)
+    return min((global_step - args.ppo_start_step) / total_steps, 0.9)
+
+
+def _compute_gae(rewards: Any, dones: Any, values: Any, last_value: Any, gamma: float, lam: float) -> tuple[Any, Any]:
+    torch, _, _, _, _ = _import_torch()
+    advantages = torch.zeros_like(rewards)
+    last_advantage = torch.zeros_like(last_value)
+    for step in reversed(range(rewards.shape[0])):
+        next_value = last_value if step == rewards.shape[0] - 1 else values[step + 1]
+        next_not_done = 1.0 - dones[step].float()
+        delta = rewards[step] + gamma * next_value * next_not_done - values[step]
+        last_advantage = delta + gamma * lam * next_not_done * last_advantage
+        advantages[step] = last_advantage
+    returns = advantages + values
+    return advantages, returns
+
+
+def _flatten_time_env(tensor: Any) -> Any:
+    return tensor.flatten(0, 1)
+
+
+def _actor_from_model(model: Any) -> Any:
+    module = _unwrap_model(model)
+    return module.actor if hasattr(module, "actor") else module
+
+
+def _make_hybrid_optimizer(model: Any, args: argparse.Namespace) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    module = _unwrap_model(model)
+    return torch.optim.AdamW(
+        [
+            {
+                "params": module.actor.action_head.parameters(),
+                "lr": args.learning_rate,
+                "weight_decay": 0.0,
+                "name": "actor_head",
+            },
+            {
+                "params": module.actor.depth_encoder.parameters(),
+                "lr": args.learning_rate,
+                "weight_decay": args.depth_weight_decay,
+                "name": "depth_encoder",
+            },
+            {
+                "params": module.critic.parameters(),
+                "lr": args.learning_rate,
+                "weight_decay": 0.0,
+                "name": "critic",
+            },
+            {
+                "params": [module.log_std],
+                "lr": args.learning_rate,
+                "weight_decay": 0.0,
+                "name": "log_std",
+            },
+        ],
+        lr=args.learning_rate,
+        betas=(0.9, 0.95),
+    )
+
+
+def _set_log_std_lr(optimizer: Any, args: argparse.Namespace, ppo_coeff: float) -> None:
+    for param_group in optimizer.param_groups:
+        if param_group.get("name") == "log_std":
+            param_group["lr"] = args.learning_rate if ppo_coeff > 0.1 else 0.0
+
+
+def _compute_depth(env: Any, args: argparse.Namespace, device: str) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    return depth_camera_obs(
+        env,
+        min_range=args.depth_min_range,
+        max_range=args.depth_max_range,
+        resize_height=args.depth_height,
+        resize_width=args.depth_width,
+        flatten=False,
+    ).to(device=device, dtype=torch.float)
 
 
 def main() -> None:
@@ -537,115 +729,339 @@ def main() -> None:
 
         obs_dict = env.reset_all()
         actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
+        critic_obs = _get_critic_obs_group(obs_dict).to(device=device, dtype=torch.float)
         term_slices = get_actor_term_slices(env, "actor_obs")
         proprio = select_student_proprio(actor_obs, term_slices)
         proprio_dim = proprio.shape[1]
+        critic_obs_dim = critic_obs.shape[1]
         depth_shape = (1, args.depth_height, args.depth_width)
 
-        student = DepthStudentPolicy(
-            proprio_dim=proprio_dim,
-            action_dim=action_dim,
-            depth_shape=depth_shape,
-            hidden_dims=args.student_hidden_dims,
-            depth_latent_dim=args.depth_latent_dim,
-        ).to(device)
+        if args.training_mode == "hybrid":
+            student = DepthStudentActorCritic(
+                proprio_dim=proprio_dim,
+                critic_obs_dim=critic_obs_dim,
+                action_dim=action_dim,
+                depth_shape=depth_shape,
+                actor_hidden_dims=args.student_hidden_dims,
+                critic_hidden_dims=args.critic_hidden_dims,
+                depth_latent_dim=args.depth_latent_dim,
+                init_noise_std=args.init_noise_std,
+            ).to(device)
+        else:
+            student = DepthStudentPolicy(
+                proprio_dim=proprio_dim,
+                action_dim=action_dim,
+                depth_shape=depth_shape,
+                hidden_dims=args.student_hidden_dims,
+                depth_latent_dim=args.depth_latent_dim,
+            ).to(device)
         if is_distributed:
             student = DistributedDataParallel(student, device_ids=[distributed_conf["local_rank"]])
 
-        optimizer = torch.optim.AdamW(
-            student.parameters(),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-            betas=(0.9, 0.95),
-        )
+        if args.training_mode == "hybrid":
+            optimizer = _make_hybrid_optimizer(student, args)
+        else:
+            optimizer = torch.optim.AdamW(
+                student.parameters(),
+                lr=args.learning_rate,
+                weight_decay=args.weight_decay,
+                betas=(0.9, 0.95),
+            )
 
         if is_main_process:
             wandb_run = init_wandb(args, log_dir, distill_config, teacher_checkpoint)
             logger.info(
-                f"Depth student dims: proprio={proprio_dim}, depth={depth_shape}, action={action_dim}, "
+                f"Depth student dims: proprio={proprio_dim}, critic={critic_obs_dim}, depth={depth_shape}, action={action_dim}, "
+                f"training_mode={args.training_mode}, "
                 f"student_rollout_prob={args.student_rollout_prob}"
             )
             logger.info(f"Student proprio terms: {_student_proprio_terms(term_slices)}")
 
         start_time = time.time()
         student.train()
-        for iteration in range(1, args.iterations + 1):
-            with torch.no_grad():
-                teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
-                actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
-                proprio = select_student_proprio(actor_obs, term_slices)
-                depth = depth_camera_obs(
-                    env,
-                    min_range=args.depth_min_range,
-                    max_range=args.depth_max_range,
-                    resize_height=args.depth_height,
-                    resize_width=args.depth_width,
-                    flatten=False,
-                ).to(device=device, dtype=torch.float)
+        if args.training_mode == "bc":
+            for iteration in range(1, args.iterations + 1):
+                with torch.no_grad():
+                    teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
+                    actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
+                    proprio = select_student_proprio(actor_obs, term_slices)
+                    depth = _compute_depth(env, args, device)
 
-            student_actions = student(proprio, depth)
-            loss = F.mse_loss(student_actions, teacher_actions)
+                student_actions = student(proprio, depth)
+                loss = F.mse_loss(student_actions, teacher_actions)
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            if args.max_grad_norm > 0:
-                nn.utils.clip_grad_norm_(student.parameters(), args.max_grad_norm)
-            optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if args.max_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(student.parameters(), args.max_grad_norm)
+                optimizer.step()
 
-            with torch.no_grad():
-                rollout_actions = teacher_actions
-                if args.student_rollout_prob > 0.0:
-                    mask = (torch.rand(teacher_actions.shape[0], 1, device=device) < args.student_rollout_prob).float()
-                    rollout_actions = teacher_actions * (1.0 - mask) + student_actions.detach() * mask
-                obs_dict, rewards, dones, _extras = env.step({"actions": rollout_actions})
+                with torch.no_grad():
+                    rollout_actions = teacher_actions
+                    if args.student_rollout_prob > 0.0:
+                        mask = (torch.rand(teacher_actions.shape[0], 1, device=device) < args.student_rollout_prob).float()
+                        rollout_actions = teacher_actions * (1.0 - mask) + student_actions.detach() * mask
+                    obs_dict, rewards, dones, _extras = env.step({"actions": rollout_actions})
 
-            if iteration % args.logging_interval == 0 or iteration == 1:
-                loss_value = _distributed_mean(loss, distributed_conf)
-                reward_value = _distributed_mean(rewards.mean(), distributed_conf)
-                done_value = _distributed_mean(dones.float().mean(), distributed_conf)
-                action_l1 = _distributed_mean(
-                    (student_actions.detach() - teacher_actions).abs().mean(),
-                    distributed_conf,
-                )
-                if is_main_process:
-                    elapsed_s = time.time() - start_time
-                    metrics = {
-                        "global_step": iteration,
-                        "distill/loss_mse": loss_value,
-                        "distill/action_l1": action_l1,
-                        "rollout/reward_mean": reward_value,
-                        "rollout/done_rate": done_value,
-                        "time/elapsed_s": elapsed_s,
-                    }
-                    logger.info(
-                        f"iter={iteration:07d} loss={loss_value:.6f} "
-                        f"action_l1={action_l1:.6f} reward={reward_value:.4f} done={done_value:.4f}"
+                if iteration % args.logging_interval == 0 or iteration == 1:
+                    loss_value = _distributed_mean(loss, distributed_conf)
+                    reward_value = _distributed_mean(rewards.mean(), distributed_conf)
+                    done_value = _distributed_mean(dones.float().mean(), distributed_conf)
+                    action_l1 = _distributed_mean(
+                        (student_actions.detach() - teacher_actions).abs().mean(),
+                        distributed_conf,
                     )
-                    if wandb_run is not None:
-                        wandb_run.log(metrics, step=iteration)
+                    if is_main_process:
+                        elapsed_s = time.time() - start_time
+                        metrics = {
+                            "global_step": iteration,
+                            "distill/loss_mse": loss_value,
+                            "distill/action_l1": action_l1,
+                            "rollout/reward_mean": reward_value,
+                            "rollout/done_rate": done_value,
+                            "time/elapsed_s": elapsed_s,
+                        }
+                        logger.info(
+                            f"iter={iteration:07d} mode=bc loss={loss_value:.6f} "
+                            f"action_l1={action_l1:.6f} reward={reward_value:.4f} done={done_value:.4f}"
+                        )
+                        if wandb_run is not None:
+                            wandb_run.log(metrics, step=iteration)
 
-            if is_main_process and args.save_interval > 0 and iteration % args.save_interval == 0:
-                ckpt_path = log_dir / f"student_{iteration:07d}.pt"
-                save_student_checkpoint(
-                    ckpt_path,
-                    student,
-                    optimizer,
-                    iteration,
-                    args,
-                    distill_config,
-                    teacher_checkpoint,
-                    proprio_dim,
-                    action_dim,
-                    depth_shape,
-                )
-                if args.export_onnx:
-                    export_student_onnx(
-                        log_dir / f"student_{iteration:07d}.onnx",
+                if is_main_process and args.save_interval > 0 and iteration % args.save_interval == 0:
+                    ckpt_path = log_dir / f"student_{iteration:07d}.pt"
+                    save_student_checkpoint(
+                        ckpt_path,
                         student,
+                        optimizer,
+                        iteration,
+                        args,
+                        distill_config,
+                        teacher_checkpoint,
                         proprio_dim,
+                        action_dim,
                         depth_shape,
-                        device,
                     )
+                    if args.export_onnx:
+                        export_student_onnx(
+                            log_dir / f"student_{iteration:07d}.onnx",
+                            student,
+                            proprio_dim,
+                            depth_shape,
+                            device,
+                        )
+        else:
+            global_step = 0
+            next_save_step = args.save_interval if args.save_interval > 0 else None
+            while global_step < args.iterations:
+                rollout_len = min(args.num_steps_per_update, args.iterations - global_step)
+                proprio_buffer: list[Any] = []
+                depth_buffer: list[Any] = []
+                critic_obs_buffer: list[Any] = []
+                teacher_action_buffer: list[Any] = []
+                action_buffer: list[Any] = []
+                old_log_prob_buffer: list[Any] = []
+                old_mean_buffer: list[Any] = []
+                value_buffer: list[Any] = []
+                reward_buffer: list[Any] = []
+                done_buffer: list[Any] = []
+
+                for _ in range(rollout_len):
+                    with torch.no_grad():
+                        teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
+                        actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
+                        critic_obs = _get_critic_obs_group(obs_dict).to(device=device, dtype=torch.float)
+                        proprio = select_student_proprio(actor_obs, term_slices)
+                        depth = _compute_depth(env, args, device)
+                        action_mean, values = student(proprio, depth, critic_obs)
+                        action_std = _unwrap_model(student).action_std()
+                        actions = action_mean + torch.randn_like(action_mean) * action_std
+                        actions_log_prob = _normal_log_prob(actions, action_mean, action_std)
+
+                        proprio_buffer.append(proprio.detach())
+                        depth_buffer.append(depth.detach())
+                        critic_obs_buffer.append(critic_obs.detach())
+                        teacher_action_buffer.append(teacher_actions.detach())
+                        action_buffer.append(actions.detach())
+                        old_log_prob_buffer.append(actions_log_prob.detach())
+                        old_mean_buffer.append(action_mean.detach())
+                        value_buffer.append(values.detach())
+
+                        obs_dict, rewards, dones, _extras = env.step({"actions": actions.detach()})
+                        reward_buffer.append(rewards.detach().float())
+                        done_buffer.append(dones.detach().float())
+                        global_step += 1
+
+                with torch.no_grad():
+                    last_critic_obs = _get_critic_obs_group(obs_dict).to(device=device, dtype=torch.float)
+                    last_value = _unwrap_model(student).critic(last_critic_obs).detach()
+
+                rewards_tensor = torch.stack(reward_buffer)
+                dones_tensor = torch.stack(done_buffer)
+                values_tensor = torch.stack(value_buffer)
+                advantages, returns = _compute_gae(
+                    rewards_tensor,
+                    dones_tensor,
+                    values_tensor,
+                    last_value,
+                    args.gamma,
+                    args.gae_lambda,
+                )
+
+                flat_proprio = _flatten_time_env(torch.stack(proprio_buffer))
+                flat_depth = _flatten_time_env(torch.stack(depth_buffer))
+                flat_critic_obs = _flatten_time_env(torch.stack(critic_obs_buffer))
+                flat_teacher_actions = _flatten_time_env(torch.stack(teacher_action_buffer))
+                flat_actions = _flatten_time_env(torch.stack(action_buffer))
+                flat_old_log_prob = _flatten_time_env(torch.stack(old_log_prob_buffer))
+                flat_old_mean = _flatten_time_env(torch.stack(old_mean_buffer))
+                flat_values = _flatten_time_env(values_tensor)
+                flat_returns = _flatten_time_env(returns.detach())
+                flat_advantages = _flatten_time_env(advantages.detach())
+                flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-8)
+
+                ppo_coeff = _ppo_coeff(global_step, args)
+                _set_log_std_lr(optimizer, args, ppo_coeff)
+                total_samples = flat_actions.shape[0]
+                mini_batch_size = max(1, total_samples // args.num_mini_batches)
+                update_count = 0
+                total_loss_sum = 0.0
+                value_loss_sum = 0.0
+                surrogate_loss_sum = 0.0
+                entropy_sum = 0.0
+                dagger_loss_sum = 0.0
+                approx_kl_sum = 0.0
+
+                for _epoch in range(args.num_learning_epochs):
+                    permutation = torch.randperm(total_samples, device=device)
+                    for start in range(0, total_samples, mini_batch_size):
+                        batch_idx = permutation[start : start + mini_batch_size]
+                        batch_action_mean, batch_values = student(
+                            flat_proprio[batch_idx],
+                            flat_depth[batch_idx],
+                            flat_critic_obs[batch_idx],
+                        )
+                        batch_action_std = _unwrap_model(student).action_std()
+                        batch_log_prob = _normal_log_prob(
+                            flat_actions[batch_idx],
+                            batch_action_mean,
+                            batch_action_std,
+                        )
+                        batch_entropy = _normal_entropy_per_env(batch_action_std, batch_idx.numel()).mean()
+                        ratio = torch.exp(batch_log_prob - flat_old_log_prob[batch_idx])
+                        surrogate = -flat_advantages[batch_idx] * ratio
+                        surrogate_clipped = -flat_advantages[batch_idx] * torch.clamp(
+                            ratio,
+                            1.0 - args.clip_param,
+                            1.0 + args.clip_param,
+                        )
+                        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+                        value_clipped = flat_values[batch_idx] + (batch_values - flat_values[batch_idx]).clamp(
+                            -args.clip_param,
+                            args.clip_param,
+                        )
+                        value_losses = (batch_values - flat_returns[batch_idx]).pow(2)
+                        value_losses_clipped = (value_clipped - flat_returns[batch_idx]).pow(2)
+                        value_loss = torch.max(value_losses, value_losses_clipped).mean()
+
+                        dagger_loss_full = F.mse_loss(
+                            batch_action_mean,
+                            flat_teacher_actions[batch_idx],
+                            reduction="none",
+                        )
+                        valid_teacher = ~torch.all(flat_teacher_actions[batch_idx] == 0.0, dim=-1)
+                        if valid_teacher.any():
+                            dagger_loss = dagger_loss_full[valid_teacher].mean()
+                        else:
+                            dagger_loss = batch_action_mean.sum() * 0.0
+
+                        ppo_loss = args.value_loss_coef * value_loss + ppo_coeff * (
+                            surrogate_loss - args.entropy_coef * batch_entropy
+                        )
+                        loss = ppo_loss + args.dagger_loss_coef * (1.0 - ppo_coeff) * dagger_loss
+
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        if args.max_grad_norm > 0:
+                            nn.utils.clip_grad_norm_(student.parameters(), args.max_grad_norm)
+                        optimizer.step()
+
+                        with torch.no_grad():
+                            total_loss_sum += float(loss.detach().item())
+                            value_loss_sum += float(value_loss.detach().item())
+                            surrogate_loss_sum += float(surrogate_loss.detach().item())
+                            entropy_sum += float(batch_entropy.detach().item())
+                            dagger_loss_sum += float(dagger_loss.detach().item())
+                            approx_kl_sum += float((flat_old_log_prob[batch_idx] - batch_log_prob.detach()).mean().item())
+                            update_count += 1
+
+                if global_step % args.logging_interval < rollout_len or global_step == rollout_len:
+                    denom = max(1, update_count)
+                    total_loss_value = _distributed_mean(torch.tensor(total_loss_sum / denom, device=device), distributed_conf)
+                    value_loss_value = _distributed_mean(torch.tensor(value_loss_sum / denom, device=device), distributed_conf)
+                    surrogate_loss_value = _distributed_mean(
+                        torch.tensor(surrogate_loss_sum / denom, device=device),
+                        distributed_conf,
+                    )
+                    entropy_value = _distributed_mean(torch.tensor(entropy_sum / denom, device=device), distributed_conf)
+                    dagger_loss_value = _distributed_mean(torch.tensor(dagger_loss_sum / denom, device=device), distributed_conf)
+                    approx_kl_value = _distributed_mean(torch.tensor(approx_kl_sum / denom, device=device), distributed_conf)
+                    reward_value = _distributed_mean(rewards_tensor.mean(), distributed_conf)
+                    done_value = _distributed_mean(dones_tensor.mean(), distributed_conf)
+                    action_l1 = _distributed_mean((flat_old_mean - flat_teacher_actions).abs().mean(), distributed_conf)
+                    action_std_value = _distributed_mean(_unwrap_model(student).action_std().mean(), distributed_conf)
+                    if is_main_process:
+                        elapsed_s = time.time() - start_time
+                        metrics = {
+                            "global_step": global_step,
+                            "distill/loss_total": total_loss_value,
+                            "distill/dagger_loss": dagger_loss_value,
+                            "distill/action_l1": action_l1,
+                            "ppo/value_loss": value_loss_value,
+                            "ppo/surrogate_loss": surrogate_loss_value,
+                            "ppo/entropy": entropy_value,
+                            "ppo/approx_kl": approx_kl_value,
+                            "ppo/ppo_coeff": ppo_coeff,
+                            "rollout/reward_mean": reward_value,
+                            "rollout/done_rate": done_value,
+                            "rollout/action_std_mean": action_std_value,
+                            "time/elapsed_s": elapsed_s,
+                        }
+                        logger.info(
+                            f"iter={global_step:07d} mode=hybrid loss={total_loss_value:.6f} "
+                            f"dagger={dagger_loss_value:.6f} ppo_coeff={ppo_coeff:.3f} "
+                            f"value={value_loss_value:.6f} surrogate={surrogate_loss_value:.6f} "
+                            f"action_l1={action_l1:.6f} reward={reward_value:.4f} done={done_value:.4f}"
+                        )
+                        if wandb_run is not None:
+                            wandb_run.log(metrics, step=global_step)
+
+                if is_main_process and next_save_step is not None and global_step >= next_save_step:
+                    ckpt_path = log_dir / f"student_{global_step:07d}.pt"
+                    save_student_checkpoint(
+                        ckpt_path,
+                        student,
+                        optimizer,
+                        global_step,
+                        args,
+                        distill_config,
+                        teacher_checkpoint,
+                        proprio_dim,
+                        action_dim,
+                        depth_shape,
+                        critic_obs_dim,
+                    )
+                    if args.export_onnx:
+                        export_student_onnx(
+                            log_dir / f"student_{global_step:07d}.onnx",
+                            student,
+                            proprio_dim,
+                            depth_shape,
+                            device,
+                        )
+                    while next_save_step <= global_step:
+                        next_save_step += args.save_interval
 
         if is_main_process:
             final_path = log_dir / f"student_{args.iterations:07d}.pt"
@@ -660,6 +1076,7 @@ def main() -> None:
                 proprio_dim,
                 action_dim,
                 depth_shape,
+                critic_obs_dim if args.training_mode == "hybrid" else None,
             )
             if args.export_onnx:
                 export_student_onnx(

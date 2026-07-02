@@ -99,6 +99,7 @@ echo "Selected teacher checkpoint: ${TEACHER_CHECKPOINT}"
 stop_tracking_session
 
 export TEACHER_CHECKPOINT
-export RUN_NAME="${RUN_NAME:-$(hostname)_g1_29dof_depth_student_distill_from_latest_tracking_$(date -u +%Y%m%d_%H%M%S)}"
+export TRAINING_MODE="${TRAINING_MODE:-hybrid}"
+export RUN_NAME="${RUN_NAME:-$(hostname)_g1_29dof_depth_student_${TRAINING_MODE}_distill_from_latest_tracking_$(date -u +%Y%m%d_%H%M%S)}"
 echo "Starting depth distillation with run_name=${RUN_NAME}"
 ./csp_depth_distill.sh

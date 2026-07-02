@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-node depth-student distillation on remote nodes only.
+# Multi-node far-tracking-style hybrid DAgger + PPO depth-student distillation
+# on remote nodes only.
 # Default topology:
 #   2 remote nodes x 8 GPUs x 1024 envs/GPU = 16384 total envs.
 
@@ -56,12 +57,26 @@ WANDB_ENTITY="${WANDB_ENTITY:-zihanw22}"
 WANDB_PROJECT="${WANDB_PROJECT:-holosomatest}"
 WANDB_MODE="${WANDB_MODE:-online}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20000}"
+TRAINING_MODE="${TRAINING_MODE:-hybrid}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
 LOGGING_INTERVAL="${LOGGING_INTERVAL:-25}"
 LEARNING_RATE="${LEARNING_RATE:-3e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+DEPTH_WEIGHT_DECAY="${DEPTH_WEIGHT_DECAY:-1e-2}"
 MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 STUDENT_ROLLOUT_PROB="${STUDENT_ROLLOUT_PROB:-0.0}"
+INIT_NOISE_STD="${INIT_NOISE_STD:-0.1}"
+NUM_STEPS_PER_UPDATE="${NUM_STEPS_PER_UPDATE:-24}"
+NUM_LEARNING_EPOCHS="${NUM_LEARNING_EPOCHS:-4}"
+NUM_MINI_BATCHES="${NUM_MINI_BATCHES:-4}"
+CLIP_PARAM="${CLIP_PARAM:-0.2}"
+GAMMA="${GAMMA:-0.998}"
+GAE_LAMBDA="${GAE_LAMBDA:-0.95}"
+VALUE_LOSS_COEF="${VALUE_LOSS_COEF:-1.0}"
+ENTROPY_COEF="${ENTROPY_COEF:-0.0}"
+DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF:-10.0}"
+PPO_START_STEP="${PPO_START_STEP:-0}"
+DAGGER_END_STEP="${DAGGER_END_STEP:-10000}"
 DEPTH_HEIGHT="${DEPTH_HEIGHT:-58}"
 DEPTH_WIDTH="${DEPTH_WIDTH:-87}"
 RAW_DEPTH_HEIGHT="${RAW_DEPTH_HEIGHT:-60}"
@@ -91,7 +106,7 @@ else
   REMOTE_TEACHER_CHECKPOINT="${REMOTE_TEACHER_CHECKPOINT:-${REMOTE_REPO}/logs/teacher_checkpoints/$(basename "${TEACHER_CHECKPOINT}")}"
 fi
 
-RUN_NAME="${RUN_NAME:-${HOSTNAME_SHORT}_g1_29dof_depth_student_distill_${DISTILL_TAG}_multinode${NNODES}x${GPUS_PER_NODE}_${TOTAL_GPUS}gpu_${ENVS_PER_GPU}env_master${MASTER_LABEL}_${TIMESTAMP}}"
+RUN_NAME="${RUN_NAME:-${HOSTNAME_SHORT}_g1_29dof_depth_student_${TRAINING_MODE}_distill_${DISTILL_TAG}_multinode${NNODES}x${GPUS_PER_NODE}_${TOTAL_GPUS}gpu_${ENVS_PER_GPU}env_master${MASTER_LABEL}_${TIMESTAMP}}"
 SESSION="${SESSION:-csp_multinode_depth_distill_${TIMESTAMP}}"
 LOG_DIR="${LOG_DIR:-logs/run_commands}"
 SCRIPT_BASENAME="$(basename "${BASH_SOURCE[0]}")"
@@ -126,12 +141,26 @@ if [[ "${1:-}" == "--node-run" ]]; then
     --teacher-checkpoint "${REMOTE_TEACHER_CHECKPOINT}" \
     --num-envs "${TOTAL_ENVS}" \
     --iterations "${NUM_ITERATIONS}" \
+    --training-mode "${TRAINING_MODE}" \
     --save-interval "${SAVE_INTERVAL}" \
     --logging-interval "${LOGGING_INTERVAL}" \
     --learning-rate "${LEARNING_RATE}" \
     --weight-decay "${WEIGHT_DECAY}" \
+    --depth-weight-decay "${DEPTH_WEIGHT_DECAY}" \
     --max-grad-norm "${MAX_GRAD_NORM}" \
     --student-rollout-prob "${STUDENT_ROLLOUT_PROB}" \
+    --init-noise-std "${INIT_NOISE_STD}" \
+    --num-steps-per-update "${NUM_STEPS_PER_UPDATE}" \
+    --num-learning-epochs "${NUM_LEARNING_EPOCHS}" \
+    --num-mini-batches "${NUM_MINI_BATCHES}" \
+    --clip-param "${CLIP_PARAM}" \
+    --gamma "${GAMMA}" \
+    --gae-lambda "${GAE_LAMBDA}" \
+    --value-loss-coef "${VALUE_LOSS_COEF}" \
+    --entropy-coef "${ENTROPY_COEF}" \
+    --dagger-loss-coef "${DAGGER_LOSS_COEF}" \
+    --ppo-start-step "${PPO_START_STEP}" \
+    --dagger-end-step "${DAGGER_END_STEP}" \
     --depth-height "${DEPTH_HEIGHT}" \
     --depth-width "${DEPTH_WIDTH}" \
     --raw-depth-height "${RAW_DEPTH_HEIGHT}" \
@@ -172,6 +201,7 @@ echo "  run_name: ${RUN_NAME}"
 echo "  nodes: ${NODE_HOST_ARRAY[*]}"
 echo "  master: ${MASTER_ADDR}:${MASTER_PORT}"
 echo "  total_envs: ${TOTAL_ENVS} (${NNODES} nodes x ${GPUS_PER_NODE} GPUs x ${ENVS_PER_GPU} envs/GPU)"
+echo "  training_mode: ${TRAINING_MODE}"
 echo "  teacher_checkpoint: ${TEACHER_CHECKPOINT}"
 echo "  remote_teacher_checkpoint: ${REMOTE_TEACHER_CHECKPOINT}"
 echo "  remote_repo: ${REMOTE_REPO}"
@@ -206,7 +236,7 @@ for node_rank in "${!NODE_HOST_ARRAY[@]}"; do
     fi
   fi
 
-  remote_env="NODE_RANK=$(quote "${node_rank}") NNODES=$(quote "${NNODES}") GPUS_PER_NODE=$(quote "${GPUS_PER_NODE}") ENVS_PER_GPU=$(quote "${ENVS_PER_GPU}") TOTAL_GPUS=$(quote "${TOTAL_GPUS}") TOTAL_ENVS=$(quote "${TOTAL_ENVS}") MASTER_ADDR=$(quote "${MASTER_ADDR}") MASTER_PORT=$(quote "${MASTER_PORT}") TIMESTAMP=$(quote "${TIMESTAMP}") HOSTNAME_SHORT=$(quote "${HOSTNAME_SHORT}") WANDB_ENTITY=$(quote "${WANDB_ENTITY}") WANDB_PROJECT=$(quote "${WANDB_PROJECT}") WANDB_MODE=$(quote "${WANDB_MODE}") NUM_ITERATIONS=$(quote "${NUM_ITERATIONS}") SAVE_INTERVAL=$(quote "${SAVE_INTERVAL}") LOGGING_INTERVAL=$(quote "${LOGGING_INTERVAL}") LEARNING_RATE=$(quote "${LEARNING_RATE}") WEIGHT_DECAY=$(quote "${WEIGHT_DECAY}") MAX_GRAD_NORM=$(quote "${MAX_GRAD_NORM}") STUDENT_ROLLOUT_PROB=$(quote "${STUDENT_ROLLOUT_PROB}") DEPTH_HEIGHT=$(quote "${DEPTH_HEIGHT}") DEPTH_WIDTH=$(quote "${DEPTH_WIDTH}") RAW_DEPTH_HEIGHT=$(quote "${RAW_DEPTH_HEIGHT}") RAW_DEPTH_WIDTH=$(quote "${RAW_DEPTH_WIDTH}") DEPTH_MIN_RANGE=$(quote "${DEPTH_MIN_RANGE}") DEPTH_MAX_RANGE=$(quote "${DEPTH_MAX_RANGE}") DEPTH_HORIZONTAL_FOV_DEG=$(quote "${DEPTH_HORIZONTAL_FOV_DEG}") DEPTH_CAMERA_BODY_NAME=$(quote "${DEPTH_CAMERA_BODY_NAME}") DEPTH_CAMERA_DEBUG_VIS=$(quote "${DEPTH_CAMERA_DEBUG_VIS}") DISTILL_TAG=$(quote "${DISTILL_TAG}") LOG_BASE_DIR=$(quote "${LOG_BASE_DIR}") REMOTE_REPO=$(quote "${REMOTE_REPO}") TEACHER_CHECKPOINT=$(quote "${REMOTE_TEACHER_CHECKPOINT}") REMOTE_TEACHER_CHECKPOINT=$(quote "${REMOTE_TEACHER_CHECKPOINT}") RUN_NAME=$(quote "${RUN_NAME}") SESSION=$(quote "${SESSION}") LOG_DIR=$(quote "${LOG_DIR}")"
+  remote_env="NODE_RANK=$(quote "${node_rank}") NNODES=$(quote "${NNODES}") GPUS_PER_NODE=$(quote "${GPUS_PER_NODE}") ENVS_PER_GPU=$(quote "${ENVS_PER_GPU}") TOTAL_GPUS=$(quote "${TOTAL_GPUS}") TOTAL_ENVS=$(quote "${TOTAL_ENVS}") MASTER_ADDR=$(quote "${MASTER_ADDR}") MASTER_PORT=$(quote "${MASTER_PORT}") TIMESTAMP=$(quote "${TIMESTAMP}") HOSTNAME_SHORT=$(quote "${HOSTNAME_SHORT}") WANDB_ENTITY=$(quote "${WANDB_ENTITY}") WANDB_PROJECT=$(quote "${WANDB_PROJECT}") WANDB_MODE=$(quote "${WANDB_MODE}") NUM_ITERATIONS=$(quote "${NUM_ITERATIONS}") TRAINING_MODE=$(quote "${TRAINING_MODE}") SAVE_INTERVAL=$(quote "${SAVE_INTERVAL}") LOGGING_INTERVAL=$(quote "${LOGGING_INTERVAL}") LEARNING_RATE=$(quote "${LEARNING_RATE}") WEIGHT_DECAY=$(quote "${WEIGHT_DECAY}") DEPTH_WEIGHT_DECAY=$(quote "${DEPTH_WEIGHT_DECAY}") MAX_GRAD_NORM=$(quote "${MAX_GRAD_NORM}") STUDENT_ROLLOUT_PROB=$(quote "${STUDENT_ROLLOUT_PROB}") INIT_NOISE_STD=$(quote "${INIT_NOISE_STD}") NUM_STEPS_PER_UPDATE=$(quote "${NUM_STEPS_PER_UPDATE}") NUM_LEARNING_EPOCHS=$(quote "${NUM_LEARNING_EPOCHS}") NUM_MINI_BATCHES=$(quote "${NUM_MINI_BATCHES}") CLIP_PARAM=$(quote "${CLIP_PARAM}") GAMMA=$(quote "${GAMMA}") GAE_LAMBDA=$(quote "${GAE_LAMBDA}") VALUE_LOSS_COEF=$(quote "${VALUE_LOSS_COEF}") ENTROPY_COEF=$(quote "${ENTROPY_COEF}") DAGGER_LOSS_COEF=$(quote "${DAGGER_LOSS_COEF}") PPO_START_STEP=$(quote "${PPO_START_STEP}") DAGGER_END_STEP=$(quote "${DAGGER_END_STEP}") DEPTH_HEIGHT=$(quote "${DEPTH_HEIGHT}") DEPTH_WIDTH=$(quote "${DEPTH_WIDTH}") RAW_DEPTH_HEIGHT=$(quote "${RAW_DEPTH_HEIGHT}") RAW_DEPTH_WIDTH=$(quote "${RAW_DEPTH_WIDTH}") DEPTH_MIN_RANGE=$(quote "${DEPTH_MIN_RANGE}") DEPTH_MAX_RANGE=$(quote "${DEPTH_MAX_RANGE}") DEPTH_HORIZONTAL_FOV_DEG=$(quote "${DEPTH_HORIZONTAL_FOV_DEG}") DEPTH_CAMERA_BODY_NAME=$(quote "${DEPTH_CAMERA_BODY_NAME}") DEPTH_CAMERA_DEBUG_VIS=$(quote "${DEPTH_CAMERA_DEBUG_VIS}") DISTILL_TAG=$(quote "${DISTILL_TAG}") LOG_BASE_DIR=$(quote "${LOG_BASE_DIR}") REMOTE_REPO=$(quote "${REMOTE_REPO}") TEACHER_CHECKPOINT=$(quote "${REMOTE_TEACHER_CHECKPOINT}") REMOTE_TEACHER_CHECKPOINT=$(quote "${REMOTE_TEACHER_CHECKPOINT}") RUN_NAME=$(quote "${RUN_NAME}") SESSION=$(quote "${SESSION}") LOG_DIR=$(quote "${LOG_DIR}")"
 
   remote_cmd="cd $(quote "${REMOTE_REPO}") && mkdir -p $(quote "${LOG_DIR}") && env ${remote_env} bash $(quote "${REMOTE_REPO}/${SCRIPT_BASENAME}") --node-run > $(quote "${remote_log}") 2>&1"
   ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${host}" \
