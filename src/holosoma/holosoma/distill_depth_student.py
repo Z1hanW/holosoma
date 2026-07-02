@@ -8,6 +8,7 @@ import math
 import sys
 import time
 import traceback
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +211,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dagger-loss-coef", type=float, default=10.0)
     parser.add_argument("--ppo-start-epoch", "--ppo-start-step", dest="ppo_start_epoch", type=int, default=0)
     parser.add_argument("--dagger-end-epoch", "--dagger-end-step", dest="dagger_end_epoch", type=int, default=10000)
+    parser.add_argument("--schedule", default="adaptive", choices=["adaptive", "fixed"])
+    parser.add_argument("--desired-kl", type=float, default=0.01)
+    parser.add_argument("--min-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--max-learning-rate", type=float, default=1e-2)
     parser.add_argument("--depth-height", type=int, default=58)
     parser.add_argument("--depth-width", type=int, default=87)
     parser.add_argument("--depth-min-range", type=float, default=0.3)
@@ -473,13 +478,32 @@ def build_tracking_teacher_policy(env: Any, teacher_checkpoint: Path, algo_cfg: 
     raise RuntimeError(f"Depth distillation does not support teacher algo config type: {type(algo_cfg)}")
 
 
-def _distributed_mean(value: Any, distributed_conf: dict[str, int] | None) -> float:
+def _distributed_scalar(value: Any, distributed_conf: dict[str, int] | None, op: str = "mean") -> float:
     _, dist, _, _, _ = _import_torch()
     value_tensor = value.detach().float()
     if distributed_conf is not None:
-        dist.all_reduce(value_tensor, op=dist.ReduceOp.SUM)
-        value_tensor /= distributed_conf["world_size"]
+        if op == "mean":
+            dist.all_reduce(value_tensor, op=dist.ReduceOp.SUM)
+            value_tensor /= distributed_conf["world_size"]
+        elif op == "min":
+            dist.all_reduce(value_tensor, op=dist.ReduceOp.MIN)
+        elif op == "max":
+            dist.all_reduce(value_tensor, op=dist.ReduceOp.MAX)
+        else:
+            raise ValueError(f"Unsupported distributed scalar op: {op}")
     return float(value_tensor.item())
+
+
+def _distributed_mean(value: Any, distributed_conf: dict[str, int] | None) -> float:
+    return _distributed_scalar(value, distributed_conf, op="mean")
+
+
+def _distributed_min(value: Any, distributed_conf: dict[str, int] | None) -> float:
+    return _distributed_scalar(value, distributed_conf, op="min")
+
+
+def _distributed_max(value: Any, distributed_conf: dict[str, int] | None) -> float:
+    return _distributed_scalar(value, distributed_conf, op="max")
 
 
 def _unwrap_model(model: Any) -> Any:
@@ -649,10 +673,23 @@ def _make_hybrid_optimizer(model: Any, args: argparse.Namespace) -> Any:
     )
 
 
-def _set_log_std_lr(optimizer: Any, args: argparse.Namespace, ppo_coeff: float) -> None:
+def _set_optimizer_lr(optimizer: Any, learning_rate: float, ppo_coeff: float) -> None:
     for param_group in optimizer.param_groups:
         if param_group.get("name") == "log_std":
-            param_group["lr"] = args.learning_rate if ppo_coeff > 0.1 else 0.0
+            param_group["lr"] = learning_rate if ppo_coeff > 0.1 else 0.0
+        else:
+            param_group["lr"] = learning_rate
+
+
+def _normal_kl(old_mean: Any, old_std: Any, mean: Any, std: Any) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    current_std = std.expand_as(mean)
+    return torch.sum(
+        torch.log(current_std / old_std + 1.0e-5)
+        + (old_std.square() + (old_mean - mean).square()) / (2.0 * current_std.square().clamp_min(1.0e-8))
+        - 0.5,
+        dim=-1,
+    )
 
 
 def _compute_depth(env: Any, args: argparse.Namespace, device: str) -> Any:
@@ -765,6 +802,8 @@ def main() -> None:
 
         if args.training_mode == "hybrid":
             optimizer = _make_hybrid_optimizer(student, args)
+            current_learning_rate = args.learning_rate
+            _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff=0.0)
         else:
             optimizer = torch.optim.AdamW(
                 student.parameters(),
@@ -857,6 +896,8 @@ def main() -> None:
                         )
         else:
             global_step = 0
+            cur_reward_sum = torch.zeros(distill_config.training.num_envs, device=device)
+            episode_return_buffer: deque[float] = deque(maxlen=10000)
             for update_idx in range(args.iterations):
                 iteration = update_idx + 1
                 rollout_len = args.num_steps_per_update
@@ -867,6 +908,7 @@ def main() -> None:
                 action_buffer: list[Any] = []
                 old_log_prob_buffer: list[Any] = []
                 old_mean_buffer: list[Any] = []
+                old_std_buffer: list[Any] = []
                 value_buffer: list[Any] = []
                 reward_buffer: list[Any] = []
                 done_buffer: list[Any] = []
@@ -880,8 +922,9 @@ def main() -> None:
                         depth = _compute_depth(env, args, device)
                         action_mean, values = student(proprio, depth, critic_obs)
                         action_std = _unwrap_model(student).action_std()
-                        actions = action_mean + torch.randn_like(action_mean) * action_std
-                        actions_log_prob = _normal_log_prob(actions, action_mean, action_std)
+                        action_std_for_env = action_std.expand_as(action_mean)
+                        actions = action_mean + torch.randn_like(action_mean) * action_std_for_env
+                        actions_log_prob = _normal_log_prob(actions, action_mean, action_std_for_env)
 
                         proprio_buffer.append(proprio.detach())
                         depth_buffer.append(depth.detach())
@@ -890,11 +933,18 @@ def main() -> None:
                         action_buffer.append(actions.detach())
                         old_log_prob_buffer.append(actions_log_prob.detach())
                         old_mean_buffer.append(action_mean.detach())
+                        old_std_buffer.append(action_std_for_env.detach())
                         value_buffer.append(values.detach())
 
                         obs_dict, rewards, dones, _extras = env.step({"actions": actions.detach()})
                         reward_buffer.append(rewards.detach().float())
                         done_buffer.append(dones.detach().float())
+                        cur_reward_sum += rewards.detach().float().view(-1)
+                        done_mask = dones.detach().bool().view(-1)
+                        if done_mask.any():
+                            done_returns = cur_reward_sum[done_mask].detach().cpu()
+                            episode_return_buffer.extend(float(value) for value in done_returns)
+                            cur_reward_sum[done_mask] = 0.0
                         global_step += 1
 
                 with torch.no_grad():
@@ -920,13 +970,14 @@ def main() -> None:
                 flat_actions = _flatten_time_env(torch.stack(action_buffer))
                 flat_old_log_prob = _flatten_time_env(torch.stack(old_log_prob_buffer))
                 flat_old_mean = _flatten_time_env(torch.stack(old_mean_buffer))
+                flat_old_std = _flatten_time_env(torch.stack(old_std_buffer))
                 flat_values = _flatten_time_env(values_tensor)
                 flat_returns = _flatten_time_env(returns.detach())
                 flat_advantages = _flatten_time_env(advantages.detach())
                 flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-8)
 
                 ppo_coeff = _ppo_coeff(update_idx, args)
-                _set_log_std_lr(optimizer, args, ppo_coeff)
+                _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff)
                 total_samples = flat_actions.shape[0]
                 mini_batch_size = max(1, total_samples // args.num_mini_batches)
                 update_count = 0
@@ -936,6 +987,7 @@ def main() -> None:
                 entropy_sum = 0.0
                 dagger_loss_sum = 0.0
                 approx_kl_sum = 0.0
+                gaussian_kl_sum = 0.0
 
                 for _epoch in range(args.num_learning_epochs):
                     permutation = torch.randperm(total_samples, device=device)
@@ -953,6 +1005,33 @@ def main() -> None:
                             batch_action_std,
                         )
                         batch_entropy = _normal_entropy_per_env(batch_action_std, batch_idx.numel()).mean()
+                        with torch.no_grad():
+                            batch_kl_mean = _normal_kl(
+                                flat_old_mean[batch_idx],
+                                flat_old_std[batch_idx],
+                                batch_action_mean,
+                                batch_action_std,
+                            ).mean()
+                            if is_distributed:
+                                dist.all_reduce(batch_kl_mean, op=dist.ReduceOp.SUM)
+                                batch_kl_mean /= world_size
+                            if args.schedule == "adaptive" and args.desired_kl > 0.0 and ppo_coeff > 0.1:
+                                if is_main_process:
+                                    if batch_kl_mean > args.desired_kl * 2.0:
+                                        current_learning_rate = max(
+                                            args.min_learning_rate,
+                                            current_learning_rate / 1.5,
+                                        )
+                                    elif 0.0 < batch_kl_mean < args.desired_kl / 2.0:
+                                        current_learning_rate = min(
+                                            args.max_learning_rate,
+                                            current_learning_rate * 1.5,
+                                        )
+                                if is_distributed:
+                                    lr_tensor = torch.tensor(current_learning_rate, device=device)
+                                    dist.broadcast(lr_tensor, src=0)
+                                    current_learning_rate = float(lr_tensor.item())
+                                _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff)
                         ratio = torch.exp(batch_log_prob - flat_old_log_prob[batch_idx])
                         surrogate = -flat_advantages[batch_idx] * ratio
                         surrogate_clipped = -flat_advantages[batch_idx] * torch.clamp(
@@ -999,6 +1078,7 @@ def main() -> None:
                             entropy_sum += float(batch_entropy.detach().item())
                             dagger_loss_sum += float(dagger_loss.detach().item())
                             approx_kl_sum += float((flat_old_log_prob[batch_idx] - batch_log_prob.detach()).mean().item())
+                            gaussian_kl_sum += float(batch_kl_mean.detach().item())
                             update_count += 1
 
                 if iteration % args.logging_interval == 0 or iteration == 1:
@@ -1012,10 +1092,34 @@ def main() -> None:
                     entropy_value = _distributed_mean(torch.tensor(entropy_sum / denom, device=device), distributed_conf)
                     dagger_loss_value = _distributed_mean(torch.tensor(dagger_loss_sum / denom, device=device), distributed_conf)
                     approx_kl_value = _distributed_mean(torch.tensor(approx_kl_sum / denom, device=device), distributed_conf)
+                    gaussian_kl_value = _distributed_mean(
+                        torch.tensor(gaussian_kl_sum / denom, device=device),
+                        distributed_conf,
+                    )
                     reward_value = _distributed_mean(rewards_tensor.mean(), distributed_conf)
                     done_value = _distributed_mean(dones_tensor.mean(), distributed_conf)
                     action_l1 = _distributed_mean((flat_old_mean - flat_teacher_actions).abs().mean(), distributed_conf)
-                    action_std_value = _distributed_mean(_unwrap_model(student).action_std().mean(), distributed_conf)
+                    sampled_action_l1 = _distributed_mean((flat_actions - flat_teacher_actions).abs().mean(), distributed_conf)
+                    action_std_tensor = _unwrap_model(student).action_std()
+                    action_std_value = _distributed_mean(action_std_tensor.mean(), distributed_conf)
+                    action_std_min = _distributed_min(action_std_tensor.min(), distributed_conf)
+                    action_std_max = _distributed_max(action_std_tensor.max(), distributed_conf)
+                    depth_min = _distributed_min(flat_depth.min(), distributed_conf)
+                    depth_max = _distributed_max(flat_depth.max(), distributed_conf)
+                    depth_mean = _distributed_mean(flat_depth.mean(), distributed_conf)
+                    depth_std = _distributed_mean(flat_depth.std(unbiased=False), distributed_conf)
+                    depth_min_saturation = _distributed_mean((flat_depth <= -0.499).float().mean(), distributed_conf)
+                    depth_max_saturation = _distributed_mean((flat_depth >= 0.499).float().mean(), distributed_conf)
+                    episode_return_sum = torch.tensor(sum(episode_return_buffer), device=device, dtype=torch.float)
+                    episode_return_count = torch.tensor(len(episode_return_buffer), device=device, dtype=torch.float)
+                    if is_distributed:
+                        dist.all_reduce(episode_return_sum, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(episode_return_count, op=dist.ReduceOp.SUM)
+                    episode_return_mean = (
+                        float((episode_return_sum / episode_return_count.clamp_min(1.0)).item())
+                        if episode_return_count.item() > 0.0
+                        else 0.0
+                    )
                     if is_main_process:
                         elapsed_s = time.time() - start_time
                         metrics = {
@@ -1028,18 +1132,34 @@ def main() -> None:
                             "ppo/surrogate_loss": surrogate_loss_value,
                             "ppo/entropy": entropy_value,
                             "ppo/approx_kl": approx_kl_value,
+                            "ppo/kl": gaussian_kl_value,
                             "ppo/ppo_coeff": ppo_coeff,
+                            "ppo/learning_rate": current_learning_rate,
                             "rollout/reward_mean": reward_value,
+                            "rollout/episode_return_mean": episode_return_mean,
+                            "rollout/episode_return_count": float(episode_return_count.item()),
                             "rollout/done_rate": done_value,
+                            "rollout/sampled_action_l1": sampled_action_l1,
                             "rollout/action_std_mean": action_std_value,
+                            "rollout/action_std_min": action_std_min,
+                            "rollout/action_std_max": action_std_max,
                             "rollout/global_step": global_step,
+                            "depth/min": depth_min,
+                            "depth/max": depth_max,
+                            "depth/mean": depth_mean,
+                            "depth/std": depth_std,
+                            "depth/min_saturation_frac": depth_min_saturation,
+                            "depth/max_saturation_frac": depth_max_saturation,
                             "time/elapsed_s": elapsed_s,
                         }
                         logger.info(
                             f"iter={iteration:07d} global_step={global_step:07d} mode=hybrid loss={total_loss_value:.6f} "
                             f"dagger={dagger_loss_value:.6f} ppo_coeff={ppo_coeff:.3f} "
                             f"value={value_loss_value:.6f} surrogate={surrogate_loss_value:.6f} "
-                            f"action_l1={action_l1:.6f} reward={reward_value:.4f} done={done_value:.4f}"
+                            f"action_l1={action_l1:.6f} sampled_l1={sampled_action_l1:.6f} "
+                            f"std={action_std_value:.4f} kl={gaussian_kl_value:.6f} lr={current_learning_rate:.2e} "
+                            f"depth_mean={depth_mean:.4f} depth_std={depth_std:.4f} depth_sat_max={depth_max_saturation:.4f} "
+                            f"reward={reward_value:.4f} episode_return={episode_return_mean:.4f} done={done_value:.4f}"
                         )
                         if wandb_run is not None:
                             wandb_run.log(metrics, step=iteration)
