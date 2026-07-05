@@ -9,6 +9,16 @@ model_base="$(basename "$model_path")"
 if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
   model_run_id="${BASH_REMATCH[1]}"
 elif [[ "$model_path" == wandb://* || "$model_path" == https://wandb.ai/* ]]; then
+  model_path_has_checkpoint=0
+  if [[ "$model_path" == */files/* ]]; then
+    model_path_has_checkpoint=1
+  elif [[ "$model_path" == wandb://* ]]; then
+    IFS='/' read -r -a model_path_parts <<< "${model_path#wandb://}"
+    if [[ "${#model_path_parts[@]}" -ge 4 ]]; then
+      model_path_has_checkpoint=1
+    fi
+  fi
+
   model_run_path="${model_path#wandb://}"
   model_run_path="${model_run_path#https://wandb.ai/}"
   model_run_path="${model_run_path%%\?*}"
@@ -18,6 +28,9 @@ elif [[ "$model_path" == wandb://* || "$model_path" == https://wandb.ai/* ]]; th
   IFS='/' read -r -a model_run_parts <<< "$model_run_path"
   if [[ "${#model_run_parts[@]}" -ge 3 ]]; then
     model_run_id="${model_run_parts[2]}"
+    if [[ "$model_path_has_checkpoint" != "1" ]]; then
+      model_path="wandb://${model_run_parts[0]}/${model_run_parts[1]}/${model_run_parts[2]}/latest"
+    fi
   fi
 fi
 run_id="$model_run_id"
@@ -36,7 +49,7 @@ if [[ -z "$inference_config" ]]; then
     36k1vwdf|zzv6vtkk)
       inference_config="g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1"
       ;;
-    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x)
+    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4)
       inference_config="g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1"
       ;;
     1j98x3g1|6c7exbeq)
@@ -107,7 +120,7 @@ run_args=(
 
 external_root_pos_run=0
 case "$model_run_id" in
-  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|36k1vwdf|zzv6vtkk)
+  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|36k1vwdf|zzv6vtkk)
     external_root_pos_run=1
     ;;
 esac
