@@ -132,6 +132,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._policy_command_status_next_time = 0.0
         self._policy_command_status_period = 0.05
         self._logged_policy_command_status_error = False
+        policy_command_control_path = os.environ.get(
+            "HOLOSOMA_POLICY_COMMAND_CONTROL_PATH",
+            "/tmp/holosoma_policy_command_control.json",
+        ).strip()
+        self._policy_command_control_path = Path(policy_command_control_path) if policy_command_control_path else None
+        self._policy_command_control_mtime_ns: int | None = None
+        self._logged_policy_command_control_error = False
         try:
             self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "200") or "200")
         except ValueError:
@@ -693,6 +700,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         current_obs_buffer_dict = {}
         required_terms = {term for terms in self.obs_dict.values() for term in terms}
+        self._apply_policy_command_control(required_terms)
 
         if "motion_command" in required_terms:
             current_obs_buffer_dict["motion_command"] = self.motion_command_t
@@ -768,6 +776,47 @@ class WholeBodyTrackingPolicy(BasePolicy):
             }
 
         return current_obs_buffer_dict
+
+    def _apply_policy_command_control(self, required_terms: set[str]) -> None:
+        if self._policy_command_control_path is None:
+            return
+        try:
+            stat = self._policy_command_control_path.stat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if not self._logged_policy_command_control_error:
+                logger.warning("Failed to stat policy command control file: {}", exc)
+                self._logged_policy_command_control_error = True
+            return
+
+        if self._policy_command_control_mtime_ns == stat.st_mtime_ns:
+            return
+
+        try:
+            payload = json.loads(self._policy_command_control_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            if not self._logged_policy_command_control_error:
+                logger.warning("Failed to read policy command control file: {}", exc)
+                self._logged_policy_command_control_error = True
+            return
+
+        self._policy_command_control_mtime_ns = stat.st_mtime_ns
+        if not isinstance(payload, dict):
+            return
+
+        if "pickup_button" in payload and "pickup_button" in required_terms:
+            try:
+                self._pickup_button_command = float(payload["pickup_button"])
+                self.logger.info(colored(f"Pickup button command: {self._pickup_button_command:.0f}", "blue"))
+            except (TypeError, ValueError):
+                pass
+        if "drop_button" in payload and "drop_button" in required_terms:
+            try:
+                self._drop_button_command = float(payload["drop_button"])
+                self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+            except (TypeError, ValueError):
+                pass
 
     def _write_sparse_root_command_status(self, current_obs_buffer_dict: dict[str, np.ndarray]) -> None:
         if self._policy_command_status_path is None:

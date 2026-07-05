@@ -334,6 +334,23 @@ class MuJoCo(BaseSimulator):
         self._policy_command_status_command: tuple[float, float, float] | None = None
         self._policy_command_status_payload: dict[str, object] | None = None
         self._policy_command_status_next_read = 0.0
+        policy_command_control_path = os.environ.get(
+            "HOLOSOMA_POLICY_COMMAND_CONTROL_PATH",
+            "/tmp/holosoma_policy_command_control.json",
+        ).strip()
+        self._policy_command_control_path: Path | None = (
+            Path(policy_command_control_path) if policy_command_control_path else None
+        )
+        self._policy_button_commands_enabled = os.environ.get(
+            "HOLOSOMA_ENABLE_MUJOCO_POLICY_BUTTON_COMMANDS",
+            "",
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._policy_command_control_drop_button: float | None = None
         self._text_overlay_last_text: str | None = None
 
         # Command system for keyboard/joystick controls
@@ -2234,6 +2251,50 @@ class MuJoCo(BaseSimulator):
             return "manual"
         return "external-zero"
 
+    def _write_policy_command_control(self, updates: dict[str, float]) -> bool:
+        if self._policy_command_control_path is None:
+            return False
+        payload = {"timestamp": time.time(), **updates}
+        try:
+            self._policy_command_control_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._policy_command_control_path.with_name(f".{self._policy_command_control_path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            tmp_path.replace(self._policy_command_control_path)
+        except OSError as exc:
+            logger.warning("Failed to write policy command control file: {}", exc)
+            return False
+        return True
+
+    def _toggle_policy_drop_button_from_viewer(self) -> bool:
+        if not self._policy_button_commands_enabled:
+            return False
+
+        payload = self._policy_command_status_payload if isinstance(self._policy_command_status_payload, dict) else {}
+        current = 0.0
+        if "drop_button" in payload:
+            try:
+                current = float(payload["drop_button"])
+            except (TypeError, ValueError):
+                current = 0.0
+        elif self._policy_command_control_drop_button is not None:
+            current = self._policy_command_control_drop_button
+
+        next_value = 0.0 if current >= 0.5 else 1.0
+        if not self._write_policy_command_control({"drop_button": next_value}):
+            return False
+        self._policy_command_control_drop_button = next_value
+
+        if isinstance(self._policy_command_status_payload, dict):
+            self._policy_command_status_payload["drop_button"] = next_value
+            self._policy_command_status_text = self._policy_command_status_text.replace(
+                f" drop={current:.0f}",
+                f" drop={next_value:.0f}",
+            )
+        logger.info("MuJoCo viewer policy drop_button command: {:.0f}", next_value)
+        self._policy_command_status_next_read = 0.0
+        self._update_text_overlay()
+        return True
+
     def _robot_root_xy_yaw_for_policy_viz(self) -> tuple[np.ndarray, float] | None:
         if self.root_data is None:
             return None
@@ -2338,6 +2399,8 @@ class MuJoCo(BaseSimulator):
         # Handle text overlay toggle
         # G key (71): Toggle text overlay visibility
         if keycode == 71:  # 'G' key
+            if self._toggle_policy_drop_button_from_viewer():
+                return
             self.show_text_overlay = not self.show_text_overlay
             status = "ON" if self.show_text_overlay else "OFF"
             logger.info(f"Text overlay: {status}")
