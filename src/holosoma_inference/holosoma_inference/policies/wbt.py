@@ -817,6 +817,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
             except (TypeError, ValueError):
                 pass
+        manual_offset = payload.get("manual_offset")
+        if manual_offset is not None:
+            try:
+                manual_offset_array = np.asarray(manual_offset, dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError):
+                manual_offset_array = np.asarray([], dtype=np.float32)
+            if manual_offset_array.size >= 3:
+                self._manual_sparse_root_command_offset[0, :3] = manual_offset_array[:3]
+                self.logger.info(
+                    colored(
+                        "Sparse root command offset: x={:.2f}, y={:.2f}, yaw={:.2f}".format(
+                            float(self._manual_sparse_root_command_offset[0, 0]),
+                            float(self._manual_sparse_root_command_offset[0, 1]),
+                            float(self._manual_sparse_root_command_offset[0, 2]),
+                        ),
+                        "blue",
+                    )
+                )
 
     def _write_sparse_root_command_status(self, current_obs_buffer_dict: dict[str, np.ndarray]) -> None:
         if self._policy_command_status_path is None:
@@ -900,7 +918,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         delta_y_body = s * delta_xy_world[:, 0] + c * delta_xy_world[:, 1]
         yaw_error = (target_yaw - robot_yaw + np.pi) % (2 * np.pi) - np.pi
 
-        return np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
+        base_command = np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
+        return (base_command + external_sparse_command).astype(np.float32, copy=False)
 
     def _get_sparse_target_root_trajectory_command_contact_aware(self, base_command: np.ndarray) -> np.ndarray:
         if self._motion_object_pos_w is None or self._motion_root_pos_w is None:
