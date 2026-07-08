@@ -45,6 +45,12 @@ class LayerConfig:
     encoder_input_name: str = ""
     """Input name for encoder. Only used for encoder modules."""
 
+    encoder_obs_token_name: str | None = None
+    """Input name for the current observation token in token-based encoders."""
+
+    perception_input_name: str = ""
+    """Input name for perception/heightmap token in token-based encoders."""
+
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
 
@@ -68,6 +74,30 @@ class LayerConfig:
 
     module_input_name: tuple[str, ...] = ()
     """Input names for module. Only used for encoder modules."""
+
+    encoder_num_steps: int | None = None
+    """Sequence length for optional target-token transformer encoders."""
+
+    encoder_obs_dim: int | None = None
+    """Per-step feature dimension for optional target-token transformer encoders."""
+
+    transformer_latent_dim: int = 256
+    """Latent dimension for token transformer encoders."""
+
+    transformer_num_layers: int = 2
+    """Number of transformer encoder layers."""
+
+    transformer_num_heads: int = 2
+    """Number of attention heads for token transformer encoders."""
+
+    transformer_ff_dim: int = 512
+    """Feed-forward dimension inside token transformer encoder layers."""
+
+    transformer_dropout: float = 0.0
+    """Dropout probability inside token transformer encoder layers."""
+
+    transformer_pooling: str = "first"
+    """Pooling for token transformer output: 'first' or 'mean'."""
 
 
 @dataclass(frozen=True)

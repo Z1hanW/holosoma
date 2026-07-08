@@ -561,6 +561,51 @@ class DepthCameraCfg:
     max_range: float = 2.0
     """Maximum depth range and ray-cast clipping distance."""
 
+    resize_mode: str = "bicubic"
+    """Depth resize mode. ``bicubic`` matches far-tracking's torchvision Resize path."""
+
+    randomize_placement: bool = False
+    """Whether to randomize the camera mount placement once per environment."""
+
+    min_translation: list[float] = field(default_factory=lambda: [-0.025, -0.025, -0.025])
+    """Minimum camera translation perturbation in the parent body frame."""
+
+    max_translation: list[float] = field(default_factory=lambda: [0.025, 0.025, 0.025])
+    """Maximum camera translation perturbation in the parent body frame."""
+
+    min_euler_rotation_deg: list[float] = field(default_factory=lambda: [-2.5, -3.0, -2.5])
+    """Minimum camera RPY perturbation in degrees."""
+
+    max_euler_rotation_deg: list[float] = field(default_factory=lambda: [2.5, 3.0, 2.5])
+    """Maximum camera RPY perturbation in degrees."""
+
+    enable_self_occlusion: bool = False
+    """Use far-tracking-style dynamic Warp raycasting against robot link meshes and terrain."""
+
+    self_occlusion_mesh_root: str | None = None
+    """Optional mesh directory for robot self-occlusion link meshes. Defaults to the robot asset mesh dir."""
+
+    self_occlusion_body_meshes: dict[str, str] = field(default_factory=dict)
+    """Optional body-to-mesh overrides for the dynamic self-occlusion raycaster."""
+
+    latency_frame_min: int = 0
+    """Minimum depth observation latency frame. ``0`` disables latency when max is also ``0``."""
+
+    latency_frame_max: int = 0
+    """Maximum depth observation latency frame."""
+
+    buffer_len: int = 1
+    """Depth latency buffer length. Must be greater than ``latency_frame_max`` when latency is enabled."""
+
+    enable_sensor_noise: bool = False
+    """Whether to add far-tracking-style multiplicative depth noise and pixel dropout."""
+
+    pixel_std_dev_multiplier: float = 0.1
+    """Depth noise std multiplier; far-tracking observation code uses ``0.1 * depth``."""
+
+    pixel_dropout_prob: float = 0.05
+    """Probability of replacing a depth pixel with a uniform value in the valid range."""
+
     debug_vis: bool = False
     """Whether to visualize ray hits."""
 

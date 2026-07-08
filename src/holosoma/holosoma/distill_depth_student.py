@@ -23,7 +23,11 @@ from holosoma.config_types.algo import FastSACConfig, PPOConfig
 from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
-from holosoma.managers.observation.terms.wbt import depth_camera as depth_camera_obs
+from holosoma.managers.observation.terms.wbt import (
+    depth_camera as depth_camera_obs,
+    projected_gravity as projected_gravity_obs,
+    root_target_xy_yaw as root_target_xy_yaw_obs,
+)
 from holosoma.train_agent import configure_logging, configure_multi_gpu, get_device
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import CheckpointConfig, init_sim_imports, load_checkpoint, load_saved_experiment_config
@@ -43,11 +47,11 @@ def _import_torch():
 
 
 class DepthStudentPolicy(_import_torch()[2].Module):
-    """Depth student that consumes proprioception plus a normalized depth image."""
+    """Depth student that consumes low-dimensional command/proprio plus depth."""
 
     def __init__(
         self,
-        proprio_dim: int,
+        lowdim_obs_dim: int,
         action_dim: int,
         depth_shape: tuple[int, int, int],
         hidden_dims: list[int],
@@ -56,7 +60,8 @@ class DepthStudentPolicy(_import_torch()[2].Module):
         torch, _, nn, _, _ = _import_torch()
         super().__init__()
         channels, _, _ = depth_shape
-        self.proprio_dim = proprio_dim
+        self.proprio_dim = lowdim_obs_dim
+        self.lowdim_obs_dim = lowdim_obs_dim
         self.action_dim = action_dim
         self.depth_shape = depth_shape
 
@@ -76,7 +81,7 @@ class DepthStudentPolicy(_import_torch()[2].Module):
         )
 
         layers: list[nn.Module] = []
-        last_dim = proprio_dim + depth_latent_dim
+        last_dim = lowdim_obs_dim + depth_latent_dim
         for hidden_dim in hidden_dims:
             layers.extend(
                 [
@@ -101,10 +106,10 @@ class DepthStudentPolicy(_import_torch()[2].Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
 
-    def forward(self, proprio: Any, depth: Any) -> Any:
+    def forward(self, lowdim_obs: Any, depth: Any) -> Any:
         torch, _, _, _, _ = _import_torch()
         depth_latent = self.depth_encoder(depth)
-        return self.action_head(torch.cat([proprio, depth_latent], dim=-1))
+        return self.action_head(torch.cat([lowdim_obs, depth_latent], dim=-1))
 
 
 class DepthValueFunction(_import_torch()[2].Module):
@@ -141,7 +146,7 @@ class DepthStudentActorCritic(_import_torch()[2].Module):
 
     def __init__(
         self,
-        proprio_dim: int,
+        lowdim_obs_dim: int,
         critic_obs_dim: int,
         action_dim: int,
         depth_shape: tuple[int, int, int],
@@ -155,7 +160,7 @@ class DepthStudentActorCritic(_import_torch()[2].Module):
         if init_noise_std <= 0.0:
             raise ValueError(f"init_noise_std must be positive, got {init_noise_std}")
         self.actor = DepthStudentPolicy(
-            proprio_dim=proprio_dim,
+            lowdim_obs_dim=lowdim_obs_dim,
             action_dim=action_dim,
             depth_shape=depth_shape,
             hidden_dims=actor_hidden_dims,
@@ -164,8 +169,8 @@ class DepthStudentActorCritic(_import_torch()[2].Module):
         self.critic = DepthValueFunction(critic_obs_dim=critic_obs_dim, hidden_dims=critic_hidden_dims)
         self.log_std = nn.Parameter(torch.full((action_dim,), math.log(init_noise_std)))
 
-    def forward(self, proprio: Any, depth: Any, critic_obs: Any | None = None) -> tuple[Any, Any | None]:
-        action_mean = self.actor(proprio, depth)
+    def forward(self, lowdim_obs: Any, depth: Any, critic_obs: Any | None = None) -> tuple[Any, Any | None]:
+        action_mean = self.actor(lowdim_obs, depth)
         value = self.critic(critic_obs) if critic_obs is not None else None
         return action_mean, value
 
@@ -196,6 +201,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-weight-decay", type=float, default=1e-2)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--student-rollout-prob", type=float, default=0.0)
+    parser.add_argument(
+        "--student-command-mode",
+        default="root_xy_yaw",
+        choices=["root_xy_yaw", "legacy_motion"],
+        help=(
+            "Student low-dimensional command. root_xy_yaw uses relative target root x/y/yaw; "
+            "legacy_motion reproduces the old reference joint_pos/joint_vel command."
+        ),
+    )
+    parser.add_argument("--student-include-projected-gravity", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--student-hidden-dims", type=int, nargs="+", default=[2048, 1024, 512, 256, 128])
     parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[512, 256, 128])
     parser.add_argument("--depth-latent-dim", type=int, default=32)
@@ -211,6 +226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dagger-loss-coef", type=float, default=10.0)
     parser.add_argument("--ppo-start-epoch", "--ppo-start-step", dest="ppo_start_epoch", type=int, default=0)
     parser.add_argument("--dagger-end-epoch", "--dagger-end-step", dest="dagger_end_epoch", type=int, default=10000)
+    parser.add_argument("--freeze-action-std", action="store_true")
     parser.add_argument("--schedule", default="adaptive", choices=["adaptive", "fixed"])
     parser.add_argument("--desired-kl", type=float, default=0.01)
     parser.add_argument("--min-learning-rate", type=float, default=1e-5)
@@ -224,6 +240,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-horizontal-fov-deg", type=float, default=101.41)
     parser.add_argument("--depth-camera-body-name", default=None)
     parser.add_argument("--depth-camera-debug-vis", action="store_true")
+    parser.add_argument("--depth-resize-mode", default="bicubic", choices=["nearest", "bilinear", "bicubic", "area"])
+    parser.add_argument("--depth-camera-randomize-placement", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--depth-camera-self-occlusion", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--depth-camera-min-translation", type=float, nargs=3, default=[-0.025, -0.025, -0.025])
+    parser.add_argument("--depth-camera-max-translation", type=float, nargs=3, default=[0.025, 0.025, 0.025])
+    parser.add_argument("--depth-camera-min-rpy-deg", type=float, nargs=3, default=[-2.5, -3.0, -2.5])
+    parser.add_argument("--depth-camera-max-rpy-deg", type=float, nargs=3, default=[2.5, 3.0, 2.5])
+    parser.add_argument("--depth-latency-frame-min", type=int, default=9)
+    parser.add_argument("--depth-latency-frame-max", type=int, default=10)
+    parser.add_argument("--depth-buffer-len", type=int, default=12)
+    parser.add_argument("--depth-sensor-noise", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--depth-pixel-std-dev-multiplier", type=float, default=0.1)
+    parser.add_argument("--depth-pixel-dropout-prob", type=float, default=0.05)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--project", default="holosomatest")
     parser.add_argument("--log-base-dir", default="logs")
@@ -273,6 +302,19 @@ def make_distill_config(saved_config: ExperimentConfig, args: argparse.Namespace
         horizontal_fov_deg=args.depth_horizontal_fov_deg,
         min_range=args.depth_min_range,
         max_range=args.depth_max_range,
+        resize_mode=args.depth_resize_mode,
+        randomize_placement=args.depth_camera_randomize_placement,
+        min_translation=list(args.depth_camera_min_translation),
+        max_translation=list(args.depth_camera_max_translation),
+        min_euler_rotation_deg=list(args.depth_camera_min_rpy_deg),
+        max_euler_rotation_deg=list(args.depth_camera_max_rpy_deg),
+        enable_self_occlusion=args.depth_camera_self_occlusion,
+        latency_frame_min=args.depth_latency_frame_min,
+        latency_frame_max=args.depth_latency_frame_max,
+        buffer_len=args.depth_buffer_len,
+        enable_sensor_noise=args.depth_sensor_noise,
+        pixel_std_dev_multiplier=args.depth_pixel_std_dev_multiplier,
+        pixel_dropout_prob=args.depth_pixel_dropout_prob,
         debug_vis=args.depth_camera_debug_vis,
     )
     simulator_cfg = dataclasses.replace(saved_config.simulator.config, depth_camera=depth_cfg)
@@ -301,8 +343,7 @@ def get_actor_term_slices(env: Any, group_name: str = "actor_obs") -> dict[str, 
 
     start = 0
     slices: dict[str, slice] = {}
-    for term_name in sorted(group_cfg.terms):
-        term_cfg = group_cfg.terms[term_name]
+    for term_name, term_cfg in group_cfg.terms.items():
         term_obs = env.observation_manager._compute_term(group_name, term_name, term_cfg)
         term_dim = term_obs.reshape(env.num_envs, -1).shape[1]
         term_dim *= getattr(group_cfg, "history_length", 1)
@@ -311,17 +352,51 @@ def get_actor_term_slices(env: Any, group_name: str = "actor_obs") -> dict[str, 
     return slices
 
 
-def _student_proprio_terms(term_slices: dict[str, slice]) -> list[str]:
+def _student_legacy_motion_terms(term_slices: dict[str, slice]) -> list[str]:
     excluded_terms = {"height_scan", "depth_camera"}
-    return [name for name in sorted(term_slices) if name not in excluded_terms]
+    return [name for name in term_slices if name not in excluded_terms]
 
 
 def select_student_proprio(actor_obs: Any, term_slices: dict[str, slice]) -> Any:
     torch, _, _, _, _ = _import_torch()
-    parts = [actor_obs[:, term_slices[name]] for name in _student_proprio_terms(term_slices)]
+    parts = [actor_obs[:, term_slices[name]] for name in _student_legacy_motion_terms(term_slices)]
     if not parts:
         raise RuntimeError("No proprioceptive actor observation terms remain after excluding terrain terms.")
     return torch.cat(parts, dim=-1)
+
+
+def _student_actor_proprio_terms(term_slices: dict[str, slice]) -> list[str]:
+    return [name for name in ("base_ang_vel", "dof_pos", "dof_vel", "actions") if name in term_slices]
+
+
+def _student_lowdim_term_names(args: argparse.Namespace, term_slices: dict[str, slice]) -> list[str]:
+    command_mode = getattr(args, "student_command_mode", "root_xy_yaw")
+    if command_mode == "legacy_motion":
+        return _student_legacy_motion_terms(term_slices)
+    terms = ["root_target_xy_yaw"]
+    if getattr(args, "student_include_projected_gravity", True):
+        terms.append("projected_gravity")
+    terms.extend(_student_actor_proprio_terms(term_slices))
+    return terms
+
+
+def select_student_lowdim_obs(env: Any, actor_obs: Any, term_slices: dict[str, slice], args: argparse.Namespace) -> Any:
+    torch, _, _, _, _ = _import_torch()
+    command_mode = getattr(args, "student_command_mode", "root_xy_yaw")
+    if command_mode == "legacy_motion":
+        return select_student_proprio(actor_obs, term_slices)
+    if command_mode != "root_xy_yaw":
+        raise ValueError(f"Unknown student_command_mode: {command_mode}")
+
+    parts = [root_target_xy_yaw_obs(env)]
+    if getattr(args, "student_include_projected_gravity", True):
+        parts.append(projected_gravity_obs(env))
+    proprio_terms = _student_actor_proprio_terms(term_slices)
+    missing = [name for name in ("base_ang_vel", "dof_pos", "dof_vel", "actions") if name not in term_slices]
+    if missing:
+        raise RuntimeError(f"Student root_xy_yaw observation is missing actor_obs proprio terms: {missing}")
+    parts.extend(actor_obs[:, term_slices[name]] for name in proprio_terms)
+    return torch.cat([part.to(device=actor_obs.device, dtype=actor_obs.dtype) for part in parts], dim=-1)
 
 
 def _get_actor_obs_group(obs_dict: dict[str, Any]) -> Any:
@@ -518,7 +593,7 @@ def save_student_checkpoint(
     args: argparse.Namespace,
     config: ExperimentConfig,
     teacher_checkpoint: Path,
-    proprio_dim: int,
+    lowdim_obs_dim: int,
     action_dim: int,
     depth_shape: tuple[int, int, int],
     critic_obs_dim: int | None = None,
@@ -530,7 +605,10 @@ def save_student_checkpoint(
         "student_state_dict": module.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "teacher_checkpoint": str(teacher_checkpoint),
-        "proprio_dim": proprio_dim,
+        # Kept as "proprio_dim" for checkpoint compatibility. It now means the
+        # full low-dimensional student input: command + proprioception.
+        "proprio_dim": lowdim_obs_dim,
+        "lowdim_obs_dim": lowdim_obs_dim,
         "critic_obs_dim": critic_obs_dim,
         "action_dim": action_dim,
         "depth_shape": depth_shape,
@@ -544,24 +622,24 @@ def save_student_checkpoint(
 def export_student_onnx(
     path: Path,
     model: Any,
-    proprio_dim: int,
+    lowdim_obs_dim: int,
     depth_shape: tuple[int, int, int],
     device: str,
 ) -> None:
     torch, _, _, _, _ = _import_torch()
     module = copy.deepcopy(_actor_from_model(model)).to(device)
     module.eval()
-    dummy_proprio = torch.zeros(1, proprio_dim, device=device)
+    dummy_lowdim = torch.zeros(1, lowdim_obs_dim, device=device)
     dummy_depth = torch.zeros(1, *depth_shape, device=device)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         module,
-        (dummy_proprio, dummy_depth),
+        (dummy_lowdim, dummy_depth),
         str(path),
-        input_names=["proprio", "depth"],
+        input_names=["lowdim_obs", "depth"],
         output_names=["actions"],
         dynamic_axes={
-            "proprio": {0: "batch"},
+            "lowdim_obs": {0: "batch"},
             "depth": {0: "batch"},
             "actions": {0: "batch"},
         },
@@ -673,10 +751,15 @@ def _make_hybrid_optimizer(model: Any, args: argparse.Namespace) -> Any:
     )
 
 
-def _set_optimizer_lr(optimizer: Any, learning_rate: float, ppo_coeff: float) -> None:
+def _set_optimizer_lr(
+    optimizer: Any,
+    learning_rate: float,
+    ppo_coeff: float,
+    freeze_action_std: bool = False,
+) -> None:
     for param_group in optimizer.param_groups:
         if param_group.get("name") == "log_std":
-            param_group["lr"] = learning_rate if ppo_coeff > 0.1 else 0.0
+            param_group["lr"] = 0.0 if freeze_action_std else learning_rate if ppo_coeff > 0.1 else 0.0
         else:
             param_group["lr"] = learning_rate
 
@@ -700,6 +783,14 @@ def _compute_depth(env: Any, args: argparse.Namespace, device: str) -> Any:
         max_range=args.depth_max_range,
         resize_height=args.depth_height,
         resize_width=args.depth_width,
+        resize_mode=getattr(args, "depth_resize_mode", None),
+        enable_self_occlusion=getattr(args, "depth_camera_self_occlusion", None),
+        enable_sensor_noise=getattr(args, "depth_sensor_noise", None),
+        pixel_std_dev_multiplier=getattr(args, "depth_pixel_std_dev_multiplier", None),
+        pixel_dropout_prob=getattr(args, "depth_pixel_dropout_prob", None),
+        latency_frame_min=getattr(args, "depth_latency_frame_min", None),
+        latency_frame_max=getattr(args, "depth_latency_frame_max", None),
+        buffer_len=getattr(args, "depth_buffer_len", None),
         flatten=False,
     ).to(device=device, dtype=torch.float)
 
@@ -773,14 +864,14 @@ def main() -> None:
         actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
         critic_obs = _get_critic_obs_group(obs_dict).to(device=device, dtype=torch.float)
         term_slices = get_actor_term_slices(env, "actor_obs")
-        proprio = select_student_proprio(actor_obs, term_slices)
-        proprio_dim = proprio.shape[1]
+        lowdim_obs = select_student_lowdim_obs(env, actor_obs, term_slices, args)
+        lowdim_obs_dim = lowdim_obs.shape[1]
         critic_obs_dim = critic_obs.shape[1]
         depth_shape = (1, args.depth_height, args.depth_width)
 
         if args.training_mode == "hybrid":
             student = DepthStudentActorCritic(
-                proprio_dim=proprio_dim,
+                lowdim_obs_dim=lowdim_obs_dim,
                 critic_obs_dim=critic_obs_dim,
                 action_dim=action_dim,
                 depth_shape=depth_shape,
@@ -791,7 +882,7 @@ def main() -> None:
             ).to(device)
         else:
             student = DepthStudentPolicy(
-                proprio_dim=proprio_dim,
+                lowdim_obs_dim=lowdim_obs_dim,
                 action_dim=action_dim,
                 depth_shape=depth_shape,
                 hidden_dims=args.student_hidden_dims,
@@ -803,7 +894,12 @@ def main() -> None:
         if args.training_mode == "hybrid":
             optimizer = _make_hybrid_optimizer(student, args)
             current_learning_rate = args.learning_rate
-            _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff=0.0)
+            _set_optimizer_lr(
+                optimizer,
+                current_learning_rate,
+                ppo_coeff=0.0,
+                freeze_action_std=args.freeze_action_std,
+            )
         else:
             optimizer = torch.optim.AdamW(
                 student.parameters(),
@@ -815,11 +911,11 @@ def main() -> None:
         if is_main_process:
             wandb_run = init_wandb(args, log_dir, distill_config, teacher_checkpoint)
             logger.info(
-                f"Depth student dims: proprio={proprio_dim}, critic={critic_obs_dim}, depth={depth_shape}, action={action_dim}, "
+                f"Depth student dims: lowdim_obs={lowdim_obs_dim}, critic={critic_obs_dim}, depth={depth_shape}, action={action_dim}, "
                 f"training_mode={args.training_mode}, "
-                f"student_rollout_prob={args.student_rollout_prob}"
+                f"student_command_mode={args.student_command_mode}, student_rollout_prob={args.student_rollout_prob}"
             )
-            logger.info(f"Student proprio terms: {_student_proprio_terms(term_slices)}")
+            logger.info(f"Student lowdim terms: {_student_lowdim_term_names(args, term_slices)}")
 
         start_time = time.time()
         student.train()
@@ -828,10 +924,10 @@ def main() -> None:
                 with torch.no_grad():
                     teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
                     actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
-                    proprio = select_student_proprio(actor_obs, term_slices)
+                    lowdim_obs = select_student_lowdim_obs(env, actor_obs, term_slices, args)
                     depth = _compute_depth(env, args, device)
 
-                student_actions = student(proprio, depth)
+                student_actions = student(lowdim_obs, depth)
                 loss = F.mse_loss(student_actions, teacher_actions)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -882,18 +978,18 @@ def main() -> None:
                         args,
                         distill_config,
                         teacher_checkpoint,
-                        proprio_dim,
+                        lowdim_obs_dim,
                         action_dim,
                         depth_shape,
                     )
                     if args.export_onnx:
-                        export_student_onnx(
-                            log_dir / f"student_{iteration:07d}.onnx",
-                            student,
-                            proprio_dim,
-                            depth_shape,
-                            device,
-                        )
+                            export_student_onnx(
+                                log_dir / f"student_{iteration:07d}.onnx",
+                                student,
+                                lowdim_obs_dim,
+                                depth_shape,
+                                device,
+                            )
         else:
             global_step = 0
             cur_reward_sum = torch.zeros(distill_config.training.num_envs, device=device)
@@ -901,7 +997,7 @@ def main() -> None:
             for update_idx in range(args.iterations):
                 iteration = update_idx + 1
                 rollout_len = args.num_steps_per_update
-                proprio_buffer: list[Any] = []
+                lowdim_buffer: list[Any] = []
                 depth_buffer: list[Any] = []
                 critic_obs_buffer: list[Any] = []
                 teacher_action_buffer: list[Any] = []
@@ -912,21 +1008,22 @@ def main() -> None:
                 value_buffer: list[Any] = []
                 reward_buffer: list[Any] = []
                 done_buffer: list[Any] = []
+                timeout_buffer: list[Any] = []
 
                 for _ in range(rollout_len):
                     with torch.no_grad():
                         teacher_actions = teacher_policy(obs_dict).to(device=device, dtype=torch.float)
                         actor_obs = _get_actor_obs_group(obs_dict).to(device=device, dtype=torch.float)
                         critic_obs = _get_critic_obs_group(obs_dict).to(device=device, dtype=torch.float)
-                        proprio = select_student_proprio(actor_obs, term_slices)
+                        lowdim_obs = select_student_lowdim_obs(env, actor_obs, term_slices, args)
                         depth = _compute_depth(env, args, device)
-                        action_mean, values = student(proprio, depth, critic_obs)
+                        action_mean, values = student(lowdim_obs, depth, critic_obs)
                         action_std = _unwrap_model(student).action_std()
                         action_std_for_env = action_std.expand_as(action_mean)
                         actions = action_mean + torch.randn_like(action_mean) * action_std_for_env
                         actions_log_prob = _normal_log_prob(actions, action_mean, action_std_for_env)
 
-                        proprio_buffer.append(proprio.detach())
+                        lowdim_buffer.append(lowdim_obs.detach())
                         depth_buffer.append(depth.detach())
                         critic_obs_buffer.append(critic_obs.detach())
                         teacher_action_buffer.append(teacher_actions.detach())
@@ -936,9 +1033,15 @@ def main() -> None:
                         old_std_buffer.append(action_std_for_env.detach())
                         value_buffer.append(values.detach())
 
-                        obs_dict, rewards, dones, _extras = env.step({"actions": actions.detach()})
+                        obs_dict, rewards, dones, extras = env.step({"actions": actions.detach()})
+                        timeouts = extras.get("time_outs")
+                        if timeouts is None:
+                            timeouts = torch.zeros_like(dones, dtype=torch.bool)
+                        else:
+                            timeouts = timeouts.detach().bool()
                         reward_buffer.append(rewards.detach().float())
                         done_buffer.append(dones.detach().float())
+                        timeout_buffer.append(timeouts.float())
                         cur_reward_sum += rewards.detach().float().view(-1)
                         done_mask = dones.detach().bool().view(-1)
                         if done_mask.any():
@@ -953,6 +1056,7 @@ def main() -> None:
 
                 rewards_tensor = torch.stack(reward_buffer)
                 dones_tensor = torch.stack(done_buffer)
+                timeouts_tensor = torch.stack(timeout_buffer)
                 values_tensor = torch.stack(value_buffer)
                 advantages, returns = _compute_gae(
                     rewards_tensor,
@@ -963,7 +1067,7 @@ def main() -> None:
                     args.gae_lambda,
                 )
 
-                flat_proprio = _flatten_time_env(torch.stack(proprio_buffer))
+                flat_lowdim = _flatten_time_env(torch.stack(lowdim_buffer))
                 flat_depth = _flatten_time_env(torch.stack(depth_buffer))
                 flat_critic_obs = _flatten_time_env(torch.stack(critic_obs_buffer))
                 flat_teacher_actions = _flatten_time_env(torch.stack(teacher_action_buffer))
@@ -977,7 +1081,12 @@ def main() -> None:
                 flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-8)
 
                 ppo_coeff = _ppo_coeff(update_idx, args)
-                _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff)
+                _set_optimizer_lr(
+                    optimizer,
+                    current_learning_rate,
+                    ppo_coeff,
+                    freeze_action_std=args.freeze_action_std,
+                )
                 total_samples = flat_actions.shape[0]
                 mini_batch_size = max(1, total_samples // args.num_mini_batches)
                 update_count = 0
@@ -994,7 +1103,7 @@ def main() -> None:
                     for start in range(0, total_samples, mini_batch_size):
                         batch_idx = permutation[start : start + mini_batch_size]
                         batch_action_mean, batch_values = student(
-                            flat_proprio[batch_idx],
+                            flat_lowdim[batch_idx],
                             flat_depth[batch_idx],
                             flat_critic_obs[batch_idx],
                         )
@@ -1031,7 +1140,12 @@ def main() -> None:
                                     lr_tensor = torch.tensor(current_learning_rate, device=device)
                                     dist.broadcast(lr_tensor, src=0)
                                     current_learning_rate = float(lr_tensor.item())
-                                _set_optimizer_lr(optimizer, current_learning_rate, ppo_coeff)
+                                _set_optimizer_lr(
+                                    optimizer,
+                                    current_learning_rate,
+                                    ppo_coeff,
+                                    freeze_action_std=args.freeze_action_std,
+                                )
                         ratio = torch.exp(batch_log_prob - flat_old_log_prob[batch_idx])
                         surrogate = -flat_advantages[batch_idx] * ratio
                         surrogate_clipped = -flat_advantages[batch_idx] * torch.clamp(
@@ -1098,6 +1212,11 @@ def main() -> None:
                     )
                     reward_value = _distributed_mean(rewards_tensor.mean(), distributed_conf)
                     done_value = _distributed_mean(dones_tensor.mean(), distributed_conf)
+                    timeout_value = _distributed_mean(timeouts_tensor.mean(), distributed_conf)
+                    non_timeout_done_value = _distributed_mean(
+                        (dones_tensor.bool() & ~timeouts_tensor.bool()).float().mean(),
+                        distributed_conf,
+                    )
                     action_l1 = _distributed_mean((flat_old_mean - flat_teacher_actions).abs().mean(), distributed_conf)
                     sampled_action_l1 = _distributed_mean((flat_actions - flat_teacher_actions).abs().mean(), distributed_conf)
                     action_std_tensor = _unwrap_model(student).action_std()
@@ -1139,6 +1258,8 @@ def main() -> None:
                             "rollout/episode_return_mean": episode_return_mean,
                             "rollout/episode_return_count": float(episode_return_count.item()),
                             "rollout/done_rate": done_value,
+                            "rollout/timeout_rate": timeout_value,
+                            "rollout/non_timeout_done_rate": non_timeout_done_value,
                             "rollout/sampled_action_l1": sampled_action_l1,
                             "rollout/action_std_mean": action_std_value,
                             "rollout/action_std_min": action_std_min,
@@ -1159,7 +1280,8 @@ def main() -> None:
                             f"action_l1={action_l1:.6f} sampled_l1={sampled_action_l1:.6f} "
                             f"std={action_std_value:.4f} kl={gaussian_kl_value:.6f} lr={current_learning_rate:.2e} "
                             f"depth_mean={depth_mean:.4f} depth_std={depth_std:.4f} depth_sat_max={depth_max_saturation:.4f} "
-                            f"reward={reward_value:.4f} episode_return={episode_return_mean:.4f} done={done_value:.4f}"
+                            f"reward={reward_value:.4f} episode_return={episode_return_mean:.4f} "
+                            f"done={done_value:.4f} timeout={timeout_value:.4f} non_timeout_done={non_timeout_done_value:.4f}"
                         )
                         if wandb_run is not None:
                             wandb_run.log(metrics, step=iteration)
@@ -1174,7 +1296,7 @@ def main() -> None:
                         args,
                         distill_config,
                         teacher_checkpoint,
-                        proprio_dim,
+                        lowdim_obs_dim,
                         action_dim,
                         depth_shape,
                         critic_obs_dim,
@@ -1183,7 +1305,7 @@ def main() -> None:
                         export_student_onnx(
                             log_dir / f"student_{iteration:07d}.onnx",
                             student,
-                            proprio_dim,
+                            lowdim_obs_dim,
                             depth_shape,
                             device,
                         )
@@ -1198,7 +1320,7 @@ def main() -> None:
                 args,
                 distill_config,
                 teacher_checkpoint,
-                proprio_dim,
+                lowdim_obs_dim,
                 action_dim,
                 depth_shape,
                 critic_obs_dim if args.training_mode == "hybrid" else None,
@@ -1207,7 +1329,7 @@ def main() -> None:
                 export_student_onnx(
                     log_dir / f"student_{args.iterations:07d}.onnx",
                     student,
-                    proprio_dim,
+                    lowdim_obs_dim,
                     depth_shape,
                     device,
                 )

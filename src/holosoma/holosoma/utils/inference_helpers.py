@@ -20,9 +20,15 @@ def _find_input_dim_from_module(module: torch.nn.Module) -> int:
     """
     # Strategy 1: PPO-style - actor_module.module (torch.nn.Sequential)
     if hasattr(module, "actor_module") and hasattr(module.actor_module, "module"):
+        if hasattr(module.actor_module, "input_dim"):
+            return int(module.actor_module.input_dim)
         core_model = module.actor_module.module
-        if hasattr(core_model[0], "in_features"):
+        if isinstance(core_model, torch.nn.Sequential) and len(core_model) > 0 and hasattr(core_model[0], "in_features"):
             return core_model[0].in_features
+
+    # Strategy 1b: BaseModule-style modules expose their already-computed input dim.
+    if hasattr(module, "input_dim"):
+        return int(module.input_dim)
 
     # Strategy 2: FastSAC/FastTD3-style - .net attribute
     if hasattr(module, "net") and len(module.net) > 0:

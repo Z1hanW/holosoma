@@ -94,6 +94,108 @@ g1_29dof_wbt_height_scan = replace(
     ),
 )
 
+_tokenhsi_actor_inputs = ["actor_obs", "actor_height_scan"]
+_tokenhsi_critic_inputs = ["critic_obs", "critic_height_scan"]
+_tokenhsi_object_actor_inputs = ["actor_obs", "actor_height_scan", "actor_object_obs"]
+_tokenhsi_object_critic_inputs = ["critic_obs", "critic_height_scan", "critic_object_obs"]
+
+_tokenhsi_actor_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=(),
+    encoder_obs_token_name="actor_obs",
+    perception_input_name="actor_height_scan",
+    encoder_input_name="",
+    encoder_hidden_dims=[512, 256],
+    encoder_output_dim=256,
+    encoder_activation="ReLU",
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=4,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="first",
+    hidden_dims=[1024, 512],
+)
+
+_tokenhsi_critic_layer = replace(
+    algo.ppo.config.module_dict.critic.layer_config,
+    module_input_name=(),
+    encoder_obs_token_name="critic_obs",
+    perception_input_name="critic_height_scan",
+    encoder_input_name="",
+    encoder_hidden_dims=[512, 256],
+    encoder_output_dim=256,
+    encoder_activation="ReLU",
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=4,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="first",
+    hidden_dims=[1024, 512],
+)
+
+_tokenhsi_module_dict = replace(
+    algo.ppo.config.module_dict,
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TokenHSI",
+        input_dim=_tokenhsi_actor_inputs,
+        layer_config=_tokenhsi_actor_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="TokenHSI",
+        input_dim=_tokenhsi_critic_inputs,
+        layer_config=_tokenhsi_critic_layer,
+    ),
+)
+
+_tokenhsi_object_actor_layer = replace(
+    _tokenhsi_actor_layer,
+    encoder_input_name="actor_object_obs",
+    encoder_num_steps=1,
+    encoder_obs_dim=None,
+)
+
+_tokenhsi_object_critic_layer = replace(
+    _tokenhsi_critic_layer,
+    encoder_input_name="critic_object_obs",
+    encoder_num_steps=1,
+    encoder_obs_dim=None,
+)
+
+_tokenhsi_object_module_dict = replace(
+    algo.ppo.config.module_dict,
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TokenHSI",
+        input_dim=_tokenhsi_object_actor_inputs,
+        layer_config=_tokenhsi_object_actor_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="TokenHSI",
+        input_dim=_tokenhsi_object_critic_inputs,
+        layer_config=_tokenhsi_object_critic_layer,
+    ),
+)
+
+g1_29dof_wbt_height_scan_tokenhsi = replace(
+    g1_29dof_wbt_height_scan,
+    training=replace(g1_29dof_wbt_height_scan.training, name="g1_29dof_wbt_height_scan_tokenhsi_manager"),
+    observation=observation.g1_29dof_wbt_observation_height_scan_tokenhsi,
+    algo=replace(
+        g1_29dof_wbt_height_scan.algo,
+        config=replace(
+            g1_29dof_wbt_height_scan.algo.config,
+            module_dict=_tokenhsi_module_dict,
+            save_interval=1000,
+            use_symmetry=False,
+        ),
+    ),
+)
+
 g1_29dof_wbt_fast_sac = ExperimentConfig(
     training=TrainingConfig(
         project="WholeBodyTracking",
@@ -196,6 +298,41 @@ g1_29dof_wbt_w_object_height_scan = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_height_scan_tokenhsi = replace(
+    g1_29dof_wbt_w_object_height_scan,
+    training=replace(
+        g1_29dof_wbt_w_object_height_scan.training,
+        name="g1_29dof_wbt_w_object_height_scan_tokenhsi_manager",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_height_scan_tokenhsi,
+    algo=replace(
+        g1_29dof_wbt_w_object_height_scan.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_height_scan.algo.config,
+            module_dict=_tokenhsi_object_module_dict,
+            save_interval=1000,
+            use_symmetry=False,
+        ),
+    ),
+    nightly=NightlyConfig(
+        iterations=8000,
+        metrics={
+            **g1_29dof_wbt.nightly.metrics,
+            "Episode/rew_object_global_ref_position_error_exp": [0.4, "inf"],
+            "Episode/rew_object_global_ref_orientation_error_exp": [0.4, "inf"],
+        },
+    ),
+)
+
+g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target = replace(
+    g1_29dof_wbt_w_object_height_scan_tokenhsi,
+    training=replace(
+        g1_29dof_wbt_w_object_height_scan_tokenhsi.training,
+        name="g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target_manager",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_height_scan_tokenhsi_next_target,
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -222,8 +359,11 @@ __all__ = [
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_height_scan",
+    "g1_29dof_wbt_height_scan_tokenhsi",
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_height_scan",
+    "g1_29dof_wbt_w_object_height_scan_tokenhsi",
+    "g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target",
 ]
 
 """
@@ -234,6 +374,14 @@ python src/holosoma/holosoma/train_agent.py \
 Example 2: Robot+Object:
 python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-w-object
+
+Example 2b: Robot+Object TokenHSI expert:
+python src/holosoma/holosoma/train_agent.py \
+  exp:g1-29dof-wbt-w-object-height-scan-tokenhsi
+
+Example 2c: Robot+Object TokenHSI expert with next-frame object target:
+python src/holosoma/holosoma/train_agent.py \
+  exp:g1-29dof-wbt-w-object-height-scan-tokenhsi-next-target
 
 Example 3: Robot+Terrain:
 python src/holosoma/holosoma/train_agent.py \

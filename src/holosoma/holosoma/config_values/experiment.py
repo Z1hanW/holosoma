@@ -9,8 +9,11 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_fast_sac,
     g1_29dof_wbt_fast_sac_w_object,
     g1_29dof_wbt_height_scan,
+    g1_29dof_wbt_height_scan_tokenhsi,
     g1_29dof_wbt_w_object,
     g1_29dof_wbt_w_object_height_scan,
+    g1_29dof_wbt_w_object_height_scan_tokenhsi,
+    g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target,
 )
 
 DEFAULTS = {
@@ -20,8 +23,13 @@ DEFAULTS = {
     "t1_29dof_fast_sac": t1_29dof_fast_sac,
     "g1_29dof_wbt": g1_29dof_wbt,
     "g1_29dof_wbt_height_scan": g1_29dof_wbt_height_scan,
+    "g1_29dof_wbt_height_scan_tokenhsi": g1_29dof_wbt_height_scan_tokenhsi,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_w_object,
     "g1_29dof_wbt_w_object_height_scan": g1_29dof_wbt_w_object_height_scan,
+    "g1_29dof_wbt_w_object_height_scan_tokenhsi": g1_29dof_wbt_w_object_height_scan_tokenhsi,
+    "g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target": (
+        g1_29dof_wbt_w_object_height_scan_tokenhsi_next_target
+    ),
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac,
     "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
 }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import builtins
 import copy
 import dataclasses
+import hashlib
+import json
 import math
 import os
 import xml.etree.ElementTree as ET
@@ -116,10 +118,26 @@ class IsaacSim(BaseSimulator):
             )
             logger.warning(msg)
 
+        self._object_urdf_by_name: dict[str, str] = {}
+        self._env_object_urdf_paths: list[str] = []
+        self._resolved_training_object_specs: list[tuple[str, str]] = []
+
+        replicate_physics = self.simulator_config.scene.replicate_physics
+        object_path_spec = str(getattr(self.robot_config.object, "object_urdf_path", "") or "").strip()
+        if object_path_spec:
+            self._resolved_training_object_specs = self._resolve_object_specs(object_path_spec)
+            if len(self._resolved_training_object_specs) > 1 and replicate_physics:
+                logger.warning(
+                    "Detected {} training object URDFs. Forcing InteractiveScene.replicate_physics=False "
+                    "so MultiAssetSpawner can assign one object asset per env.",
+                    len(self._resolved_training_object_specs),
+                )
+                replicate_physics = False
+
         scene_config: InteractiveSceneCfg = InteractiveSceneCfg(
             num_envs=self.training_config.num_envs,
             env_spacing=self.simulator_config.scene.env_spacing,
-            replicate_physics=self.simulator_config.scene.replicate_physics,
+            replicate_physics=replicate_physics,
         )
         # generate scene
         with Timer("[INFO]: Time taken for scene creation", "scene_creation"):
@@ -195,6 +213,121 @@ class IsaacSim(BaseSimulator):
         # print the environment information
 
         logger.info("Completed setting up the environment...")
+
+    @staticmethod
+    def _sanitize_object_name(name: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() else "_" for ch in name.strip().lower())
+        cleaned = cleaned.strip("_")
+        return cleaned or "object"
+
+    @staticmethod
+    def _resolve_object_urdf_path(raw_path: str, *, base_dir: pathlib.Path) -> pathlib.Path:
+        path_str = str(raw_path).strip()
+        if not path_str:
+            raise ValueError("Empty object URDF path.")
+        candidate = pathlib.Path(path_str)
+        if not candidate.is_absolute() and not path_str.startswith("holosoma/data"):
+            candidate = (base_dir / path_str).resolve()
+        else:
+            candidate = pathlib.Path(resolve_data_file_path(path_str)).resolve()
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Object URDF path does not exist: {candidate}")
+        return candidate
+
+    def _resolve_object_specs(self, object_path_spec: str) -> list[tuple[str, str]]:
+        resolved = resolve_data_file_path(object_path_spec)
+        path = pathlib.Path(resolved)
+
+        raw_specs: list[tuple[str, str]] = []
+        if path.is_file() and path.suffix.lower() == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+                payload = payload["clips"]
+            if not isinstance(payload, dict):
+                raise ValueError(f"Invalid object spec json: {path}")
+            for entry in payload.values():
+                if isinstance(entry, str):
+                    urdf_path = entry.strip()
+                    object_name = ""
+                elif isinstance(entry, dict):
+                    urdf_path = str(entry.get("object_urdf_path", "")).strip()
+                    object_name = str(entry.get("object_name", "")).strip()
+                else:
+                    continue
+                if urdf_path:
+                    resolved_urdf = self._resolve_object_urdf_path(urdf_path, base_dir=path.parent)
+                    raw_specs.append((object_name, str(resolved_urdf)))
+        elif path.is_dir():
+            for urdf in sorted(list(path.rglob("*.urdf")) + list(path.rglob("*.URDF"))):
+                raw_specs.append((urdf.stem, str(urdf.resolve())))
+        else:
+            if path.suffix.lower() != ".urdf":
+                raise ValueError(f"Object path must be a URDF file, directory, or json map: {resolved}")
+            resolved_urdf = self._resolve_object_urdf_path(str(path), base_dir=path.parent)
+            raw_specs.append((path.stem, str(resolved_urdf)))
+
+        unique_specs: list[tuple[str, str]] = []
+        seen_paths: set[str] = set()
+        used_names: set[str] = set()
+        for object_name, urdf_path in raw_specs:
+            urdf_key = str(pathlib.Path(urdf_path).resolve())
+            if urdf_key in seen_paths:
+                continue
+            seen_paths.add(urdf_key)
+
+            base_name = self._sanitize_object_name(object_name if object_name else pathlib.Path(urdf_key).stem)
+            name = base_name
+            suffix = 1
+            while name in used_names:
+                suffix += 1
+                name = f"{base_name}_{suffix}"
+            used_names.add(name)
+            unique_specs.append((name, urdf_key))
+
+        return unique_specs
+
+    @staticmethod
+    def _build_env_object_urdf_assignment(
+        object_specs: list[tuple[str, str]],
+        *,
+        num_envs: int,
+    ) -> list[str]:
+        if not object_specs:
+            return []
+        return [object_specs[env_id % len(object_specs)][1] for env_id in range(num_envs)]
+
+    @staticmethod
+    def _build_object_spawn_cfg(object_asset_urdf_path: str) -> sim_utils.UrdfFileCfg:
+        resolved_urdf_path = pathlib.Path(object_asset_urdf_path).resolve()
+        cache_key = hashlib.md5(str(resolved_urdf_path).encode("utf-8")).hexdigest()[:12]
+        repo_root = pathlib.Path(get_holosoma_root()).parents[2]
+        usd_dir = repo_root / "data" / "isaacsim_object_usd_cache" / (
+            f"{resolved_urdf_path.stem}_{cache_key}"
+        )
+        return sim_utils.UrdfFileCfg(
+            fix_base=False,
+            replace_cylinders_with_capsules=True,
+            asset_path=str(resolved_urdf_path),
+            usd_dir=str(usd_dir),
+            activate_contact_sensors=True,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                retain_accelerations=False,
+                linear_damping=0.01,
+                angular_damping=0.01,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=1000.0,
+                max_depenetration_velocity=1.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=True,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
+            ),
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
+            ),
+        )
 
     def _setup_scene(self) -> None:
         self._load_scene_config()
@@ -478,40 +611,60 @@ class IsaacSim(BaseSimulator):
 
         # add objects if object is provided
         if self.robot_config.object.object_urdf_path:
-            # Resolve the object asset urdf path using importlib.resources
-            object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
-            object_name = "object"  # hardcoded object name
-            object_cfg = RigidObjectCfg(
-                prim_path=f"/World/envs/env_.*/Object",
-                spawn=sim_utils.UrdfFileCfg(
-                    fix_base=False,
-                    replace_cylinders_with_capsules=True,
-                    asset_path=object_asset_urdf_path,
+            object_specs = self._resolved_training_object_specs
+            if not object_specs:
+                object_specs = self._resolve_object_specs(self.robot_config.object.object_urdf_path)
+            if not object_specs:
+                raise ValueError(f"No valid object URDFs resolved from: {self.robot_config.object.object_urdf_path}")
+
+            self._object_urdf_by_name = {}
+            self._env_object_urdf_paths = []
+            if len(object_specs) > 1:
+                object_assets_cfg = [
+                    self._build_object_spawn_cfg(object_asset_urdf_path)
+                    for _, object_asset_urdf_path in object_specs
+                ]
+                multi_asset_cfg = sim_utils.MultiAssetSpawnerCfg(
+                    assets_cfg=object_assets_cfg,
+                    random_choice=False,
                     activate_contact_sensors=True,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                        disable_gravity=False,
-                        retain_accelerations=False,
-                        linear_damping=0.01,
-                        angular_damping=0.01,
-                        max_linear_velocity=1000.0,
-                        max_angular_velocity=1000.0,
-                        max_depenetration_velocity=1.0,
+                )
+                object_cfg = RigidObjectCfg(
+                    prim_path="/World/envs/env_.*/Object",
+                    spawn=multi_asset_cfg,
+                    init_state=RigidObjectCfg.InitialStateCfg(
+                        pos=(0.0, 0.0, 0.5),
                     ),
-                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                        enabled_self_collisions=True,
-                        solver_position_iteration_count=8,
-                        solver_velocity_iteration_count=4,
+                )
+                self._object = RigidObject(object_cfg)
+                self.scene.rigid_objects["object"] = self._object
+                self._object_urdf_by_name["object"] = ""
+                self._env_object_urdf_paths = self._build_env_object_urdf_assignment(
+                    object_specs,
+                    num_envs=self.training_config.num_envs,
+                )
+                logger.info(
+                    "Loaded heterogeneous object bank in single-slot mode: {} unique URDF(s), {} env objects.",
+                    len(object_specs),
+                    self.training_config.num_envs,
+                )
+            else:
+                object_asset_urdf_path = object_specs[0][1]
+                object_cfg = RigidObjectCfg(
+                    prim_path="/World/envs/env_.*/Object",
+                    spawn=self._build_object_spawn_cfg(object_asset_urdf_path),
+                    init_state=RigidObjectCfg.InitialStateCfg(
+                        pos=(0.0, 0.0, 0.5),
                     ),
-                    joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                        gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
-                    ),
-                ),
-                init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=(0.0, 0.0, 0.5),
-                ),
-            )
-            self._object = RigidObject(object_cfg)
-            self.scene.rigid_objects[object_name] = self._object
+                )
+                self._object = RigidObject(object_cfg)
+                self.scene.rigid_objects["object"] = self._object
+                self._object_urdf_by_name["object"] = str(pathlib.Path(object_asset_urdf_path).resolve())
+                self._env_object_urdf_paths = self._build_env_object_urdf_assignment(
+                    object_specs,
+                    num_envs=self.training_config.num_envs,
+                )
+                logger.info("Loaded object URDF: {}", object_asset_urdf_path)
 
         # add lights
         # light_config = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.98, 0.95, 0.88))

@@ -138,53 +138,6 @@ The script defaults to 8 GPUs with 4096 envs per GPU and checkpoint save interva
 
 For multi-terrain debugging, the script defaults `USE_ADAPTIVE_TIMESTEPS_SAMPLER=False` and adds `noadaptive` to the run name. The original global adaptive timestep sampler bins failures over the concatenated fused motion frame axis. On the 16-motion stair batch this can collapse almost all resets onto one hard global bin, for example W&B run `h5xzojtc` showed sampler entropy near `0.02`, top1 probability around `0.989`, top1 bin around `0.897`, and episode length around `30`. That bin falls inside the later stair clip range, so the policy stops seeing a balanced distribution of terrains. Keep it off until we replace it with a per-motion or motion-balanced adaptive sampler.
 
-### CSP Depth Student Distillation
-
-`csp_depth_distill.sh` distills a trained PPO or FastSAC tracking teacher into a depth-based student. The default is far-tracking-style hybrid DAgger + RL, not pure behavior cloning. This is a true physics rollout, not kinematics replay: IsaacSim/PhysX steps the robot and static OBJ terrain using the depth student's sampled actions. The frozen teacher still evaluates the same visited states, but only supplies privileged action targets for the DAgger loss. A privileged critic reads `critic_obs`, computes GAE returns from real rollout rewards, and trains the student with PPO value/surrogate losses plus `(1 - ppo_coeff) * dagger_loss_coef * MSE(student_mean, teacher_action)`.
-
-The old W&B run `y9zvox6k` finished quickly because it used the earlier pure BC path: teacher actions stepped the env and the student only minimized action MSE on those teacher-visited states. That is useful as an ablation/debug mode, but it is not the far-tracking distillation philosophy. Use `TRAINING_MODE=bc` only when intentionally reproducing that behavior; the launcher defaults to `TRAINING_MODE=hybrid`.
-
-The depth camera follows the far-tracking ZED2i-style setup: raw `106x60`, horizontal FOV `101.41` degrees, range `[0.3, 2.0]`, mounted on `torso_link` with offset `[0.125, 0.06, 0.04]` and RPY `[0, 71, 0]` degrees. IsaacLab's pinhole ray pattern already converts optical camera rays into the robotics camera frame, so we do not apply far-tracking's `offset_rot_base=[-90, 0, -90]` a second time. Distillation resizes the normalized depth to `58x87` and uses the same backbone structure as far-tracking's `DepthOnlyFCBackbone58x87Small`: `Conv2d(1,16,5,stride=2,pad=2)`, `Conv2d(16,32,3,stride=2,pad=1)`, `Conv2d(32,64,3,stride=2,pad=1)`, global average pooling, then a `32`-dim latent by default.
-
-Run distillation from an explicit teacher checkpoint:
-
-```bash
-cd /home/ubuntu/FAR/holosoma
-TEACHER_CHECKPOINT=logs/holosomatest/.../model_01000.pt ./csp_depth_distill.sh
-```
-
-Run distillation from the first successful slope teacher:
-
-```bash
-cd /home/ubuntu/FAR/holosoma
-DISTILL_TAG=slope \
-TEACHER_CHECKPOINT=logs/holosomatest/20260629_043623-ip-10-0-73-59_g1_29dof_wbt_slope_climbing_8gpu_4096env_20260629_043601-locomotion/model_20000.pt \
-./csp_depth_distill.sh
-```
-
-The script defaults to 8 GPUs and 1024 envs per GPU. Depth camera ray-casting is much heavier than the height scan, so this is intentionally lower than the 4096 env/GPU tracking default; override with `ENVS_PER_GPU=4096` only after confirming memory headroom. In hybrid mode, `NUM_ITERATIONS=20000` means 20000 outer PPO/DAgger updates, not 20000 single physics steps; each update collects `NUM_STEPS_PER_UPDATE=24` physics steps per env. `SAVE_INTERVAL` and `LOGGING_INTERVAL` are also counted in outer updates. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.
-
-Hybrid distillation defaults now mirror far-tracking more closely: `NUM_STEPS_PER_UPDATE=24`, `NUM_LEARNING_EPOCHS=2`, `NUM_MINI_BATCHES=96`, `INIT_NOISE_STD=0.01`, `GAMMA=0.99`, `GAE_LAMBDA=0.95`, `ENTROPY_COEF=0.001`, `DAGGER_LOSS_COEF=10.0`, and ramps `ppo_coeff` from `0.0` to `0.9` between `PPO_START_EPOCH=0` and `DAGGER_END_EPOCH=10000`. Adaptive Gaussian KL learning-rate control is part of the default (`SCHEDULE=adaptive`, `DESIRED_KL=0.01`, `MIN_LEARNING_RATE=1e-5`, `MAX_LEARNING_RATE=1e-2`) and should stay on for hybrid runs; it stores the old mean/std from each physics rollout transition and adjusts LR from the old/new action-distribution KL before each PPO minibatch update. The depth encoder uses separate weight decay `DEPTH_WEIGHT_DECAY=1e-2`, matching the far-tracking split between depth backbone and MLP/critic parameters. Legacy env vars `PPO_START_STEP` and `DAGGER_END_STEP` are still accepted as fallbacks, but the schedule is update/epoch based.
-
-The failed W&B run `bji6ir93` is the reference failure mode for missing KL/std control, not evidence that the depth camera was fundamentally wrong. It reached `rollout/reward_mean` around `0.084` by update 325-1000, then collapsed to around `0.03` after `ppo_coeff > 0.1` when `action_std` jumped from `0.01` to roughly `0.42` by checkpoint `student_0001500.pt`. New hybrid runs log `ppo/kl`, `ppo/learning_rate`, `rollout/action_std_{min,mean,max}`, `rollout/sampled_action_l1`, `rollout/episode_return_mean`, and `depth/{min,max,mean,std,min_saturation_frac,max_saturation_frac}` specifically to catch this early.
-
-Run the same hybrid distillation across two remote nodes, 8 GPUs per node, with 1024 envs per GPU:
-
-```bash
-cd /home/ubuntu/FAR/holosoma
-./csp_multinode_depth_distill.sh
-```
-
-To start distillation from the latest checkpoint of the current multi-terrain tracking run after a delay:
-
-```bash
-DELAY_SECONDS=25200 \
-TRACKING_SESSION=csp_multiterrain_heightmapwbt_20260630_053640 \
-scripts/schedule_depth_distill_from_latest.sh
-```
-
-The scheduler reads `logs/run_commands/<tracking-session>.run_name`, finds the highest `model_*.pt` under `logs/holosomatest/`, stops the tracking tmux session, and launches `csp_depth_distill.sh`.
-
 Useful overrides:
 
 ```bash
@@ -297,6 +250,230 @@ HEIGHT_SCANNER_RESOLUTION=0.08 ./csp_heightmapwbt.sh
 # Adjust the loaded OBJ floor patch used by heightmap training.
 LOAD_OBJ_FLOOR_MARGIN=3.0 ./csp_heightmapwbt.sh
 ```
+
+## Depth-Dist
+
+Depth-dist means distilling a trained tracking teacher into a depth-based student policy. The intended deployment contract is strict:
+
+- Teacher: privileged heightmap/multi-terrain tracking checkpoint.
+- Student input: `root_target_xy_yaw + proprioception + processed depth`.
+- Student output: actions that step the real IsaacSim/PhysX rollout.
+- Supervision: frozen teacher action targets plus PPO losses from real rollout rewards.
+
+This is physics rollout, not kinematics replay. During distillation, IsaacSim/PhysX advances the robot and static triangle-mesh terrain with the student's sampled actions. The teacher evaluates the same visited states only to provide privileged DAgger action targets. The privileged critic reads `critic_obs`, computes GAE returns from rollout rewards, and trains the student with value/surrogate losses plus `(1 - ppo_coeff) * dagger_loss_coef * MSE(student_mean, teacher_action)`.
+
+### Student Observation
+
+The default command mode is `STUDENT_COMMAND_MODE=root_xy_yaw`. The first three low-dimensional inputs are `[target_root_x, target_root_y, target_root_yaw]`, expressed in the current robot-yaw frame. They are target-relative root commands, not velocity commands.
+
+The low-dimensional proprioception is:
+
+- projected gravity,
+- base angular velocity,
+- joint position,
+- joint velocity,
+- last action.
+
+The visual input is the processed depth image. The student does not receive the teacher's full tracking observation, the heightmap/height-scan observation, or the full target ghost G1. The old `legacy_motion` mode used reference `joint_pos + joint_vel` plus `motion_ref_ori_b`; keep that only as an ablation.
+
+For HOI/object policies, keep the same student contract. A `TokenHSI` object checkpoint is the privileged teacher/expert; distill it to a `student_*.pt` before launching student inference.
+
+### Depth Camera
+
+The depth camera follows the far-tracking ZED2i-style setup:
+
+- raw image: `106x60`,
+- processed policy image: `87x58`,
+- horizontal FOV: `101.41` degrees,
+- range: `[0.3, 2.0]`,
+- body: `torso_link`,
+- mount offset: `[0.125, 0.06, 0.04]`,
+- mount RPY: `[0, 71, 0]` degrees.
+
+The nominal pose matches far-tracking; the local comparison artifact is `artifacts/camera_pose_compare_training_vs_fartracking.png`.
+
+Current defaults also include the far-tracking depth-observation details that were previously missing: per-env placement randomization (`+/-0.025 m`, RPY `+/-[2.5, 3.0, 2.5] deg`), dynamic robot self-occlusion through the local Warp raycaster over G1 link meshes plus terrain, bicubic resize, latency frames sampled from `[9, 10]` with buffer length `12`, and depth noise/dropout (`0.1 * depth`, dropout probability `0.05`). The Warp renderer applies far-tracking's `offset_rot_base=[-90, 0, -90]` internally; the IsaacLab frustum is synchronized to the same sampled mount pose for visualization. In object/HOI environments, the renderer also raycasts the dynamic object URDF mesh assigned to each env.
+
+The depth encoder mirrors far-tracking's small depth backbone: `Conv2d(1,16,5,stride=2,pad=2)`, `Conv2d(16,32,3,stride=2,pad=1)`, `Conv2d(32,64,3,stride=2,pad=1)`, global average pooling, then a `32`-dim latent by default.
+
+### Single-Node Training
+
+Run from an explicit teacher checkpoint:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+TEACHER_CHECKPOINT=logs/holosomatest/.../model_01000.pt ./csp_depth_distill.sh
+```
+
+Run from the first successful slope teacher:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+DISTILL_TAG=slope \
+TEACHER_CHECKPOINT=logs/holosomatest/20260629_043623-ip-10-0-73-59_g1_29dof_wbt_slope_climbing_8gpu_4096env_20260629_043601-locomotion/model_20000.pt \
+./csp_depth_distill.sh
+```
+
+The single-node launcher defaults to `8` GPUs and `1024` envs per GPU. Depth raycasting is much heavier than height scans, so `1024` envs/GPU is the safe default. Override `ENVS_PER_GPU=4096` only after confirming memory headroom. `NUM_ITERATIONS=20000` means 20000 outer PPO/DAgger updates, not 20000 individual physics steps; each update collects `NUM_STEPS_PER_UPDATE=24` physics steps per env. `SAVE_INTERVAL` and `LOGGING_INTERVAL` are counted in outer updates. Outputs are saved under `logs/holosomatest/` as `student_*.pt` and `student_*.onnx`, and metrics go to W&B project `zihanw22/holosomatest`.
+
+### Multi-Node Training
+
+Run the same hybrid distillation across two remote nodes, 8 GPUs per node, with 1024 envs per GPU:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+./csp_multinode_depth_distill.sh
+```
+
+The launcher records:
+
+- `logs/run_commands/<session>.run_name`,
+- `logs/run_commands/<session>.nodes`,
+- `logs/run_commands/<session>.remote_repo`.
+
+Use this command shape when the teacher is a multi-terrain checkpoint and the student must learn depth under different geometry:
+
+```bash
+NODE_HOSTS="10.0.100.200 10.0.72.226" \
+DISTILL_TAG=multiterrain_teacher09999 \
+TEACHER_CHECKPOINT=logs/holosomatest/.../model_09999.pt \
+./csp_multinode_depth_distill.sh
+```
+
+To launch after a tracking run has produced a later checkpoint:
+
+```bash
+DELAY_SECONDS=25200 \
+TRACKING_SESSION=csp_multiterrain_heightmapwbt_YYYYMMDD_HHMMSS \
+scripts/schedule_depth_distill_from_latest.sh
+```
+
+The scheduler reads `logs/run_commands/<tracking-session>.run_name`, finds the highest `model_*.pt` under `logs/holosomatest/`, stops the tracking tmux session, and launches `csp_depth_distill.sh`.
+
+### Hybrid Defaults
+
+The default training mode is `TRAINING_MODE=hybrid`, not pure BC. Use `TRAINING_MODE=bc` only for controlled ablations.
+
+Current hybrid defaults:
+
+- `NUM_STEPS_PER_UPDATE=24`,
+- `NUM_LEARNING_EPOCHS=2`,
+- `NUM_MINI_BATCHES=96`,
+- `INIT_NOISE_STD=0.01`,
+- `GAMMA=0.99`,
+- `GAE_LAMBDA=0.95`,
+- `ENTROPY_COEF=0.001`,
+- `DAGGER_LOSS_COEF=10.0`,
+- `PPO_START_EPOCH=0`,
+- `DAGGER_END_EPOCH=10000`,
+- `SCHEDULE=adaptive`,
+- `DESIRED_KL=0.01`,
+- `MIN_LEARNING_RATE=1e-5`,
+- `MAX_LEARNING_RATE=1e-2`,
+- `DEPTH_WEIGHT_DECAY=1e-2`.
+
+`ppo_coeff` ramps from `0.0` to `0.9` between `PPO_START_EPOCH` and `DAGGER_END_EPOCH`. Adaptive Gaussian KL learning-rate control should stay enabled for hybrid runs; it compares the rollout-time old action distribution against the updated distribution before each PPO minibatch update.
+
+### Visualization
+
+Dedicated quick reference: [VIS_README.md](VIS_README.md).
+
+Use `scripts/viser_depth_student_physics_eval.py` for depth-student inference visualization. This is the correct path for root-command depth students and HOI/object students: it loads the saved student checkpoint metadata, rebuilds the training environment, computes the same low-dimensional proprioception and processed depth image, and steps the simulator with the student's actions. Do not use a privileged teacher `model_*.pt` as the checkpoint here; use a distilled `student_*.pt`.
+
+To launch from the newest checkpoint in a W&B run, download the highest-numbered `student_*.pt` first. Replace `RUN_PATH` with the target run, for example `zihanw22/holosomatest/rrfbwfnq` or `zihanw22/carry-any/hxtcnu9p`. If the checkpoint is already local, skip this block and set `CKPT=/path/to/student_XXXXXXX.pt`.
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+
+RUN_PATH=zihanw22/holosomatest/rrfbwfnq
+OUT_DIR=artifacts/wandb_checkpoints/${RUN_PATH//\//_}
+mkdir -p "$OUT_DIR"
+export RUN_PATH OUT_DIR
+
+python - <<'PY'
+import os
+import re
+from pathlib import Path
+
+import wandb
+
+run_path = os.environ["RUN_PATH"]
+out_dir = Path(os.environ["OUT_DIR"])
+api = wandb.Api()
+run = api.run(run_path)
+ckpts = [
+    f for f in run.files()
+    if re.fullmatch(r"student_\d+\.pt", f.name)
+]
+if not ckpts:
+    raise SystemExit(f"No student_*.pt checkpoint found in {run_path}")
+latest = max(ckpts, key=lambda f: int(re.search(r"\d+", f.name).group()))
+latest.download(root=str(out_dir), replace=True)
+path = out_dir / latest.name
+(out_dir / "LATEST_STUDENT_CHECKPOINT").write_text(str(path) + "\n")
+print(path)
+PY
+
+CKPT=$(cat "$OUT_DIR/LATEST_STUDENT_CHECKPOINT")
+echo "$CKPT"
+```
+
+Then visualize the checkpoint with true physics rollout and interactive Viser command controls:
+
+```bash
+cd /home/ubuntu/FAR/holosoma
+PYTHONPATH=src/holosoma ./scripts/viser_depth_student_physics_eval.py \
+  --checkpoint "$CKPT" \
+  --num-envs 1 \
+  --env-id 0 \
+  --port 2106 \
+  --gui-command \
+  --depth-hits \
+  --no-red-points \
+  --no-motion-ref \
+  --disable-randomization
+```
+
+For command-controlled visualization, use `--gui-command`, not `simulator.config.bridge`. The Viser right-side `Command` folder exposes `Root target x (m)`, `Root target y (m)`, `Root target yaw (rad)`, and `Zero command`; these directly replace the first three `root_target_xy_yaw` policy inputs. The simulator bridge is the SDK/DDS low-level robot-control path and does not set the student's command observation. Use `--joystick` instead of `--gui-command` only when you want a local gamepad to provide those same three command values.
+
+For student visualization, do not show heightmap/height-scan points or the full target ghost G1 by default because they are not student inputs. The Viser script hides height-scan red points unless `--red-points` is passed, hides the reference G1 unless `--motion-ref` is passed, draws the live depth camera frustum, and shows the current policy-input depth image in the right-side `Depth Camera` panel. The terrain mesh should remain visible because it is the true static triangle-mesh collision geometry used by PhysX and by the depth raycast.
+
+The student observation contract during inference is `root_target_xy_yaw + projected_gravity + base_ang_vel + joint_pos + joint_vel + last_action + processed_depth`. `projected_gravity` is part of proprioception and is computed from the current robot/base orientation; on the real robot the equivalent value must come from the IMU/base attitude estimate. For HOI/object students, keep the checkpoint's saved experiment config intact so the motion bank, object URDF metadata, simulator object state, and dynamic-object depth raycast match training. If the object mesh or object motion is missing in visualization, first check that the checkpoint is a HOI `student_*.pt` from the intended run and not a teacher checkpoint or a non-object student.
+
+To inspect another sampled rollout/sequence, launch with more environments and change `--env-id`:
+
+```bash
+PYTHONPATH=src/holosoma ./scripts/viser_depth_student_physics_eval.py \
+  --checkpoint "$CKPT" \
+  --num-envs 8 \
+  --env-id 3 \
+  --port 2106 \
+  --gui-command \
+  --depth-hits \
+  --no-red-points \
+  --no-motion-ref \
+  --disable-randomization
+```
+
+Use `--motion-ref` or `--red-points` only as diagnostics. They help debug tracking targets or height-scan compatibility, but they are not student inputs and should stay hidden when judging deployment-like depth-student behavior.
+
+### W&B Run Notes
+
+- `y9zvox6k` finished quickly because it used the older pure-BC path where teacher actions stepped the env and the student only minimized action MSE. Treat it as an ablation, not the intended far-tracking-style distillation.
+- `bji6ir93` is the reference failure mode for missing KL/std control: reward initially improved, then collapsed after `ppo_coeff > 0.1` when `action_std` grew too large.
+- `vj7urlp6` was the root-command multi-terrain student run. W&B marks it `crashed`; the last logged point was iteration `7025` at `2026-07-07T22:15:55Z`, and the local synced checkpoint is `student_0005000.pt`. This is not a normal completed run.
+
+For live monitoring, check these metrics together:
+
+- `rollout/reward_mean`,
+- `rollout/episode_return_mean`,
+- `distill/dagger_loss`,
+- `distill/action_l1`,
+- `ppo/kl`,
+- `ppo/learning_rate`,
+- `rollout/action_std_{min,mean,max}`,
+- `rollout/sampled_action_l1`,
+- `depth/{min,max,mean,std,min_saturation_frac,max_saturation_frac}`.
 
 ### Quick Demo
 
