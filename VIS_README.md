@@ -1,24 +1,149 @@
-# Viser Inference Quick Reference
+# Physics Inference With Viser
 
-This note records the correct local Viser inference path for depth-student checkpoints.
+Use this file as the task-wise launcher reference for local physics inference.
 
-## Correct Entry Point
-
-Use `scripts/viser_depth_student_physics_eval.py` for depth-student visualization and debugging. This path rebuilds the environment from the saved checkpoint config, computes the same low-dimensional proprioception and processed depth input used during training, and steps the simulator with the student's actions.
-
-Use a distilled `student_*.pt` checkpoint. Do not pass a privileged teacher `model_*.pt` checkpoint to this script.
-
-## Download The Latest Student Checkpoint
-
-Replace `RUN_PATH` with the target W&B run. Examples:
-
-- `zihanw22/holosomatest/rrfbwfnq`
-- `zihanw22/carry-any/hxtcnu9p`
+## Common Setup
 
 ```bash
 cd /home/ubuntu/FAR/holosoma
+source scripts/source_inference_setup.sh
+export PYTHONPATH=src/holosoma
+```
 
-RUN_PATH=zihanw22/holosomatest/rrfbwfnq
+Checkpoint rule:
+
+- `model_*.pt`: tracking expert / teacher policy. Use `scripts/viser_current_physics_rollout.py`.
+- `student_*.pt`: depth student policy. Use `scripts/viser_depth_student_physics_eval.py`.
+
+## Carry-Object
+
+### Expert / Teacher Physics Inference
+
+Use this for TokenHSI object policies such as `rrfbwfnq`. This path shows robot motion, object mesh, object motion, reference object, terrain, and supports sequence switching.
+
+```bash
+python scripts/viser_current_physics_rollout.py \
+  --checkpoint wandb://zihanw22/holosomatest/rrfbwfnq/model_08000.pt \
+  --port 2099 \
+  --env-id 0 \
+  --sequence-envs 64 \
+  --disable-randomization \
+  --no-red-points
+```
+
+Open `http://localhost:2099`. Use the Viser `Sequence` dropdown to switch clips.
+
+Carry-object checks:
+
+- Use object-capable expert checkpoints from `g1-29dof-wbt-w-object-height-scan-tokenhsi-next-target`.
+- The checkpoint config must load `/nfs/zzzihanw/amass/converted_res/object_interaction/omomo_carry`.
+- The object map must exist: `/nfs/zzzihanw/amass/converted_res/object_interaction/omomo_carry/_clip_object_urdf_map.json`.
+- The object URDF must exist: `holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf`.
+- If object mesh or object motion is missing, first check checkpoint type, object map, object URDF, and saved experiment config.
+
+### Depth Student Physics Inference
+
+Use this only after distilling the object expert to a `student_*.pt`. Do not pass `rrfbwfnq/model_08000.pt` to the depth-student script.
+
+```bash
+CKPT=/path/to/student_XXXXXXX.pt
+
+python scripts/viser_depth_student_physics_eval.py \
+  --checkpoint "$CKPT" \
+  --port 2106 \
+  --num-envs 1 \
+  --env-id 0 \
+  --gui-command \
+  --depth-hits \
+  --no-red-points \
+  --no-motion-ref \
+  --disable-randomization \
+  --log-every 100
+```
+
+For joystick control, replace `--gui-command` with `--joystick`.
+
+## Terrain-Traversal
+
+### Tracking Expert Physics Inference
+
+Use this for terrain WBT teacher checkpoints (`model_*.pt`) when checking true PhysX rollout on OBJ terrain.
+
+```bash
+python scripts/viser_current_physics_rollout.py \
+  --checkpoint /path/to/model_XXXXX.pt \
+  --port 2099 \
+  --env-id 0 \
+  --sequence-envs 16 \
+  --disable-randomization \
+  --red-points
+```
+
+For W&B checkpoints, use a `wandb://` URI, for example:
+
+```bash
+python scripts/viser_current_physics_rollout.py \
+  --checkpoint wandb://zihanw22/holosomatest/btoe97gr/model_XXXXX.pt \
+  --port 2099 \
+  --env-id 0 \
+  --sequence-envs 16 \
+  --disable-randomization \
+  --red-points
+```
+
+Terrain checks:
+
+- For fused CRISP stairs, the NPZ must contain `terrain_origins`.
+- Do not use kinematic replay to judge policy quality.
+- Red height-scan points are diagnostics for teacher/heightmap policies, not depth-student inputs.
+
+### Depth Student Physics Inference
+
+Use this for terrain depth-student checkpoints (`student_*.pt`), including root-command students.
+
+```bash
+CKPT=/path/to/student_XXXXXXX.pt
+
+python scripts/viser_depth_student_physics_eval.py \
+  --checkpoint "$CKPT" \
+  --port 2106 \
+  --num-envs 1 \
+  --env-id 0 \
+  --gui-command \
+  --depth-hits \
+  --no-red-points \
+  --no-motion-ref \
+  --disable-randomization \
+  --log-every 100
+```
+
+The Viser `Command` folder writes the first three student inputs:
+
+- `Root target x (m)`
+- `Root target y (m)`
+- `Root target yaw (rad)`
+
+To inspect another sampled rollout:
+
+```bash
+python scripts/viser_depth_student_physics_eval.py \
+  --checkpoint "$CKPT" \
+  --port 2106 \
+  --num-envs 8 \
+  --env-id 3 \
+  --gui-command \
+  --depth-hits \
+  --no-red-points \
+  --no-motion-ref \
+  --disable-randomization
+```
+
+## Download Latest Student Checkpoint From W&B
+
+Use this for either task when the target run contains `student_*.pt` files.
+
+```bash
+RUN_PATH=zihanw22/holosomatest/your_run_id
 OUT_DIR=artifacts/wandb_checkpoints/${RUN_PATH//\//_}
 mkdir -p "$OUT_DIR"
 export RUN_PATH OUT_DIR
@@ -32,12 +157,10 @@ import wandb
 
 run_path = os.environ["RUN_PATH"]
 out_dir = Path(os.environ["OUT_DIR"])
-api = wandb.Api()
-run = api.run(run_path)
+run = wandb.Api().run(run_path)
 ckpts = [f for f in run.files() if re.fullmatch(r"student_\d+\.pt", f.name)]
 if not ckpts:
     raise SystemExit(f"No student_*.pt checkpoint found in {run_path}")
-
 latest = max(ckpts, key=lambda f: int(re.search(r"\d+", f.name).group()))
 latest.download(root=str(out_dir), replace=True)
 path = out_dir / latest.name
@@ -46,47 +169,11 @@ print(path)
 PY
 
 CKPT=$(cat "$OUT_DIR/LATEST_STUDENT_CHECKPOINT")
-echo "$CKPT"
 ```
-
-If the checkpoint is already local, skip the W&B block and set:
-
-```bash
-CKPT=/path/to/student_XXXXXXX.pt
-```
-
-## Launch Viser Inference
-
-Use GUI command controls for normal local debugging:
-
-```bash
-cd /home/ubuntu/FAR/holosoma
-PYTHONPATH=src/holosoma ./scripts/viser_depth_student_physics_eval.py \
-  --checkpoint "$CKPT" \
-  --num-envs 1 \
-  --env-id 0 \
-  --port 2106 \
-  --gui-command \
-  --depth-hits \
-  --no-red-points \
-  --no-motion-ref \
-  --disable-randomization
-```
-
-Open `http://localhost:2106`. The right-side `Command` folder exposes:
-
-- `Root target x (m)`
-- `Root target y (m)`
-- `Root target yaw (rad)`
-- `Zero command`
-
-These GUI values directly replace the first three `root_target_xy_yaw` policy inputs. Do not use `simulator.config.bridge` for this; the bridge is the SDK/DDS low-level robot-control path and does not set the student's command observation.
-
-For local gamepad control, use `--joystick` instead of `--gui-command`.
 
 ## Student Input Contract
 
-The expected inference input is:
+Depth-student inference input:
 
 ```text
 root_target_xy_yaw
@@ -98,36 +185,13 @@ root_target_xy_yaw
 + processed_depth
 ```
 
-`projected_gravity` is proprioception computed from the current robot/base orientation. On the real robot, the equivalent value must come from the IMU/base attitude estimate.
+`projected_gravity` comes from current robot/base orientation. On the real robot, provide the equivalent value from IMU/base attitude.
 
-The student does not consume heightmap/height-scan points, the full teacher tracking observation, or the full target ghost G1. Keep `--no-red-points` and `--no-motion-ref` for deployment-like visualization. Enable `--red-points` or `--motion-ref` only as diagnostics.
+## Common Mistakes
 
-## HOI/Object Student Notes
-
-For HOI/object students, keep the checkpoint's saved experiment config intact so the motion bank, object URDF metadata, simulator object state, and dynamic-object depth raycast match training.
-
-If object mesh or object motion is missing in visualization, first check that:
-
-- the checkpoint is a HOI `student_*.pt` from the intended run,
-- it is not a teacher `model_*.pt`,
-- it is not a non-object depth student,
-- the checkpoint config still points to the object motion bank and object URDF metadata used during training.
-
-## Switching Sequence
-
-The current script samples sequences through the environment. To inspect another sampled rollout, launch more envs and change `--env-id`:
-
-```bash
-PYTHONPATH=src/holosoma ./scripts/viser_depth_student_physics_eval.py \
-  --checkpoint "$CKPT" \
-  --num-envs 8 \
-  --env-id 3 \
-  --port 2106 \
-  --gui-command \
-  --depth-hits \
-  --no-red-points \
-  --no-motion-ref \
-  --disable-randomization
-```
-
-Use `--env-id 0..7` to view different sampled rollouts from the same run.
+- Do not run `scripts/viser_depth_student_physics_eval.py` with `model_*.pt`.
+- Do not run `scripts/viser_current_physics_rollout.py` with `student_*.pt`.
+- Do not use `simulator.config.bridge` for GUI-command student visualization; use `--gui-command`.
+- Do not show red height-scan points or target ghost by default for depth students.
+- Do not treat heightmap, height-scan, or full target G1 as student inputs.
+- Do not debug carry-object without confirming object map, object URDF, and object-capable checkpoint config.

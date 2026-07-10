@@ -27,19 +27,22 @@
 
 ## Data Contract
 
-训练 HOI expert 时要用带 object 的 motion data。当前推荐用：
+训练 HOI expert 时要用带 object 的 motion data。当前 canonical data 就是 `/nfs/zzzihanw` 里的这份 OMOMO largebox carry set：
 
 ```bash
 /nfs/zzzihanw/amass/converted_res/object_interaction/omomo_carry
 ```
 
+这是当前成功 HOI tracking run 使用的数据，不要用本地 `data/` 里的 debug bank 替代，除非只是做 smoke test。
+
 这个目录应该满足：
 
-- 目录下有约 62 个 `.npz` motion clips。
+- 目录下有 62 个 `.npz` motion clips。
 - 有 `_clip_object_urdf_map.json`。
-- map 里面每条 clip 对应 object metadata。
+- map schema 是 top-level `clips` dict，每个 key 是 clip stem。
 - 当前 object 是 `largebox`。
 - URDF 指向 `holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf`。
+- 例子：`sub10_largebox_032_mj_w_obj.npz` 对应 map key `sub10_largebox_032_mj_w_obj`。
 
 启动前先检查：
 
