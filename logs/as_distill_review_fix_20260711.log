@@ -1,0 +1,2057 @@
+AS / DISTILL CODE REVIEW AND FIX LOG
+Date: 2026-07-11 UTC
+Repository: /home/ubuntu/FAR/holosoma
+Scope: PPO/distill/DAgger, adaptive sampling (AS), distributed checkpointing,
+       rank-local motion shards, IsaacSim clip assets, and training launchers.
+
+======================================================================
+1. PPO / DISTILL / DAGGER
+======================================================================
+
+- Refresh the PPO coefficient before each rollout and immediately after resume.
+  `switch_to_rl_after` is now derived with `>=`, preventing a late checkpoint
+  from re-entering BC mode for one iteration.
+- Reject teacher action mixing/take-teacher whenever the current or future
+  schedule contains a PPO contribution. Such samples do not carry behavior
+  policy-consistent log-probabilities and would make the PPO objective invalid.
+  Pure DAgger remains supported.
+- Change DAgger standard-deviation matching across action dimensions from a sum
+  to a mean and keep it disabled by default.
+- Project policy and teacher standard deviations with a shared interpolation
+  rule that preserves the configured mean floor without violating the per-axis
+  hard cap.
+- Capture legacy MSE teacher labels during rollout with the teacher observation
+  groups and teacher perception, instead of reconstructing them later from the
+  wrong observation context.
+- Respect normalization metadata in teacher checkpoints and support the strict
+  actor observation aliases used by compatibility/legacy teachers.
+- Wrap ONNX export mode changes in `try/finally` so the module training state is
+  always restored.
+- Make all ranks participate in environment-state collection during periodic
+  and final checkpoint saves. Gather through the full-world Gloo group, let
+  only the main rank write/export, store `env_state_by_rank`, restore by global
+  rank, and retain compatibility with legacy `env_state` checkpoints.
+- Apply `env.distributed_loss_weight` before gradient all-reduce so overlapping
+  rank-local shard coverage does not bias the global actor/critic update.
+
+======================================================================
+2. ADAPTIVE SAMPLING / SHARDS / ISAACSIM
+======================================================================
+
+- Use `valid_start_counts` for failure bins and sampled starts. Exact FPS
+  multiples no longer create an empty phantom tail bin.
+- Compose adaptive failure density with contact/T1 reweighting in one discrete
+  timestep distribution instead of allowing one mechanism to overwrite the
+  other.
+- Represent `start_at_timestep_zero_prob` as an explicit delta-at-zero mixture;
+  entropy, T1-window, contact-stage, and effective probability metrics now
+  describe the distribution that is actually sampled.
+- Prefer exported contact sidecar `t1/t2` for pickup/drop-button stages, with a
+  per-clip kinematic fallback only when sidecar data is absent.
+- Save and strictly restore AS failure EMA, per-clip adaptive statistics, and
+  sampling weights, including shard/clip/geometry validation.
+- Preserve restored AS state across `load -> learn -> reset_all`.
+- Fix the capability guard so non-sharded homogeneous banks participate in
+  cross-rank adaptive-state synchronization. Rank-local banks explicitly skip
+  it because clip identity and tensor shapes differ.
+- Add global clip count, cover count, and rank loss scale to shard metadata.
+  Sampling uses inverse-cover correction; stale metadata and incompatible
+  world-size/rank assignments fail fast and require shard regeneration.
+- Preserve the per-clip URDF sequence for fixed environment assignment while
+  still deduplicating spawned assets. This keeps clip-weighted sampling from
+  silently becoming object-weighted sampling.
+
+======================================================================
+3. LAUNCHERS AND CHECKPOINT CONTRACTS
+======================================================================
+
+- Infer full-resume hidden dimensions from checkpoint metadata and fail fast
+  when the architecture cannot be determined safely.
+- Normalize W&B HTTPS references to the checkpoint contract and reject an empty
+  same-run resume target.
+- Enforce one identity for custom bank copy/install/train paths.
+- Permit `RESUME_FROM_BOX` only for a compatible drop-button MLP checkpoint;
+  reject flow, dual-button, and generic base checkpoints before training.
+- Ensure explicit `RESUME_FROM_BOX=0` does not change the default dataset.
+- Validate convex banks from actual URDF/mesh geometry rather than filename
+  heuristics.
+- Enable finite checks, default `DAGGER_MATCH_STD` to false, cap early PPO noise
+  at 0.1, and infer teacher observation history from local checkpoint metadata.
+  Unknown remote teacher history now requires an explicit value.
+- Update launcher notes to match the composed AS/contact sampling semantics and
+  add launcher contract coverage.
+
+======================================================================
+4. VERIFICATION
+======================================================================
+
+- PPO/distill regression: 83 passed, 1 skipped.
+- AS/checkpoint/shard targeted regression: 28 passed.
+- Extended core regression: 81 passed, 2 skipped.
+- Command-manager regression: 12 passed.
+- ONNX regression: 2 passed.
+- Launcher contract tests: passed.
+- Shell syntax checks (`bash -n`): passed.
+- Convex bank validation: 79/79 clips passed.
+- Python compilation and `git diff --check`: passed.
+- A two-process Gloo environment-state gather smoke test passed.
+
+An actual Isaac rollout smoke test was attempted but did not reach rollout:
+another long-running job was already using approximately 33 GiB of GPU memory,
+and PhysX failed while requesting roughly 2 GiB more. This is recorded as an
+environment-capacity block, not as a passing runtime test. Test processes and
+the temporary approximately 6 GiB cache were cleaned up.
+
+Full-repository collection still exposes pre-existing unrelated issues around
+missing/inconsistent `holosoma_inference` tests, motion-geometry visualization,
+and stale W&B mocks. They were not attributed to this change set.
+
+======================================================================
+5. INTENTIONAL NON-CHANGE / FOLLOW-UP DECISION
+======================================================================
+
+The default `start_at_timestep_zero_prob` schedule rises from 0.2 to 1.0. Thus,
+near the end of training, the nonzero adaptive branch approaches zero weight.
+The implementation and metrics are now internally correct, but changing that
+schedule would alter training intent, so it was deliberately left unchanged.
+
+======================================================================
+6. GIT DELIVERY BOUNDARY
+======================================================================
+
+Only this log and `/home/ubuntu/FAR/holosoma/agent.md` are force-added despite
+the repository's allow-list `.gitignore`. No other existing, modified, ignored,
+or untracked files are staged by this handoff.
+
+======================================================================
+7. CONTINUED STUDENT-POLICY AND DISTRIBUTED REVIEW (2026-07-12/13 UTC)
+======================================================================
+
+Student-policy schedule and optimization:
+
+- Corrected adaptive learning-rate gating. Only a scheduled pure-BC phase
+  (`ppo_coeff <= 0`) suppresses KL-based actor LR adaptation. Any nonzero PPO
+  contribution, including 0.01 or 0.1, uses the PPO KL adaptation path.
+- Kept the intended fresh-run schedule explicit: iterations 0-699 use
+  `ppo_coeff=0.0`, 700-1399 use 0.1, and each subsequent 700-iteration tier
+  increases by 0.1 until 0.9 at iteration 6300. BC weight is `1-PPO`, so 0.1
+  BC remains after iteration 6300.
+- During the initial pure-BC actor phase, student rollout actions are the
+  deterministic means. The actor learns only from supervised BC while the
+  critic still learns its value target. At the first PPO tier the exploration
+  standard deviation is capped at 0.1.
+- A CPU reproduction showed that starting with a nonzero PPO coefficient can
+  legitimately produce large KL and near-zero ratios after the BC update. The
+  large KL seen in earlier canaries was real policy drift, not a KL-statistic
+  implementation error.
+
+Exact fixed-BC evaluation contract:
+
+- Replaced the per-rank rounded budget with quotient/remainder allocation.
+  For 4096 samples over 104 ranks, ranks 0-39 own 40 samples and ranks 40-103
+  own 39 samples: `40*40 + 64*39 = 4096` exactly.
+- Aligned MSE numerator and denominator with rank-shard loss weights. The raw
+  all-reduced sample count is retained separately and must equal 4096; the
+  weighted sample count is also reported.
+- Checkpoints now persist allocation version, scheme, global budget, world
+  size, rank, and local target. Resume validates all fields strictly. A legacy
+  ready state fails closed unless
+  `HOLOSOMA_ALLOW_FIXED_BC_EVAL_RESET_ON_RESUME=1` is explicit.
+- The allocation handles budgets smaller than world size by supporting
+  zero-target ranks.
+
+Distributed topology and rank-visible execution:
+
+- `train_agent_rank_visible.py` now exposes exactly one physical GPU per
+  worker while preserving `HOLOSOMA_ORIGINAL_LOCAL_RANK` and
+  `HOLOSOMA_ORIGINAL_LOCAL_WORLD_SIZE` for distributed topology, rank-local
+  shards, and one-per-node progress/completion markers.
+- Replaced the unstable 104-rank global NCCL gradient communicator with:
+  13 local eight-rank NCCL reduce/broadcast groups, 13 local Gloo barrier
+  groups, and one 13-rank CPU/Gloo leader all-reduce group.
+- Added explicit CUDA fences around packing, local reduce, leader CPU copy,
+  leader all-reduce, and local broadcast. Rank weights are applied once before
+  reduction and the global sum is divided once by 104.
+- The default process group is Gloo. Small/control collectives and model sync
+  use Gloo; large gradients use the hierarchical path. Unsupported topology,
+  hierarchical/Gloo-gradient conflicts, and CPU-leader-without-hierarchy now
+  fail closed rather than silently falling back to global NCCL.
+
+Execution provenance:
+
+- Added typed runtime fields for `HOLOSOMA_RANK_VISIBLE_DEVICES`, `NPROC`,
+  hierarchical reduce, CPU leader, Gloo small/gradient paths, TF32,
+  contiguous minibatches, supervised microbatching, and related execution
+  switches. Resume compares their exact values and types.
+- NCCL runtime SHA is mandatory when either the default backend is NCCL or
+  hierarchical local NCCL is enabled, even when the default backend is Gloo.
+- Pinned NCCL runtime:
+  `/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899/libnccl.so.2`
+  with SHA256
+  `e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899`.
+- Teacher SHA256:
+  `1c441a7eea24fb28d67cc4b5edeb123b91d589ec095d383034f32210a87b6c5b`.
+  Student policy initializer SHA256:
+  `7f62166a326423704841f87446fd953d6ea7d466a97872cb020f835f36db3081`.
+
+======================================================================
+8. LAUNCHER LIFECYCLE AND OWNERSHIP FIXES
+======================================================================
+
+- Validate `SESSION` and `RUN_STAMP` as safe basenames.
+- Reserve the main and provenance rendezvous ports atomically on the master.
+  Reservations carry version, token, session, port, and creation time, and are
+  released only by the owning token on launch failure, stop, or rank-zero exit.
+- Prepublish a version-2 launch intent on every node before starting any tmux
+  session. Bind active state, tmux metadata, and the log header to snapshot,
+  log directory, target iteration, launch token, command SHA256, and epoch.
+- Status now distinguishes startup grace, running, finalizing, completed,
+  stopping/stopped, and rollback states. A completion marker is authoritative
+  only when it matches the active target and the exact tmux session has exited.
+  Stale markers and logs from older launches are rejected.
+- The launcher forwards and validates hierarchical reduce, CPU leader, and
+  rank-visible switches. Hierarchical Gloo launches still verify and preload
+  the pinned NCCL library used by local groups.
+- During the first formal launch attempt, controlled stop exposed a real FD
+  inheritance deadlock: the launcher held flock FD8 while calling
+  `tmux new-session`; tmux and its long-running pane inherited FD8, so stop
+  blocked waiting for the job to release the lock that stop needed to kill it.
+- Fixed the deadlock by invoking `tmux new-session ... 8>&-`. The launcher
+  parent retains the lock through tmux option and active-state binding, so the
+  fix closes the FD only in the persistent child and does not introduce a
+  check/create race.
+- Added a dynamic regression assertion in the fake tmux process using
+  `/proc/$$/fd/8`; the old implementation exits with an error and the fixed
+  implementation sees FD8 closed. Dry-run contracts also require the explicit
+  `8>&-` suffix.
+
+======================================================================
+9. MULTI-NODE CANARY CHRONOLOGY AND ROOT CAUSE
+======================================================================
+
+- r9-r11 fixed rank-local shard/visible-rank issues and W&B `AlreadyJoined`,
+  then passed on eight GPUs.
+- r12 stalled during startup. r13/r14 reproduced random single-rank stalls in
+  the 104-rank flat NCCL path.
+- r15 made rank-zero appear stuck in a Gloo KL wait, but full rank chronology
+  showed rank59 was still in the previous minibatch's global NCCL gradient
+  all-reduce. The Gloo wait was a consequence, not the root cause.
+- r14/r15/r17 lagged on different ranks and nodes (42, 59, and 13), excluding
+  a stable bad-host explanation. The common factor was global 104-rank NCCL
+  interleaved with Isaac simulation/training; standalone NCCL stress did not
+  reproduce the same interleave.
+- r16 completed one iteration but used an older overlay and did not contain the
+  final execution-provenance contract; it was not accepted as the final run.
+- r17 used the then-final source but rank13 stalled at iteration 0 minibatch 4
+  while the other 103 ranks entered the next collective. It produced no
+  checkpoint and was stopped and fully cleaned.
+
+r18 accepted canary:
+
+- Session:
+  `as_debug30_ws104_hier_gloo_canary_r18_20260713_014025`.
+- Source snapshot:
+  `src-3013a474b4f2a00e851c87ff8ce83d269c78f21064152dbe4118fa0708566b89`.
+- Configuration: 13 nodes x 8 GPUs, 64 env/GPU, 6656 total envs, five
+  iterations, 64 minibatches, one learning epoch, Gloo default/small
+  collectives, hierarchical local NCCL + CPU/Gloo leaders, rank-visible.
+- All 104 ranks completed all five iterations and all 64 minibatches per
+  iteration: 33,280/33,280 updates and 520/520 rank-iteration exits. No update
+  was skipped and no non-finite gradient, traceback, NCCL warning, timeout, or
+  lagging rank occurred. The final collective across 104 ranks spanned only
+  about 9 ms.
+- Active GPU sampling showed exactly one CUDA process on every one of 104
+  GPUs, approximately 25.65-25.95 GiB per GPU, and no duplicate contexts.
+- Pure-BC learning moved in the correct direction:
+  distill loss approximately 0.3129 -> 0.1894, fixed-BC MSE
+  0.2161 -> 0.1642, and KL 481.23 -> 23.43.
+- `model_00005.pt` was written (92,577,155 bytes). It contains actor/critic,
+  both optimizer states, 104 rank-local environment states, 104 fixed-BC
+  states, `next_iter=5`, and exact execution provenance. A recursive scan of
+  1,252 tensors / 23,025,226 elements found no non-finite value.
+- W&B run `n8rr1bka` synced successfully. All 13 tmux sessions and all 104
+  CUDA processes exited naturally; both rendezvous reservations were removed.
+- Isaac Kit printed identical headless Vulkan/renderer startup errors for
+  non-rendering ranks. This experiment uses `enable_cameras=False` and the
+  bundled Warp raycast perception path; nonzero finite `actor_perception`
+  tensors were stored for all fixed-BC strata, so these renderer diagnostics
+  did not disable the actual student perception input.
+
+======================================================================
+10. FORMAL LAUNCH STATUS
+======================================================================
+
+- The first formal r19 attempt was intentionally stopped before acceptance
+  because internal `RUN_NAME`/`TRAINING_NAME` used generic launcher defaults.
+  Its controlled stop exposed the FD8 deadlock described above. The exact
+  token-owned sessions were removed, all 13 active states reached `stopped`,
+  all 104 GPUs were cleared, and ports 29841/29842 were released.
+- The launcher fix was frozen into source snapshot
+  `src-2c6842ca880d9b6eb9c4b5eb2cd4e89ae4454fab654363fb4184eb09a334ae1f`.
+  Archive SHA256:
+  `8407ef6ce9257ad9353f6ad55374daec258d176d9ef8fa883ce77681cfd23c16`.
+  Source bundle SHA256 recorded at runtime:
+  `6bd394f9c4c6f63db8e71ce6e51e87d4d84e975817c1904db00b0814183bd302`.
+- Exact Python overlay:
+  `/home/ubuntu/FAR/holosoma_runs/.runtime/python/numpy-1.26.0-866c2b4f9a5822c04683586b086b032bda5413b89edb760788d5fc2fe7a861c4/site-packages`,
+  manifest SHA256
+  `866c2b4f9a5822c04683586b086b032bda5413b89edb760788d5fc2fe7a861c4`,
+  890 files. It was exact-tree verified on all 13 nodes.
+- Accepted formal session:
+  `as_debug30_ws104_scientific_formal_r20_20260713_020500`.
+  Internal run name is the same session; training name is
+  `g1_29dof_as_debug30_ws104_scientific_formal_r20_20260713_020500`.
+- Master endpoints: `10.99.1.60:29861` and provenance port 29862. The launch
+  token is intentionally redacted from this pushable log and remains only in
+  the node-local ownership records.
+- Target is 40,000 fresh iterations; checkpoint and fixed-BC evaluation
+  intervals are 100. Numerical/training configuration otherwise matches r18.
+- Initial acceptance at 2026-07-13 02:12 UTC: nine consecutive progress
+  markers, 104/104 ranks alive, exactly one process per GPU, 13/13 pane
+  processes with FD8 closed, zero cross-node fatal errors, and no lagging rank.
+  Iterations take approximately 10-11 seconds after startup.
+- Iteration-zero metrics: distill loss 0.3128, fixed-BC MSE 0.2156, exact raw
+  fixed-BC sample count 4096, rank strata 104, KL 481.04, PPO coefficient 0,
+  and noise standard deviation 0.1. Through iteration 3, distill loss fell to
+  0.2041 and KL to 31.79.
+- W&B run: `fr0e6szp`.
+  Training directory:
+  `/home/ubuntu/FAR/holosoma_runs/training_logs/carry-any/20260713_020959-g1_29dof_as_debug30_ws104_scientific_formal_r20_20260713_020500-locomotion`.
+- A complete monitoring window sampled all 13 nodes 12 times over 562 seconds.
+  Progress increased by 49 iterations without a pause; every sample contained
+  104 workers, 104 CUDA applications, 104 unique GPU identities, and 104
+  unique PIDs. Cross-node fatal-error scans remained zero.
+- The first formal checkpoint `model_00100.pt` is stable at 92,577,219 bytes;
+  repeated stat checks had identical size/mtime/inode, there was no open writer
+  or temporary sibling, and training continued through iteration 106.
+- Deep checkpoint validation passed: `iter=99`, `next_iter=100`, 104
+  environment states, 104 fixed-BC states, exact 4096 raw samples, 17 actor
+  optimizer states, 8 critic optimizer states, and exact r20 execution
+  provenance. All 1,252 tensors / 23,025,226 elements are finite. Actor std is
+  exactly 0.1 on every action dimension at this pure-BC stage.
+
+======================================================================
+11. FINAL VERIFICATION UPDATE
+======================================================================
+
+- Extended Python regression: 522 passed, 3 skipped, 1 warning.
+- PPO module regression after hierarchy/fixed-BC changes: 163 passed, 1
+  skipped; hierarchy-targeted regression: 24 passed.
+- Launcher lifecycle/FD regression: passed twice cleanly after the final fix.
+- Snapshot content-addressed contract: passed.
+- Shell syntax, Python compilation, `git diff --check`, and exact runtime
+  overlay checks: passed.
+- Broader environment discovery still finds the pre-existing unavailable
+  `isaacgym` module in tests that require that optional backend; it was not
+  caused by these changes.
+
+The Git delivery boundary remains unchanged: only this log and `agent.md` are
+staged. Source code and tests remain modified/untracked in the working tree and
+are intentionally not added to the index by this review handoff.
+
+======================================================================
+12. SECOND SCIENTIFIC AUDIT: STUDENT POLICY, PERCEPTION, AND LAUNCH TOPOLOGY
+======================================================================
+
+The long-running r20 job remained numerically healthy, but a deeper audit found
+two scientific contract violations that made its results unsuitable as the
+final experiment:
+
+- Adaptive KL control wrote the actor-selected learning rate into both the
+  actor and critic optimizers. By iteration 5100 both effective rates were
+  `1e-5`, even though the critic has an independent configured rate. The update
+  path now changes only the actor optimizer and actor LR. During pure BC, KL is
+  diagnostic-only; on resume, actor and critic rates are restored independently.
+- `far_tracking_warp` advertised camera sensor noise and reset-pose
+  randomization without consistently applying the sampled runtime state. All
+  camera backends now apply noise exactly once, partial environment slices use
+  matching sampled tensors, and far-tracking capture reads the latest reset
+  position/quaternion offsets. Startup validates the effective std, dropout,
+  translation, and rotation tensors and fails closed if configured state is
+  absent.
+
+The student-policy path was re-audited end to end:
+
+- iteration-zero schedule refresh occurs before rollout; a fresh run therefore
+  uses `ppo_coeff=0`, deterministic student mean actions, and pure actor BC;
+- teacher labels and student inputs are derived from the same pre-step state;
+- the critic still performs value backward, distributed reduction, and an
+  optimizer step during the pure-BC actor phase;
+- the first nonzero PPO tier switches to stochastic student actions and only
+  then enables adaptive actor-KL control;
+- checkpoints retain independent optimizers/LRs, `iter`/`next_iter`, all
+  rank-local environment and fixed-BC states, and recompute the schedule from
+  `next_iter` on resume;
+- teacher and policy-initializer checkpoints were recursively scanned and all
+  tensors were finite. Their observation/action/module contracts match the
+  effective student profile exactly. A prior formal checkpoint also confirmed
+  that the perception CNN receives and applies BC gradients.
+
+Low-priority robustness follow-ups were recorded but do not block a fresh run:
+resume could additionally assert `next_iter == iter + 1` and finite/in-range
+optimizer LRs; policy-init loading could recursively scan finite values itself;
+and an end-to-end `_update_algo_step` unit test could directly assert critic
+parameter movement and perception gradients.
+
+Launcher topology now fails on the controller before snapshot installation,
+SSH, intent publication, or GPU use when any of these contradictions exist:
+
+- Gloo gradient reduction and hierarchical reduction are both enabled;
+- CPU leader reduction is enabled without hierarchical reduction;
+- hierarchical reduction is requested for a single node or one rank per node.
+
+The launcher contract suite now covers invalid single-node/one-rank hierarchy,
+contradictory modes, valid 2x2 hierarchy, valid single-node flat Gloo, and the
+requirement that these errors precede all remote mutation. The full launcher
+suite passed twice after the change.
+
+The video-evaluation-only compatibility path was also reviewed. The opt-in
+`HOLOSOMA_EVAL_ALLOW_MISSING_CAMERA_SENSOR_NOISE_STATE` is injected only into
+video child processes and is never forwarded by the training launcher. Normal
+training stays fail-closed. Tests explicitly prove all three cases: default
+missing noise state fails; video opt-in may continue without a randomizer; and
+even with the opt-in, a configured randomization range whose sampled tensor is
+missing still fails. Removing contact-export reward terms and rollout-reference
+roots is likewise confined to an explicit video-eval flag and does not alter
+policy actions or training configuration.
+
+The control account's W&B netrc file was found with mode 0644. It was changed to
+0600 and its parser/authentication path was verified without printing or
+copying credentials.
+
+Targeted final regression for the late perception/eval delta passed 45 tests.
+The broader final results remain: 522 Python tests passed (3 skipped), the PPO
+module and hierarchy suites passed, the full launcher suite passed twice,
+shell/Python syntax and `git diff --check` passed, and the immutable Python/NCCL
+runtime closures were verified.
+
+======================================================================
+13. R21 CANARIES AND FORMAL CUTOVER
+======================================================================
+
+The first seven-GPU canary intentionally used node 10.99.0.176 while excluding
+GPU 3, which has three recorded ECC errors. It proved that every active rank saw
+nonzero sensor-noise, dropout, camera-position, and camera-angle ranges, but it
+failed before iteration zero because a single-node launch had incorrectly
+enabled hierarchical reduction. It produced no checkpoint, was stopped by its
+exact ownership token, and released all processes and ports. This failure
+directly motivated the controller-side topology validation above.
+
+The replacement canary
+`as_debug30_ws7_bc2ppo_canary_r21c2_20260713_182003` compressed the curriculum
+only for validation: coefficients across iterations 0-4 were
+`0, 0.1, 0.2, 0.3, 0.4`. It completed all five iterations on GPUs
+`0,1,2,4,5,6,7` using Gloo gradient reduction. Every rank reported real
+far-tracking sensor/dropout/reset-pose randomization with nonzero ranges; all
+logs were free of fatal/non-finite/NCCL errors.
+
+Most importantly, the canary provided runtime proof of the LR fix. Model 1 had
+actor/critic rates `1e-3/1e-3`; models 2-5 reduced only the actor to `1e-5`,
+while the critic stayed `1e-3`. All five checkpoints contained 185 finite model
+tensors, complete seven-rank environment/fixed-BC state, 17/8 optimizer states,
+the exact 30-clip partition, and exact teacher/policy/source provenance. Final
+model 5 SHA256 was
+`feb9e0c192adab4f8a8bd5d4c17afc0068c8beb36f584177498cb8027d69d516`.
+The canary completed naturally and released all GPUs and ports.
+
+The superseded r20 formal was stopped at progress 5166 only after the accepted
+r21 canary, final snapshot installation, and exact r21 dry-run were complete.
+All 13 active states reached `stopped` with the original token, 13 tmux and 104
+workers exited, 104 GPU compute-app slots were empty, and ports 29861/29862 were
+released. Its last stable checkpoint was model 05100; r20 must not be resumed
+for scientific results.
+
+The final content-addressed r21 source is:
+
+- snapshot: `src-25e653d70852ba3216288d0581266706126e240e6d497539d08be8620367e8bf`;
+- archive SHA256:
+  `47839f6f4c7bd8e708471b427e0f031441c692be1c43a9ad30cca59ca484f238`;
+- runtime source-bundle SHA256:
+  `06bdff082f66a395133d37ae00db77be7adec511d9b0ec7f88ecd4701c57fab3`.
+
+It was built repeatedly with an identical hash, installed and manifest-verified
+on all 13 formal nodes with `PREPARE_DATA=0`, and passed an exact-name dry run:
+13/13 preflights, intents, launch payloads, teacher stagings, and policy-init
+stagings. All training/W&B/previous-policy resume aliases and both video-eval
+overrides were explicitly unset.
+
+Formal r21 launch metadata:
+
+- session/run name:
+  `as_debug30_ws104_scientific_formal_r21_20260713_183354`;
+- training name:
+  `g1_29dof_as_debug30_ws104_scientific_formal_r21_20260713_183354`;
+- launch token: intentionally redacted from this pushable log; the exact value
+  remains only in the node-local ownership records;
+- master/provenance endpoints: `10.99.1.60:29871/29872`;
+- W&B run: `bpnn852h`;
+- training directory:
+  `/home/ubuntu/FAR/holosoma_runs/training_logs/carry-any/20260713_184552-g1_29dof_as_debug30_ws104_scientific_formal_r21_20260713_183354-locomotion`;
+- main log:
+  `/home/ubuntu/FAR/holosoma_runs/src-25e653d70852ba3216288d0581266706126e240e6d497539d08be8620367e8bf/logs/batch_ne/as_debug30_ws104_scientific_formal_r21_20260713_183354_20260713_183354/node_0_10.99.1.60.log`.
+
+The launch completed transactionally on 13/13 nodes. Initial runtime
+provenance already confirms fresh start, exact source/teacher/policy/runtime,
+104-rank hierarchical topology, offline contact guidance, 30 clips, 6656 total
+environments, actor/critic initial rates `1e-3/1e-3`, and the intended
+`0 -> 0.9`/700/6300 schedule. Rank-zero reported real far-tracking stochastic
+semantics with nonzero std, dropout, position, and angle ranges. Full
+multi-iteration acceptance and the first checkpoint audit are recorded below as
+they complete.
+
+Initial multi-rank acceptance subsequently passed. All 13 active states and
+tmux sessions match the same token, command SHA, epoch, source, and target;
+every node has eight rank workers and eight distinct GPU compute applications
+(104/104 total). Each of the 104 rank logs contains exactly one camera
+stochastic-semantics record with nonzero std/dropout/position/angle ranges.
+Cross-rank fatal, RuntimeError, NCCL, OOM, NaN, and non-finite scans were zero.
+The hierarchical group initialized as 104 ranks, eight local ranks, 13 nodes,
+with CPU/Gloo leaders.
+
+Iteration-zero runtime metrics confirm the fresh scientific contract:
+`ppo_coeff=0`, actor/critic LR `1e-3/1e-3`, raw fixed-BC samples 4096, rank
+strata 104, fixed-BC MSE about 0.2205, and actor noise std 0.1. Through the
+first ten iterations, pure-BC distill loss fell from about 0.3366 to 0.1928 and
+mean reward rose from about 1.49 to 3.24. Progress remained continuous at
+roughly 10.7 seconds per iteration.
+
+An independent acceptance pass directly hashed the source manifest, Python
+overlay, NCCL runtime, teacher, policy initializer, data package, motion-shard
+manifest, and contact-sidecar manifest on all 13 nodes; every digest matched.
+It also parsed every rank's semantics record. Across 104 ranks, sensor-noise std
+spanned approximately `1.39e-5..0.049998`, dropout
+`4.99e-6..0.025000`, position offsets `-0.024999..0.024998`, and angle
+`0.125..4.537` degrees. No video-eval override was present in any sampled
+training process environment.
+
+Iteration zero further showed actor loss equal to BC loss (about 0.3366), BC
+weight 1.0, critic loss about 0.5320, and a nonzero offline-contact reward.
+This directly confirms that the actor was pure supervised BC while the critic
+continued to learn. All 104 GPU corrected and uncorrected ECC counters were
+zero during acceptance.
+
+The first formal checkpoint, `model_00100.pt`, was observed only after it was
+stable across two samples and had no temporary sibling or open writer. Its
+SHA256 is
+`a11800b58dfb40a4b1c44f3575d8c9e73dea80b7000ea7d64dc7159a706cbdec`
+and its size is 92,577,347 bytes. A read-only recursive audit found 1,252
+tensors (23,025,226 elements), including 832 floating tensors; every value was
+finite. The checkpoint records `iter=99`, `iteration=99`, and `next_iter=100`.
+Actor/critic state contains 17/8 tensors, both optimizer states are complete
+with independent `1e-3` rates, and the 29-dimensional actor standard deviation
+is exactly 0.1.
+
+Both `env_state_by_rank` and `fixed_bc_eval_by_rank` contain exactly 104 rank
+keys. The saved clip union is exactly the intended 30 clips. The fixed-BC
+allocation is exactly 4096 samples: ranks 0-39 have 40 each and ranks 40-103
+have 39 each, with matching observation/action/perception shapes and rank/world
+metadata. Source, teacher, policy initializer, Python overlay, NCCL, data,
+motion/contact manifests, distributed topology, and fresh-start provenance all
+match the launch contract. No writer or temporary file remained after save.
+During this audit progress continued from 111 through 123.
+
+Three complete 10-minute health windows through progress 125 remained green:
+13/13 token/binding/tmux states, 104/104 workers and GPU applications, fresh
+logs, zero volatile ECC, and zero fatal/NCCL/CUDA/OOM/non-finite/NaN matches.
+Peak observed GPU temperature was 50 C. Iteration 124 still had
+`ppo_coeff=0` and actor/critic LR `1e-3/1e-3`, as required before iteration
+700. Monitoring continues; this entry is not a claim that the 40,000-iteration
+experiment has completed.
+
+======================================================================
+14. POST-SNAPSHOT RESUME/POLICY-INIT FAIL-CLOSED HARDENING
+======================================================================
+
+A separate workspace follow-up closed the low-priority checkpoint validation
+gaps identified above. This change is deliberately *not* part of the immutable
+r21 source snapshot and does not justify restarting the healthy fresh r21 job;
+it applies to future snapshots and resume/policy-init operations.
+
+The shared checkpoint validator now rejects missing, boolean, fractional,
+negative, or contradictory completed/next iteration counters. Legacy files may
+omit `next_iter`, but an explicit value must equal `iter + 1`. Model,
+normalizer, and optimizer trees are recursively checked for non-finite numeric
+values. Every optimizer parameter-group LR must be a finite positive real
+inside the independently configured actor or critic bounds; the first actor
+and critic group rates are restored separately.
+
+Full PPO resume performs these checks for actor, critic, enabled normalizers,
+and both optimizer states before mutating any live model, normalizer,
+optimizer, iteration, fixed-BC, or environment state. Actor-only policy init
+checks the actor and, when enabled, the actor normalizer before mutation; the
+unused critic is intentionally ignored. The launcher preflights and direct PPO
+load paths share the same numerical validators, so an alternate caller cannot
+silently load non-finite numerical state.
+
+Regression covering policy-init/resume preflight, direct PPO loads, schedule,
+distillation, and fixed-BC semantics passed 193 tests. The fixed
+`model_39999.pt` policy initializer also passed the new preflight. Python
+compilation and diff/whitespace checks passed; `ruff` was unavailable in the
+active environment.
+
+======================================================================
+15. AS/STUDENT/TEACHER RESUME ATOMICITY AND ALL-RANK CONTRACT CLOSURE
+======================================================================
+
+The post-snapshot audit continued through the exact student, teacher, AS, and
+distributed save/resume paths. These changes remain workspace-only and are not
+part of the immutable, already-running r21 source snapshot.
+
+Actor noise state and student/teacher correctness:
+
+- A finite but invalid checkpoint actor `std` could previously be copied into
+  a live actor and then silently projected by `_sanitize_actor_std`. Full
+  resume, actor-only policy init, and strict teacher load now compare the saved
+  tensor with the exact pure runtime projection before any module mutation and
+  reject any value that would change.
+- The projection order had a real edge-case error: an oversized component
+  could make the pre-cap mean appear above `min_mean_noise_std`, then the final
+  cap could leave the effective mean below the requested floor. The common
+  projection now applies the component cap before evaluating the mean floor;
+  `[2.0, 0.1]` with mean floor/cap `0.8` correctly becomes `[0.8, 0.8]`.
+- `init_noise_std`, `min_noise_std`, `min_mean_noise_std`, and `max_noise_std`
+  must now be finite and positive when present. Component and mean floors are
+  explicitly mutually exclusive, removing the former truthiness-dependent
+  interpretation of zero or contradictory settings.
+- Strict teacher loading now requires a parseable serialized actor config,
+  recursively finite actor state, prevalidated module compatibility, and a
+  valid saved `std`. The intentional non-strict extra-input compatibility path
+  validates every shared tensor before loading instead of relying on a failed
+  `load_state_dict` that may already have partially copied parameters.
+- Teacher observation normalizers are validated across every alias before any
+  alias is loaded: exact keys/shapes/dtypes/layouts, finite values,
+  non-negative count/variance, positive std, and std/variance/eps consistency.
+  Thus one bad late alias cannot leave earlier aliases partially restored.
+
+Adaptive-sampler resume contract:
+
+- `AdaptiveTimestepsSampler.state_dict()` is now version 3 and records
+  `adaptive_kernel_size`, `adaptive_lambda`, `adaptive_uniform_ratio`, and
+  `adaptive_alpha`. Version-3 restore compares all four exactly. Versions 1/2
+  predate these fields and are accepted only when the runtime uses the
+  historical production defaults `(1, 0.8, 0.1, 0.001)`; non-default legacy
+  restores fail closed.
+- The v1 failure-only migration previously assigned unit exposure to every
+  valid bin. Legitimate old failure EMAs greater than one would load but fail
+  at the next probability calculation. Migration now uses a clip-wise constant
+  `max(1, max_failure)` exposure, preserving relative legacy priorities while
+  satisfying `failure <= exposure`. A `[2, 4]` repro migrates to exposure
+  `[4, 4]` and produces finite normalized probabilities.
+
+Distributed checkpoint atomicity:
+
+- Fixed-BC save no longer evaluates rank-local state before its collective.
+  Every rank, including a zero-budget rank, first joins the real all-rank Gloo
+  envelope with its actual group rank/world, state or error, and runtime
+  allocation fingerprint. Local serialization/contract failures are reported
+  identically by all ranks after the gather rather than stranding peers.
+- The fingerprint covers allocation version/scheme, global budget, world size,
+  rank/local quotient-remainder target, and DAgger enablement. Resume validates
+  the same fingerprint and rejects unknown actions or a `noop` mixed with
+  `restore/clear`; an explicit reset requested by any rank still becomes one
+  global reset plan.
+- Budget parsing and fingerprint construction themselves are inside the error
+  envelope. Tests force those functions to raise and prove
+  `all_gather_object` is still called exactly once. Environment-state save was
+  hardened analogously so a rank-local serialization/non-finite error cannot
+  leave other ranks blocked in its object gather.
+
+Validation evidence after the final delta:
+
+- Broad student/teacher/PPO/AS/resume/preflight/provenance suite:
+  `420 passed, 1 skipped`.
+- Focused fixed-BC collective suite: `26 passed`.
+- Full launcher contracts passed, including transactional rollback, ownership
+  and FD boundaries, MuJoCo perception metadata, and content-addressed source
+  snapshot stability.
+- Python compilation and `git diff --check` passed.
+- Independent validation of formal r21 `model_00100.pt` passed for all 104/104
+  legacy-v2 sampler states under the default-only compatibility gate; all 104
+  fixed-BC strata total exactly 4096 rows and world-size-104 resume preflight
+  passes. The formal teacher actor/config/observation/robot/action contracts are
+  finite and compatible with the new strict checks.
+
+The formal r21 job was not restarted because these are future snapshot/resume
+guards, not defects in its fresh immutable execution. At the 20:17:15 UTC
+health window it advanced from progress 415 to 472: 13/13 nodes, 104/104
+workers and GPU applications, correct state/tmux/log ownership, zero scanned
+errors, zero ECC, 50 C peak temperature, and actor/critic rates
+`1e-3/1e-3` at iteration 471. Ten-minute monitoring continues.
+
+======================================================================
+16. POST-SNAPSHOT IMMUTABLE BANK AND RUNTIME-ASSET CLOSURE
+======================================================================
+
+The AS bank/launcher audit was extended from path identity to content closure.
+These fixes are workspace-only and are not part of the already-running r21
+snapshot.
+
+- Single-slot and solid generations now use a content-addressed version-3
+  schema. NPZ, object map, URDF, contact, metadata, and manifest payloads are
+  real read-only files. Publication rejects payload symlinks, writable files,
+  digest drift, and invalid expected-digest identities.
+- Publication recursively fsyncs payload files/directories, performs an atomic
+  rename, and fsyncs the parent. The fixed custom-output compatibility path may
+  still atomically replace an invalid generation only when no expected digest
+  was supplied.
+- Visual/collision mesh fields and transitive OBJ/MTL/texture, glTF
+  buffer/image, COLLADA image, PLY TextureFile, and URDF texture dependencies
+  are included. Remote and unknown dependencies fail closed. All `map_*` PBR
+  extensions and CRLF OBJ `mtllib` lines are covered.
+- Runtime provenance formerly decoded and `shlex`-parsed every geometry line
+  in every OBJ. On the real asset tree that consumed one CPU for more than nine
+  minutes without completing. It now memory-maps the OBJ and strictly decodes
+  only anchored `mtllib` directives; irrelevant geometry bytes are never
+  interpreted as shell syntax. Empty or invalid-UTF8 directives still fail
+  closed.
+- A deterministic regression proves only the one directive line is parsed in
+  a 50,000-line OBJ, while quoted material/texture names, opaque non-directive
+  bytes, empty directives, invalid directive UTF-8, CRLF, and PBR maps retain
+  correct semantics.
+
+Real-data evidence:
+
+- Immutable-bank unit tests: 63 passed; the complete distill launcher contract
+  passed.
+- The 195-clip generalist single bank is 174 MiB with zero payload symlinks;
+  reuse took 37.95 s at 118800 KiB RSS. The 79-clip solid bank is 129 MiB/638
+  files, with zero symlinks and zero writable payloads; initial/reuse time was
+  39.34/18.38 s.
+- The real success133 provenance completed in 27.86 s at 585512 KiB RSS:
+  motion/object closure 25.648 s, contact 0.606 s, source 0.082 s, and teacher
+  SHA 0.009 s. The ws104 rank-source digest completed in 26.73 s.
+- A real 195-clip `train_as_general.sh` dry run produced the intended
+  history-5 student command. Python compilation, shell syntax, whitespace, and
+  staged-file checks passed.
+
+The important residual boundary is explicit: the external generalist mesh
+source is approximately 5.9 GiB/3768 files. URDFs bind those bytes by digest
+and the simulator revalidates them again before construction, but generations
+do not duplicate the entire tree. Eliminating the final preflight-to-open
+TOCTOU requires a shared CAS/reflink asset store. Blindly copying 5.9 GiB per
+generation is not an acceptable substitute. Generations also require explicit
+safe garbage collection only after their sessions end.
+
+======================================================================
+17. PURE-RL PROVENANCE, CONTACT-ID, AND STUDENT INFERENCE CLOSURE
+======================================================================
+
+The object-generalist launcher previously exported no
+`HOLOSOMA_TRAINING_PROVENANCE`; runtime finalization, data/source revalidation,
+cross-rank equality, checkpoint lineage, and checkpoint embedding therefore
+all became no-ops. This was a real scientific-resume gap.
+
+- Provenance v2 now explicitly distinguishes `distillation` and `pure_rl` and
+  records `teacher_enabled`. Pure RL uses a domain-separated disabled-teacher
+  digest rather than inventing a teacher artifact. Legacy v2 payloads normalize
+  only to distillation, preserving old distill checkpoint compatibility.
+- The generalist generator content-hashes motion/map/transitive objects,
+  contact, source, policy-init, and training-resume inputs. Checkpoint
+  references are first resolved to exact local immutable files. Source is
+  recomputed on every pre-simulator helper invocation even when the large-data
+  identity cache is reusable.
+- The launcher binds adaptive contact roots to the hashed contact tree,
+  rejects teacher-rollout reference rewards until those assets receive their
+  own manifest, rejects `command:*`/`reward:*` selectors, and canonicalizes
+  underscore/hyphen spellings before protecting provenance-owned CLI fields.
+- NCCL execution requires the pinned library path and SHA256. Old generalist
+  checkpoints with no saved provenance intentionally cannot be scientific
+  resumes; they may only be treated as explicitly validated policy initializers.
+
+Contact directory matching was also corrected. Splitting every name at the
+first underscore corrupted exact IDs such as `box_10`. The parser now removes
+only a nonempty decimal exporter prefix. When active motion IDs are available,
+an exact active name wins before prefix interpretation, so a real ID such as
+`2024_box_10` remains intact. Exact and numbered directories resolving to the
+same active clip are rejected. Invalid metadata for an active clip fails
+closed in adaptive sampling, offline guidance, rollout reward, validation, and
+split inference. Shell-side launch validators use the same priority.
+
+Student inference contracts now explicitly cover current split/history-1
+175-D, object-velocity-v2/history-1 181-D, and current/legacy history-5 875-D
+observations with exact aliases and eval selection. Split MuJoCo uses simulator
+time, finite-value checks, and the timestamped shared-memory protocol; readers
+select an observation at or before the requested simulation timestamp and may
+not consume a future perception frame.
+
+Validation after these changes:
+
+- provenance/runtime/resume/policy/launcher: 157 passed;
+- contact validator/adaptive/offline/rollout/inference: 174 passed;
+- PPO/BC/DAgger, rollout batching, schedules, module dimensions, observation
+  history, split alignment, object velocity, inference, and ONNX: 344 passed,
+  1 skipped;
+- shell syntax, Python compilation, `git diff --check`, and the exact staged
+  list all passed.
+
+======================================================================
+18. FORMAL R21 PPO BOUNDARY AND MODEL-1000 AUDIT
+======================================================================
+
+The formal immutable r21 run remains unchanged. Its first BC-to-PPO boundary
+was observed directly:
+
+- iteration 699: PPO coefficient 0, DAgger 1, actor loss equals BC loss,
+  actor/critic LR `1e-3/1e-3`;
+- iteration 700: PPO/DAgger `0.1/0.9`, mixed actor objective active, actor LR
+  protected to `1e-5`, critic LR remains `1e-3`;
+- iteration 701: the same coefficients and separate rates, while measured KL
+  fell from the boundary spike to approximately 0.0521.
+
+The observed objective is exactly `0.1 * PPO + 0.9 * BC`; the critic remains
+active. The boundary KL behavior is consistent with switching a pure-BC actor
+whose diagnostic KL was not used to control LR. It is a configuration tuning
+question for the next canary, not evidence that the implemented mixed loss or
+critic update is wrong.
+
+`model_00800.pt` and `model_01000.pt` were loaded only after stable size/mtime
+sampling. Model 1000 SHA256 is
+`251a5a01bf7e29c2704172a0b7d1473bc28505b0280d744b6f55ed2abff167c8`;
+it records iteration 999/next 1000. Actor, critic, both optimizers, and the
+29-dimensional actor std are finite. Actor std min/max/mean is approximately
+0.08271/0.09928/0.09229. Actor/critic LR is `1e-5/1e-3`, optimizer steps are
+both 64000, exactly 12800 above model 800 (`200 * 64` minibatches), and all
+104 environment/fixed-BC rank states plus source/data/checkpoint provenance
+match.
+
+At 22:10:36 UTC, progress advanced 999 to 1060 in the ten-minute window:
+13/13 nodes and 104/104 workers/GPU applications healthy, correct binding,
+zero scanned errors, zero ECC, logs 3-4 seconds old, and peak 52 C. Iteration
+1059 remained finite with PPO/DAgger `0.1/0.9`, actor loss 0.1339, BC 0.1477,
+critic/value loss 0.4759, KL 0.0189, std 0.0917, and rates `1e-5/1e-3`.
+Measured rollout fields included reward 5.62, episode length 51.96,
+bad-tracking fraction 0.0176, object-position error 0.1027, hand-contact
+fraction 0.1446, and offline-contact reward 0.1869. No explicit success field
+exists, so these are health/trend observations and not a success-rate claim.
+Monitoring continues; the 40,000-iteration experiment is not complete.
+
+======================================================================
+19. POST-SNAPSHOT SEED, RNG, AND CHECKPOINT-BYTE INTEGRITY
+======================================================================
+
+The fresh-run boundary was moved after W&B initialization, distributed
+barriers, and final asset preflight, immediately before environment
+construction.  `PYTHONHASHSEED` and `CUBLAS_WORKSPACE_CONFIG` are now set and
+validated before importing torch/CUDA-facing modules.  Base seed, maximum
+global-rank offset, topology, and the uint32 upper bound are checked before
+Python, NumPy, torch CPU/CUDA, simulator, or Warp RNG state can be mutated.
+The batch launcher forwards the canonical seed through every independent
+remote shell and the terminal distill command consumes it as exactly one
+`--training.seed` argument.  Seed/hash/CUBLAS settings are recorded in
+training provenance and compared on resume.
+
+Lazy student modules are materialized before model broadcast and optimizer
+construction.  Materialization preserves and restores Python, NumPy, torch
+CPU, and torch CUDA RNG state even on failure, and optimizer coverage is
+checked for every trainable parameter.  Checkpoints now serialize rank-local
+RNG state.  Exact continuation includes curriculum and process RNG state, but
+the production configuration still uses non-deterministic CUDA/TF32 settings;
+it supports statistical reproducibility, not a bitwise trajectory claim.
+
+Every production checkpoint reader used by training, eval, inference, batch,
+AS, terrain, Viser, and MuJoCo routes through the shared safe loader.  It opens
+a regular file with `O_NOFOLLOW`, hashes and deserializes the same file
+descriptor with `weights_only=True`, compares identity and SHA256 before and
+after load, and can require the provenance-authenticated digest.  No direct
+production `torch.load` call remains outside that loader.  Hostile-pickle,
+symlink, mutation, wrong-digest, and schema regressions passed.
+
+These contracts are workspace-only.  Formal r21 predates `rng_state_by_rank`;
+the new code therefore rejects an r21 checkpoint as an exact deterministic
+resume unless `ALLOW_NONDETERMINISTIC_RNG_RESUME=1` is explicitly authorized
+and the non-bitwise lineage is recorded.
+
+======================================================================
+20. STUDENT POLICY, PURE-BC, DEF-MATERIALIZATION, AND BN SEMANTICS
+======================================================================
+
+The pure-BC update used to construct a PPO likelihood ratio even when its
+coefficient was exactly zero.  A stale log probability around `-1e30` could
+therefore overflow `exp(new_logp-old_logp)` and poison the nominally inactive
+objective.  Permanently pure BC and scheduled coefficient-zero updates now
+skip action log-probability and ratio construction completely, return an exact
+zero surrogate, optimize the actor only from BC, and continue optimizing the
+critic.  Hybrid updates still construct and use the PPO ratio.  Adaptive KL is
+diagnostic-only in pure BC and actor-LR-active whenever PPO can contribute;
+critic LR remains independent.
+
+DeFM-style lazy encoders now expose `materialize_for_setup(device)`.  Actor,
+critic, and strict teacher modules are materialized before schema validation,
+broadcast, load, and optimizer creation.  Parameterless and buffer-only
+device discovery is handled explicitly.  Frozen DeFM backbones override
+`train()` so their BatchNorm layers remain in eval mode.  Any actor BatchNorm
+that could update while PPO contributes is rejected; only frozen eval-mode BN
+with running statistics is accepted.  The actual external DeFM source tree is
+not installed in this workspace, so the real-backbone integration test is the
+single expected skip; mocked lifecycle and optimizer-coverage tests pass.
+
+======================================================================
+21. FINAL MULTI-NODE LAUNCHER CONTRACT CLOSURE
+======================================================================
+
+The batch launcher now canonicalizes `TRAINING_SEED`/legacy `SEED`, validates
+the complete rank-offset range, forwards only the canonical value, and clears
+the stale alias on remote nodes.  `distill_torso_box.sh` repeats the range
+check and places the seed in the actual final training command.  Tests parse
+`final_train_command` rather than accepting an exported-but-unused variable.
+
+Controller-side EULA values are shell-quoted before here-document expansion.
+All four PhysX capacity settings are required to be positive integers before
+snapshot creation or remote execution, closing command-injection and invalid
+capacity paths.  `HOLOSOMA_SKIP_GRAD_FINITE_CHECK`,
+`HOLOSOMA_SKIP_LOSS_FINITE_CHECK`, and
+`HOLOSOMA_SKIP_LOSS_DICT_ACCUMULATION` are normalized and any truthy request
+fails before snapshot publication.  PPO itself now enforces the same rule for
+direct entry points.  Direct object-generalist rank-visible mode selects
+`train_agent_rank_visible.py` rather than merely exporting metadata while
+running the ordinary entry point.
+
+The complete launcher contract passed after the final delta, including shell
+syntax, immutable source snapshot/rollback, ownership/FD boundaries, exact
+seed consumption, EULA newline/semicolon injection cases, invalid PhysX
+values, scientific skip flags, MuJoCo perception metadata, and rank-visible
+selection.  The source snapshot created by this validation was a dry-run test
+artifact and did not launch a GPU job.
+
+======================================================================
+22. END-TO-END NON-FINITE FAIL-CLOSED TRAINING BOUNDARIES
+======================================================================
+
+The numerical audit found several real masking paths: actor mean/std could be
+`nan_to_num`-projected, teacher `clamp` could turn an infinity into a finite
+target, non-finite logging values could be recorded as zero, only the two
+headline losses were checked, gradient failures could skip an update, and a
+checkpoint could be published with corrupt optimizer or buffer state.
+
+The corrected contract is:
+
+- Actor loc is never sanitized.  Std/scale projections modify finite entries
+  only and preserve NaN/Inf.  Actor optimizer steps validate raw std before
+  applying finite domain constraints.
+- Every rollout step collapses raw/normalized actor and critic observations,
+  all active student/teacher perception tensors, actor action/mean/std/log
+  probability, critic value, multi-teacher selector, teacher action, and the
+  exact `actions_to_step` into one device-side two-bit
+  `[runtime_error, nonfinite]` verdict.  One all-rank MAX occurs before
+  `env.step`; no tensor-by-tensor host synchronization occurs on success.
+- Actor/critic forward, missing perception, teacher observation construction,
+  multi-teacher selector/forward, fixed-BC capture/mixing, and log-probability
+  exceptions reach that same verdict.  A bad rank and all healthy peers stop
+  before PhysX sees the transition.
+- The completed floating rollout storage, including rewards, returns and
+  advantages, is checked before minibatch generation.  Teacher clipping only
+  changes finite entries.
+- Every numerical PPO loss field is checked before backward.  Non-finite loss
+  or gradient verdicts raise on every rank; no update is skipped and no value
+  is logged as zero.  `max_grad_norm` must be finite and positive, and actor
+  and critic clipping use `error_if_nonfinite=True`.
+- Ordinary backward, streamed supervised microbatch forward/loss/backward,
+  gradient clipping, optimizer step, and std projection use synchronized
+  rank-error envelopes.  At the iteration boundary actor/critic parameters,
+  floating buffers (including BN running state), and floating optimizer
+  tensors/scalars are checked.
+- Before checkpoint publication, actor/critic state (including buffers), std
+  constraints, both optimizer schemas/LRs/states, enabled normalizers, and the
+  final collected payload must all be finite and compatible.  Any rank-local
+  validation error prevents publication.
+
+Validation evidence after this closure:
+
+- focused PPO/student/module/distill/schedule/fixed-BC suite: 310 passed,
+  1 expected DeFM skip;
+- broad PPO/student/eval/resume/RNG/seed/safe-loader/provenance/inference/ONNX
+  suite with both source roots active: 667 passed, 1 expected skip;
+- complete launcher contracts: PASS;
+- Python compilation, shell syntax, `git diff --check`, and the exact staged
+  list passed.
+
+Two real-process CPU/Gloo harnesses exercised both the WORLD-gradient and
+secondary-Gloo control planes.  A single-rank NaN loss, clip failure,
+optimizer failure, optimizer-state Inf, teacher-rollout Inf, selector
+exception, pre-env Inf action, model-buffer NaN, and streamed microbatch
+backward exception made both ranks terminate with identical collective order
+and no deadlock.  For selector and Inf-action cases, both fake environment
+`step_count` values remained exactly zero.  The final two-bit/streamed harness
+ran with `CUDA_VISIBLE_DEVICES=` and exited 0 in 7.39 seconds; its temporary
+script SHA256 was
+`306081a510fa9db24c102425bbda6003630ef3839233285e2e3fa343f8050dc2`.
+
+The remaining boundary is operational rather than silent numerical masking:
+an unrecoverable backend/network failure inside a distributed collective can
+still require the launcher watchdog to terminate the session.  No optimizer
+transaction rollback is attempted after a local optimizer kernel has already
+mutated state; instead all ranks fail and no checkpoint is published.
+
+======================================================================
+23. FORMAL R21 MODEL-2000 AND CONTINUED HEALTH AUDIT
+======================================================================
+
+Formal r21 continues from its immutable source and was not restarted for any
+workspace-only fix.  The second scheduled boundary was observed directly:
+iteration 1399 retained PPO/DAgger `0.1/0.9`; iteration 1400 changed to
+`0.2/0.8`; iteration 1401 remained `0.2/0.8`.  Actor and critic rates remained
+`1e-5/1e-3`.
+
+`model_02000.pt` was loaded only after two stable size/mtime samples
+(`92577411:1783991446`).  Its SHA256 is
+`5be13ce0261a758901cc29aff1842ef8cf23d12c1caa3488b7c5fb9e8ce6a943`;
+it records iteration 1999/next 2000.  Actor, critic, both optimizer states and
+moments, and actor std are finite.  Optimizer steps are both 128000, exactly
+6400 above model 1900.  Actor 17/17 and critic 8/8 parameter tensors changed
+from model 1900.  Std min/max/mean is approximately
+0.0732407/0.0948322/0.0858732.  All 104 environment and 104 fixed-BC rank
+states are finite.  Source, manifest, runtime bundle, teacher, policy-init,
+and data provenance match earlier checkpoints; resume remains false.
+
+At 2026-07-14 01:19:45 UTC, the ten-minute window advanced progress from 1987
+to 2047.  All 13 nodes, 104 workers, 13 torchrun parents, and 104 GPU
+applications had the exact token/command/epoch binding.  Error regex and
+volatile uncorrected ECC counts were zero, logs were 5-7 seconds old, and peak
+temperature was 52 C.  Iteration 2046 was finite: PPO/DAgger `0.2/0.8`,
+surrogate 0.0112, actor 0.1345, BC 0.1653, critic 0.6371, KL 0.0191, std
+0.0856, and actor/critic rates `1e-5/1e-3`.  Reward 7.92, episode length
+66.46, bad-tracking fraction 0.0137, object-position error 0.1054,
+hand-contact fraction 0.1675, and offline-contact reward 0.2546 are health
+signals only; the run has no explicit success field.  Monitoring continues
+and the 40,000-iteration experiment remains incomplete.
+
+======================================================================
+24. TEACHER/STUDENT ROLLOUT CONTRACT AND EXACT CONTINUATION CLOSURE
+======================================================================
+
+The active observation set is now derived from the objective that will
+actually be collected at the current iteration.  The loaded teacher's real
+perception input is included while teacher labels, teacher rollout control,
+or fixed-BC capture need it, and is removed once the effective BC weight is
+zero and PPO is the only objective.  Pure PPO therefore neither constructs,
+resets, nor advances a teacher or teacher-only stochastic observation group.
+The objective/schedule and active groups are prepared before the initial
+canonical reset, including after resume, so that reset-time stateful/noisy
+observations cannot be computed under a stale schedule.
+
+Deterministic label modes now reject a Flow teacher with nonzero inference
+noise; explicitly stochastic DAgger remains supported.  Strict teacher load
+requires a valid actor config and an explicit normalization boolean, plus
+normalizer epsilon when normalization is enabled.  Legacy teacher-MSE mode
+rejects DAgger-only controls that it would otherwise ignore.  At PPO
+coefficient one the BC/teacher path is not evaluated, while the PPO loss still
+retains its coefficient.  A fixed-BC dataset that is still incomplete when
+the DAgger weight reaches zero fails on every rank before entering pure PPO.
+The startup noise cap now checks component and mean floors and cannot silently
+violate either the configured cap or the policy's noise domain.
+
+Full training resume is now exact-continuation-only: it requires both actor
+and critic optimizer states and `load_optimizer=true`.  Resetting optimizer
+moments or adaptive learning rates is a warm start and is rejected after all
+preflight validation but before model/environment mutation.  The resume
+preflight applies the same rule, while policy-init remains actor-only by
+design.  PPO canonical checkpoint resets clear actor, critic, single-teacher,
+and multi-teacher recurrent state.  The locomotion episode tracker snapshot
+owns its CPU storage and its one-shot suppression guard is consumed exactly
+once; restoring the adaptive snapshot after the forced reset does not arm it
+again.  Frozen DeFM parameters are excluded from every gradient-reduction
+payload.
+
+Independent student-policy review verified the live r21 schemas directly:
+teacher `model_67000` is a non-normalized 175-input MLP with no perception
+input; policy-init is a non-normalized `MLPPerceptionEncoder` with 94
+structured inputs plus a 32-dimensional visual encoding.  Neither uses Flow.
+The active runtime actor first layer is therefore correctly 126 rather than
+94 dimensions.  Student-policy tests passed 353 cases; inference/ONNX,
+normalization, RNG, policy-init and resume tests passed another 235 cases.
+
+======================================================================
+25. ROLLOUT-WIDE VALID-SAMPLE BC NORMALIZATION
+======================================================================
+
+A scientific weighting bug was found in the current AS student objective.
+BC was divided independently by each minibatch's valid-mask count.  With
+contiguous time-major minibatches, valid density differs across minibatches
+because default-pose and initial-step masks are structured in time.  The old
+formula consequently gave one sparse minibatch the same aggregate influence
+as one dense minibatch and over-weighted each sparse valid sample.
+
+The corrected implementation computes the global weighted number of valid BC
+samples once over the filled rollout, divides it by the number of
+minibatches, and injects that fixed denominator into every BC loss path:
+ordinary hybrid DAgger, supervised-only updates, non-streamed microbatches,
+and streamed backward.  A per-minibatch global presence reduction is retained
+so an all-empty pure-BC minibatch still skips the optimizer step without
+changing collective order.  If `V = sum_r(weight_r * valid_r)`, world size is
+`W`, and there are `M` minibatches, each local BC sum is divided by
+`(V/W)/M`; DDP's weighted SUM/W then makes the average of the M step gradients
+equal the global valid-sample mean.  The same denominator on each epoch and
+each streamed microbatch is intentional and mathematically correct.
+
+Uneven-mask gradient-equivalence tests, DDP denominator tests, multi-epoch
+reasoning, and streamed collective-order review passed.  The combined PPO,
+student, fixed-BC, schedule, storage, module, resume, locomotion and rank-local
+suite passed 470 tests (six expected external-xFormers warnings only).
+
+Formal r21 uses its older immutable snapshot and therefore still has the
+per-minibatch denominator.  It remains useful as a health and diagnostic run,
+but it is no longer a final scientific result and must not be used to decide
+the corrected student's objective quality.  A fresh replacement should be
+launched from a final new snapshot after validation and when the authorized
+GPUs can be safely reassigned; the healthy owned r21 session is not killed
+before that boundary.
+
+======================================================================
+26. FINAL AS LAUNCHER/IMMUTABLE-SNAPSHOT AUDIT DELTA
+======================================================================
+
+Rank-visible wrappers now reject invalid booleans, negative ranks, and empty,
+duplicate, or `-1` CUDA-visible entries.  Parent launchers clear stale
+topology aliases before torchrun, while the wrapper always derives preserved
+physical topology from the current torchrun environment.  Rank-local shard
+selection never falls back from an invalid global rank or world size, and the
+launcher validates `NPROC_PER_NODE` against visible GPUs before shard
+preparation.
+
+Exact-resume execution identity now includes node count and Gloo-barrier mode,
+not only processes per node.  Multi-node launches require an explicit shared
+rendezvous, force elastic max-restarts to zero, and validate NCCL and Gloo
+interfaces.  Checkpoint staging is SHA256-content-addressed, uses one stable
+no-follow descriptor for local sources, and rejects symlinks and traversal.
+Snapshot install and post-prepare intent validation recheck the signed regular
+file closure, symlink target/count closure, special files, and unexpected
+top-level package injection.  Stop/rollback requires the active-state v2
+token, command digest, epoch, and tmux ownership to match exactly.
+
+The complete launcher contract and immutable snapshot tests passed; related
+pytest coverage passed 201 cases, with focused provenance/resume, rank-shard,
+resolver and rank-wrapper suites also green.  Shell syntax, Python compile,
+`git diff --check`, and the exact two-file staged boundary passed.  No broad
+network scan, remote stop, or unowned process action was performed.
+
+======================================================================
+27. LOCOMOTION PENALTY-CURRICULUM SCIENTIFIC CORRECTNESS
+======================================================================
+
+`PenaltyCurriculum.reset()` previously ignored `env_ids`.  `BaseTask` calls
+all manager reset hooks on every control step, including with an empty reset
+selection, so the penalty scale was changing every step even when no episode
+ended.  Both the stateful and legacy penalty paths now return on `None` or an
+empty selection and change scale only for an actual reset batch.
+
+The distributed locomotion synchronizer previously broadcast only
+`env.reward_penalty_scale`, which is a logging mirror; it did not update the
+authoritative term or the live reward weights.  It now broadcasts the
+authoritative scale in float64 and atomically realigns
+`PenaltyCurriculum.current_scale`, every `original_weight * scale` reward
+configuration, the environment mirror, and `log_dict`.  Legacy state receives
+the same treatment.  A requested multi-rank sync without an initialized
+process group fails rather than silently continuing.
+
+PPO cannot make a rank-local adaptive penalty objective scientific merely by
+synchronizing at rollout boundaries: terminations inside the multi-step
+rollout can make ranks use different reward weights.  PPO therefore rejects
+multi-rank penalty curricula with nonzero degree.  Degree zero and single-rank
+training remain valid.  FastSAC is not globally rejected because it
+synchronizes before every sampled environment step, now using the corrected
+authoritative synchronization.
+
+Penalty configuration now requires explicit booleans, a nonempty tag, finite
+scales/thresholds/degree, ordered nonnegative bounds and thresholds, and
+`0 <= degree < 1`.  Enabled curricula must match at least one active reward;
+all original and full-range derived weights are validated before any live
+reward mutation.  The legacy public entry point shares the same contract.
+The episode-average horizon must also be finite and positive.  State restore
+uses one scale-application path so a canonical restore cannot leave the log
+at a temporary reset value while the real objective has already reverted.
+The full curriculum/WBT unit file passed 45 tests and the combined regression
+passed 470 tests.
+
+At 2026-07-14 04:28 UTC r21 had advanced to progress 3035 (latest complete
+iteration 3034).  All 13 node bindings, 104 workers, 104 unique GPU
+applications and process ownership matched; logs were current, error/ECC
+counts were zero, and peak temperature was 50 C.  Iteration 3034 was finite
+with PPO/DAgger `0.4/0.6`, actor/BC/critic losses
+`0.1183/0.1894/0.8080`, KL `0.0213`, rates `1e-5/1e-3`, reward `10.17`,
+and episode length `79.70`.  `model_03000.pt` SHA256 is
+`8f96d2bee29c3a293bde24e458e1394bad296d156e70a51ed338bd3dda11ab1c`;
+all model/optimizer/fixed-BC/rank state and provenance checks passed.  This is
+a health observation under the old BC weighting, not a corrected-objective
+scientific conclusion.
+
+======================================================================
+28. PARTIAL-RESET PERCEPTION AND TEMPORAL-NOISE CORRECTNESS
+======================================================================
+
+The environment reset callback now carries the exact reset `env_ids` into
+perception, and shared actor/critic/teacher manager aliases are deduplicated by
+object identity.  WBT and locomotion therefore refresh only the reset subset;
+surviving environments keep their camera observations and latency buffers.
+A targeted reset is not a second control-frame sensor tick, so it also leaves
+the global camera frequency phase unchanged.
+
+A second independent review found that the first partial-reset implementation
+normalized the full-update slice into an env-id tensor before preprocessing.
+The Perlin hole generator consequently classified every ordinary full camera
+refresh as partial and never advanced `frame_idx`.  Full sensor refreshes now
+explicitly advance the temporal field once, whereas a reset-subset refresh
+reuses the most recent field without advancing it.
+
+The same review found that normalizing a subset Perlin frame by subset extrema
+changes its hole mask relative to the identical environment in the preceding
+full tick.  Full-tick extrema are now cached as derived state and reused for a
+partial refresh.  The cache is deliberately cleared at canonical reset and
+checkpoint load: if a resume first performs a partial refresh, the full-batch
+extrema are deterministically rebuilt from authenticated `frame_idx - 1`
+(`frame_idx == 0` uses frame zero) without consuming the temporal clock.
+Regression tests prove the partial mask is bit-identical to the selected full
+mask, including cache loss and the frame-zero boundary.  Latency, additive,
+edge and depth-buffer writes remain restricted to reset environments.
+
+The combined partial-reset, perception-manager and WBT checkpoint suite passed
+99 tests.  Python compilation and `git diff --check` also passed.
+
+======================================================================
+29. CONTACT CONSUMERS AND LIVE EXECUTION-PROVENANCE BINDING
+======================================================================
+
+Contact t1/t2 sidecars were previously loaded only when adaptive sampling or
+uniform-T1 sampling was enabled.  That was insufficient: contact-aware sparse
+root commands and pickup/drop button observation terms consume the same
+contact window even when the sampler itself is disabled.  WBT now detects
+those configured observation consumers and loads a configured nonempty
+contact root for them.  Sampler/uniform-T1 modes retain their strict root and
+coverage requirements, while a no-root non-sampler configuration retains its
+intentional kinematic fallback.  Command/contact coverage tests passed 26
+cases, and the broader student/checkpoint/contact regression passed 201.
+
+Execution provenance is now a live pre-simulator contract rather than only a
+launch-time record.  Generator and worker share strict parsers for the
+distributed backend, pinned NCCL digest, TF32, Gloo/hierarchical/contiguous and
+rank-visible modes, supervised-only/actor-only/microbatch/streaming controls,
+critic-sync behavior, `NPROC`, `NNODES`, `PYTHONHASHSEED`, cuBLAS workspace and
+the semantic environment map.  The recorded `execution_runtime` mapping must
+exactly match the current 20-key schema.  Boolean values reject surrounding
+whitespace and consumer-conflicting spellings; integer controls accept ASCII
+decimal digits only.
+
+`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` accepts exactly `0` or `1`, matching the
+installed PyTorch c10 pre-start parser.  `batch_ne.sh` rejects any other value
+before snapshot construction or SSH.  Workers also prove the rank-invariant
+topology `WORLD_SIZE == NPROC * NNODES`, rank range, local-rank modulo mapping,
+rank-visible original/remapped aliases and optional `NODE_RANK` relation
+before simulator startup.  Rank-local identities themselves are not added to
+the cross-rank provenance or resume identity.
+
+The direct generalist launcher previously exported `NPROC` but omitted
+`NNODES` before provenance generation, so a legitimate two-node launch would
+be falsely recorded as one node.  It now exports both and has single- and
+two-node dry-run assertions.  The focused generalist suite passed 6 tests;
+the combined provenance/resume/policy-init/W&B/generalist suite passed 241.
+An independent execution-runtime review passed 279 related tests.  The full
+launcher contract, including immutable snapshot and AS contact preflights,
+reported `[PASS] launcher contracts`.
+
+======================================================================
+30. STUDENT PURE-BC OPTIMIZER ISOLATION AND INPUT-SLICE CLOSURE
+======================================================================
+
+Pure BC correctly removed the likelihood-ratio objective, but its live entropy
+tensor was still multiplied by an exact zero PPO coefficient.  That produces
+a material zero gradient for a trainable Gaussian `std`; AdamW can then create
+optimizer state and apply decoupled weight decay even though PPO and explicit
+std matching are both inactive.  In pure BC, entropy is now a detached
+diagnostic.  `dagger_match_std` remains the only intentional supervised std
+gradient.  The regression proves the value is still logged while `std` is
+unchanged, `std.grad is None`, and no optimizer state is created for it.
+
+Policy observation slice tables are keyed by group name.  A repeated actor,
+critic or teacher group previously overwrote the first slice even though the
+rollout concatenation still included both occurrences, silently misaligning
+normalization and ONNX/inference inputs.  Slice construction now requires
+unique ordered group names and fails before model setup with the complete
+duplicate/input list.
+
+The latest student-policy core regression passed 363 tests.  The full current
+Python tree passed 1521 tests with 2 expected skips; no test failed.  The full
+launcher contract passed, as did shell syntax, Python compilation and
+`git diff --check`.
+
+Formal r21 remains healthy but uses the older immutable source and is not a
+scientific result for these post-snapshot fixes.  At 2026-07-14 10:28 UTC its
+strict ten-minute window reached exact progress 4920, +55 from the previous
+window.  All 13 nodes, 13 parents, 104 workers and 104 unique GPU applications
+matched token/PID/GPU ownership; main/rank errors and volatile ECC counts were
+zero, logs were 7-10 seconds old, and peak temperature was 50 C.  The 4900
+schedule boundary was exact: iteration 4899 used PPO/DAgger `0.6/0.4`, while
+4900 and 4901 used `0.7/0.3`; the logged actor loss reconstructs from the
+weighted surrogate and BC terms within display rounding.
+
+`model_04900.pt` is 92,577,411 bytes with SHA256
+`23324d087ded4e0393764f78afd82889f1e0b7a16c650bc925a96240e2219f50`.
+It records iteration 4899/next 4900 and contains 1252 tensors total; all 832
+floating tensors and their 23,024,806 elements are finite.  Actor 17/17 and critic 8/8
+parameter tensors changed from model 4800; optimizer step 313600 and both LRs
+are correct.  Std min/max/mean is approximately
+0.0640710/0.0930640/0.0767293.  All 104 environment and fixed-BC states,
+the exact 4096 allocation (`40 x 40 + 64 x 39`), 30-clip coverage and
+provenance passed; no temporary or open checkpoint writer was present.
+
+At 2026-07-14 10:43 UTC, `model_05000.pt` also stabilized and passed the
+same deep audit.  It is 92,577,411 bytes with SHA256
+`804ea66a4f0b546d78554bd5440d8e56f24bfe3de086f9f144b2d2cc47c03cef`,
+records iteration 4999/next 5000, and contains 1252 tensors total; all 832
+floating tensors and 23,024,806 floating elements are finite.  Actor 17/17
+and critic 8/8 tensors changed from model 4900; both optimizer steps are
+320000 with LRs `1e-5/1e-3`.  Std min/max/mean is approximately
+0.0643381/0.0949393/0.0767764.  The 104 environment states, 104 fixed-BC
+states, exact 4096 allocation, 30-clip/104-rank coverage and provenance are
+complete and unchanged; resume is false and no temporary/open writer exists.
+
+======================================================================
+31. CONTACT-OBSERVATION COVERAGE AND ONNX METADATA UNIQUENESS
+======================================================================
+
+An explicitly configured contact sidecar root is part of the student input
+semantics whenever an actor/critic observation consumes contact-aware sparse
+root or pickup/drop window terms.  Previously, direct checkpoint/evaluation
+entrypoints that did not inherit the launcher's ambient coverage flag could
+load zero or only part of the active clip bank and silently replace missing
+windows with a kinematic estimate.  That changes a saved policy input without
+changing its apparent tensor shape.
+
+Code now automatically requires 100% active-clip window coverage when both a
+nonempty root and a contact-window observation consumer are configured.  The
+legacy no-root kinematic fallback remains intentional, and partial banks remain
+valid for sampler/metrics-only users that do not feed the windows to a policy.
+Regression tests cover zero-of-one and one-of-two configured observation banks.
+The focused command file passed 28 tests; the complete contact/timestep/reset/
+reward/checkpoint/rank review passed 229 tests.  The half-open `[t1,t2)`, FPS
+ceil conversion, runtime-prepend compensation, reset-before-resample outcome,
+reward/termination order, rollout label alignment and rank-local resume mapping
+were also rechecked end to end.
+
+ONNX `metadata_props` was another silent ambiguity boundary.  The SDK loader
+previously assigned properties into a dictionary, so a duplicate key used
+consumer-dependent last-wins semantics.  Python's default JSON parser also
+accepts non-standard `NaN` and positive/negative `Infinity`.  The loader now
+rejects empty or duplicate keys, malformed JSON and every non-finite JSON
+constant before constructing an ONNX Runtime session.
+
+The training-side metadata publisher now first validates all pre-existing
+properties as unique, nonempty, strict finite JSON.  Updating an existing key
+replaces it instead of appending a second entry, and new values use
+`json.dumps(..., allow_nan=False)`.  Any validation/serialization failure leaves
+the original ONNX bytes unchanged, so a producer cannot report success for an
+artifact the SDK will deterministically reject.
+
+The complete checkpoint/ONNX/SDK/export regression passed 140 tests.  The
+expanded current Python tree, now including the ONNX exporter file, passed
+1535 tests with 2 expected skips.  Python compilation and `git diff --check`
+passed; no code or test file was staged.  The full launcher contract was then
+rerun against immutable source snapshot
+`src-a64fe33ab31adea02cf56e045daabc2726f35495d90eef50c0d931cbe62c689f`;
+the real 133-clip single-slot bank and contact preflights covered 133/133 clips,
+and the suite ended with `[PASS] launcher contracts`.
+
+At 2026-07-14 10:58 UTC, the read-only r21 strict health window converged to
+exact progress 5083 on every rank, +55 from the preceding window.  All 13
+nodes, 13 parents, 104 workers and 104 unique GPU applications retained exact
+token/PID/GPU ownership; logs were 6-8 seconds old, main/rank error counts and
+volatile ECC counts were zero, and the peak temperature was 51 C.
+
+`model_05100.pt` subsequently stabilized and passed the full checkpoint audit.
+It is 92,577,411 bytes with SHA256
+`10028311e57f450911d6e9d6b35becd774064ec6bd32bfd1bea7aa18f00068d9`,
+records iteration 5099/next 5100, and contains 1252 tensors total; all 832
+floating tensors and 23,024,806 floating elements are finite.  Actor 17/17 and
+critic 8/8 parameter tensors changed from model 5000; both optimizer steps are
+326400 with LRs `1e-5/1e-3`.  Std min/max/mean is approximately
+0.0644743/0.0959619/0.0766708.  The 104 environment states, 104 fixed-BC states,
+exact 4096 allocation, 30-clip/104-rank coverage and provenance remain complete
+and unchanged; resume is false and no temporary/open writer exists.
+
+The next strict confirmation at 2026-07-14 11:08:06 UTC reached exact progress
+5131 on all ranks, +48 from the preceding window.  One rank had crossed its log
+write during the first concurrent sample; all ranks converged 8.6 seconds later,
+which confirms write timing rather than rank drift.  Ownership remained
+13/13/13 for active/tmux/main logs with 13 parents and 104/104/104
+workers/applications/unique GPUs; PID matching was 13/13, log age 7-8 seconds,
+main/rank errors and volatile ECC counts zero, and peak temperature 51 C.  The
+latest complete iteration remained finite with PPO/DAgger `0.7/0.3`, actor/BC/
+critic `0.0820/0.2474/0.9635`, KL `0.0209`, LRs `1e-5/1e-3`; the actor loss
+reconstructed from the logged weighted terms within `1e-5`.
+
+======================================================================
+32. LAUNCHER EXACT-IDENTITY, SHARED-LOG AND CONTROL-PROTOCOL CLOSURE
+======================================================================
+
+The final launcher review found that both `/proc` identity scanners inherited
+the status of the last comparison executed in their `while read` body.  A
+same-token process whose last environment field contained a wrong epoch could
+therefore make the loop return one and be misclassified as unrelated.  Each
+body now terminates with an unconditional success sentinel; wrong, missing,
+duplicate or malformed token/command/epoch fields reach the exact post-loop
+validation and fail closed.  Real `/proc` fixtures cover terminal status and
+predecessor cleanup for wrong/missing epochs.  Fixture processes now remain
+alive for the whole test and are removed only by exact PID+token cleanup.
+
+Generated startup and stop commands had two shell-expansion defects.  Startup
+health referenced an unbound remote `EXPORT_ONNX` instead of the immutable
+controller value.  The stop heredoc also let `$#` in a sed end-of-line pattern
+expand to the controller's positional count, producing an invalid expression.
+The expected export mode is now explicitly embedded, and the sed anchor is
+escaped.  Manual launch, two readiness rounds and exact stop/process closure
+were exercised in addition to the contract suite.
+
+Training completion is a whitespace-delimited control record, so final
+`LOGGER_BASE_DIR` and `TRAINING_NAME` values now reject whitespace/control
+characters before snapshot or remote mutation.  `TRAINING_NAME` is also a
+bounded safe basename and cannot contain slash or traversal.  Resume and local
+checkpoint helpers share one persisted actor validator for canonical MLP,
+MLP-perception, Flow and Flow-perception types, ordered unique inputs, hidden
+dims and Flow parameters.  This removes launcher-only reinterpretations of the
+same checkpoint schema.
+
+The first fresh-log hardening required every node to create the entire
+run-specific log directory.  That is invalid when `RUN_REPO` is shared/NFS:
+rank zero creates it and rank one necessarily sees a collision.  The launcher
+now creates a per-publisher token/node/PID staging directory, writes a mode
+0400 one-line/eight-field owner record
+`(version,snapshot,session,log,target,nnodes,token,epoch)`, validates it, and
+atomically publishes the directory with `mv -T --no-clobber`.  A losing node
+may share the destination only when all eight fields match; it removes only
+its own exact staging path.  Missing, extra-field, wrong-target, foreign or
+symlinked owners remain untouched and fail closed.  Per-node log files still
+use no-clobber creation.  A two-node shared-filesystem fixture proves both
+logs coexist, subset/reordered stop is rejected, and full ordered stop closes
+both sessions and releases the rendezvous pair.
+
+The two-node partial-rollback watchdog was 14 seconds while the deliberately
+injected startup, lifecycle transition, rollback and final-closure sequence
+can legitimately take about 14.1-14.5 seconds under its unchanged internal
+two-second bounds.  Only the test's outer watchdog is now 30 seconds; the
+production startup, probe, cleanup and lock bounds remain unchanged.  The
+fixture proves rank zero reaches exact process/session closure, the hanging
+rank remains `rolling_back`, and both ports stay quarantined.
+
+The main full launcher run passed with evidence in `/tmp/tmp.0orMr8mBts`.
+An independent frozen-source rerun also exited zero with `[PASS] launcher
+contracts`; its evidence is `/tmp/tmp.D9fD5dsx1w`.  Both runs exercised the
+real 133-clip immutable bank/contact preflights.  Shell syntax and whitespace
+checks passed, and no code/test file was staged.
+
+======================================================================
+33. FINAL STUDENT-POLICY NUMERICS, RNG BOUNDARY AND PROXY CONTRACTS
+======================================================================
+
+Rollout action selection and the actor objective previously disagreed for a
+positive Python PPO coefficient that rounds to zero in the float32 graph.
+PPO presence, teacher-control legality, stochastic student actions and the PPO
+loss multiplier now use one operational float32 coefficient.  Positive start,
+target or first discrete PPO tiers that materialize as zero are rejected.
+The BC complement is still computed in Python before its own float32
+materialization, preserving the real positive BC semantics near
+`nextafter(1, 0)`.
+
+The initial BC tier alone was not sufficient.  A smallest-positive float32
+`dagger_loss_coef` could be operational at iteration zero yet underflow to zero
+later in the ramp, silently ending DAgger before its declared boundary.  For a
+target below one, setup now checks the persistent end tier; for a target of
+one it checks the final mathematically positive `end-1` tier.  Linear and
+stepped schedules were independently tested for off-by-one behavior and legal
+pure-BC boundary cases.
+
+Required ONNX export is now validated before train mode, canonical reset or
+rollout for every objective, including pure BC.  Recurrent `time_gru` and a
+Flow actor with positive inference noise fail immediately rather than after a
+full training run whose final export would represent a different policy.
+
+Flow configuration no longer truncates booleans/floats or accepts strings,
+NaN, Infinity, negative values and unbounded work.  Pydantic config, direct
+`ConditionalFlowMLP`, checkpoint/resume validation and launcher preflight now
+share `flow_integration_steps <= 4096` and noise std `<= 1e18`; epsilon remains
+in `[0,0.49]`.  The noise bound keeps approximately an 18-sigma squared sample
+below float32 maximum.  Independent stress tests kept 240,960 sampled losses
+finite, and a 4096-step forward completed with finite output.  Values 4097 or
+`1e19` fail before snapshot/SSH.
+
+Checkpoint publication used to validate live state before capturing RNG.  A
+custom state-dict/validation hook could therefore consume randomness and move
+both the serialized and next-training boundary.  Every rank now captures its
+RNG state first, then runs validation, environment/fixed-BC collection,
+serialization and publication inside one `finally` restoration scope.
+Injected success and failed-preflight side effects prove Python, NumPy and
+torch streams all resume at the exact pre-save boundary.
+
+IsaacSim proxy accessors were also reconciled with the environment-major,
+interleaved `ObjectRegistry` layout.  Bounds errors are explicit, clone order
+matches the registry contract, and reset/state-accessor mocks test the real
+ordering rather than a stale object-major assumption.
+
+The final student-policy combination passed 843 tests.  RNG/resume/checkpoint,
+safe load, IsaacSim proxy, ONNX and evaluation integration passed 321 tests.
+The broad Python range passed 1730 tests with four expected skips when the one
+external IsaacGym e2e file was excluded.  Including it produced the same 1730
+passes/four skips and exactly one environment error: this host has no
+`isaacgym` module; no code assertion failed.  Independent student review
+passed 527 focused tests and found no remaining P0/P1/P2 issue.
+
+At the formal r21 iteration-6300 boundary, iteration 6299 used PPO/DAgger
+`0.8/0.2` and 6300 switched exactly to `0.9/0.1`; actor reconstruction matched
+within display rounding.  `model_06300.pt` is 92,577,411 bytes with SHA256
+`da824af61b385a6bfd6224be30747552d32516dd788a0aebf75201292e28135f`,
+records iteration 6299/next 6300, and has 1252 tensors/832 floating tensors/
+23,024,806 floating elements, all finite.  Actor 17/17 and critic 8/8 tensors
+changed from model 6200; optimizer step 403200, LRs, 104 env/fixed-BC states,
+exact 4096 allocation and provenance all passed.
+
+The latest strict window at 2026-07-14 15:48:15 UTC reached exact progress
+6605 on all ranks and rank-zero progress 6606.  Active/tmux/main-log ownership
+was 13/13/13, with 13 parents and 104/104/104 workers/applications/unique GPUs;
+PID identity was 13/13, errors and volatile ECC were zero, and peak temperature
+was 50 C.  All metrics were finite at PPO/DAgger `0.9/0.1`; `model_06600.pt`
+was stable with no temporary writer.  This remains a health/diagnostic run on
+its older immutable snapshot, not a scientific result for the post-snapshot
+fixes recorded above.
+
+======================================================================
+34. DIRECT RUNSIM CAMERA RESET RANDOMIZATION AND EPISODE-PAIRING CLOSURE
+======================================================================
+
+Direct RunSim previously instantiated a perception producer without replaying
+the training environment's reset camera randomizer.  It could therefore render
+from one fixed mount and omit the per-episode multiplicative depth-noise scale
+and pixel-drop probability even when the student artifact had been trained
+with all three effects.  The direct config and `mj_track.sh` handoff now carry
+the authenticated camera translation XYZ ranges, rotation RPY ranges,
+`noise_std_mult_range`, `noise_drop_prob_range`, producer tick period and seed
+from the selected ONNX metadata.  Explicit launcher values must match the
+artifact; missing, legacy, non-finite, reversed, out-of-domain, duplicate-term
+or lifecycle-incompatible contracts fail before run_sim is launched.
+
+RunSim now builds the real `RandomizationManager` with the canonical
+`randomize_camera_raycast` reset term.  Every physical episode first clears the
+perception history, then samples the mount translation/orientation and the two
+noise parameters, and finally renders the targeted reset frame.  The live
+camera path applies translation in the mount frame and adds RPY jitter without
+rotating the mount lever arm.  Sensor noise is the training expression
+`depth + randn * (depth * std_mult)`; dropout independently replaces selected
+pixels with the configured maximum sensor distance.  Both are applied once
+before observation preprocessing.  The direct producer is clocked by the
+authenticated training control-step period rather than render-loop speed and
+fails if a producer tick is skipped.
+
+The initialization lifecycle now matches `BaseTask.reset_all`: reset manager
+state, sample reset randomization, execute one isolated nominal-PD control tick,
+perform the ordinary perception update, then install the targeted reset
+output.  External bridge input is detached during that warm-up and its control
+phase is cleared before and after, so queued lowcmd cannot replace the training
+zero-action tick or leave a nonzero decimation phase.  Reset output may be
+republished while physics is frozen, but this reads the cached frame and never
+advances perception state or consumes another RNG sample.  The contract is
+honestly distribution-equivalent: vectorized training and one-env RunSim use
+different global-RNG call interleavings, so a shared seed does not promise the
+same batch sample path.
+
+Reset transport races were closed end-to-end.  Each run_sim producer starts
+from a random bounded 62-bit episode base and increments it at every physical
+reset, preventing a restarted producer from reusing old `(generation, t=0)`
+identity.  Sim-state, lowcmd and every ZMQ/SHM perception frame carry this same
+generation.  The SHM generation is committed in the same odd/even seqlock as
+payload, simulator time and checksum; reset atomically invalidates the current
+slot before advancing generation, while the writer's private sequence remains
+monotonic.  WBT pins one validated sim-state snapshot per control tick and the
+policy accepts only a perception frame with both `time <= pinned time` and an
+exact generation match.  Missing generation now fails closed rather than
+falling back to an unpaired latest frame.
+
+The external relay preserves generation on both transports, publishes no
+unauthenticated filler, never refreshes the wall age of a disconnected ZMQ
+source, keys SHM freshness by `(segment generation, sequence)`, and includes
+episode/time in its duplicate-frame identity.  Thus identical pixels at a new
+episode and sequence 2 from a recreated SHM segment are still forwarded.  A
+file source must explicitly declare a one-episode target generation.  External
+renderers must carry the *target run_sim* generation; an unrelated local
+counter is rejected, and the launcher now states this requirement.
+
+Verification after the final transport fixes included 366 manager/direct/
+eval/student/reset/protocol tests, 284 direct/student/transport tests, 37
+invalidate/concurrency producer tests and an independent adversarial set of 61
+tests; all passed.  The real MuJoCo ONNX metadata launcher suite ended with
+`[PASS] MuJoCo perception metadata launcher contracts`.  Python compilation,
+`bash -n`, `git diff --check`, concurrent marker/generation seqlock pairing and
+same-name SHM restart tests also passed.
+
+The scientific guarantee here is the authenticated direct `ZMQ + MuJoCo
+Classic` path.  An external relay still cannot independently prove that a
+source's generation belongs to the target simulator without subscribing to
+target sim-state; mismatch is safe but currently manifests as a policy
+timeout.  A single-slot SHM reader that starts only after its required frame
+has been overwritten by a future same-episode frame also times out rather than
+substituting the future frame.  These are fail-closed liveness limits, not
+cross-episode correctness failures.  Generic DDS and MuJoCo Warp physical-reset
+equivalence were not claimed by this closure.
+
+At 2026-07-14 19:16:15 UTC the unchanged r21 diagnostic snapshot remained
+healthy at exact progress 7696 on all 13 nodes, with 104/104 strict GPU
+bindings, zero errors/ECC and peak temperature 49 C.  `model_07700.pt` was
+subsequently published complete with no temporary writer.  No running job was
+restarted or mutated for these post-snapshot fixes.
+
+======================================================================
+35. FIXED-BC FORGETTING GUARD AND R22 SCIENTIFIC HANDOFF
+======================================================================
+
+The old r21 fixed-set series exposed a scientific failure mode that ordinary
+finite-loss and reward health checks cannot detect.  Its deterministic
+mean-action MSE reached about 0.0803 during pure BC, then rose through 0.0878,
+0.0868, 0.1037, 0.1145, 0.1249, 0.1380, 0.1496, 0.1524 and 0.1626 at the
+successive 0.1 PPO tiers.  It was 0.2943 at iteration 10600 and 0.2982 at
+iteration 10700 even though rewards, gradients, optimizer state and every
+checkpoint tensor remained finite.  This makes r21 useful diagnostic evidence
+but not an acceptable final scientific result.
+
+The corrected r22 schedule therefore keeps a real pure-BC phase and increases
+PPO by 0.1 every 700 iterations only through 0.7 at iteration 4900, retaining
+0.3 BC thereafter.  The 0.7 choice is evidence-based: the old fixed-set value
+at that tier remained below the 0.160 absolute ceiling, while later tiers
+approached or crossed it.  This is a new fresh-run contract, not a resume or a
+reinterpretation of r21's 0.9/6300 schedule.
+
+A fail-closed fixed-BC guard now authenticates an exact global 4096-sample
+dataset distributed by quotient/remainder over all 104 ranks.  The dataset is
+digested locally and globally at its first evaluation and can never be silently
+re-based.  The guard requires at least three aligned evaluations in a pure-BC
+reference window, freezes
+`min(reference_min * max_reference_ratio, absolute_max_mu_mse)`, and starts its
+consecutive-exceedance counter only after the configured PPO ramp completes.
+The formal contract uses reference end 600, ratio 2.0, absolute ceiling 0.160,
+start 4900, interval 100 and patience 3.
+
+Every guard transition validates the complete prior state, exact evaluation
+timeline, weighted sample count, rank strata, allocation, dataset digests and
+configuration fingerprint.  Metric, timeline, digest, transition, checkpoint,
+RNG and logging failures are synchronized before any rank enters the next
+collective.  Fixed evaluation and guard bookkeeping capture and restore
+Python, NumPy, torch CPU and CUDA RNG state, so the diagnostic is
+observational.  Normal checkpoints must contain complete non-tripped,
+resumable state.  A tripped run first atomically publishes a diagnostic
+checkpoint and marker whose state is explicitly non-resumable, then attempts
+terminal W&B logging, and finally makes every rank exit in the same protocol.
+
+This guard is intentionally described narrowly.  Because each rank fills its
+small local quota from the first valid rollout batch, the current 4096 samples
+are primarily a deterministic reset-state forgetting sentinel.  They do not
+claim full on-policy occupancy coverage; motion/reward/contact metrics and the
+real multi-node canary remain separate acceptance evidence.
+
+W&B startup was also made an all-rank contract.  Rank zero must create the
+expected cloud entity/project/run, and its exact identity or failure is
+broadcast before any worker constructs the simulator.  Ambient run/project/id
+aliases are cleared while credentials are preserved.  Epoch logging and
+terminal guard logging now return an all-rank outcome, preventing rank-zero I/O
+failure from stranding peers at checkpoint barriers.  The reference minimum is
+summarized as `min`; the frozen threshold, counter and last MSE use `last`.
+
+The final legacy-process review changed `/proc` environment reads to binary-safe
+current-UID scans and rechecks UID, PPID and process start time immediately
+before every signal.  Missing, duplicate, malformed or mismatched launch
+identity remains fail-closed.  Launcher-side guard numeric checks now mirror
+the Python/CLI checks, including finite real values, interval alignment,
+pure-BC reference semantics and enough remaining evaluations to reach the
+configured patience before the run target.
+
+After these changes, the project-owned Python range ran 89 test files and
+finished with 2209 passed, four expected skips and zero failures.  This scope
+includes the IsaacSim state-accessor unit tests and excludes only vendored
+packages, archived inference clones and the external IsaacGym/GPU-simulator
+e2e.  The first full launcher rerun correctly rejected one sentinel fixture
+that changed the fixed-BC interval to 37 while accidentally inheriting the new
+enabled guard.  That non-guard fixture now explicitly disables the guard; no
+production validation was weakened, and the complete launcher suite was
+restarted from the beginning.  That clean rerun exited zero after 1573.30
+seconds with `[PASS] launcher contracts`; both real bank/contact preflight
+rounds covered 133/133 clips.
+
+At 2026-07-15 04:51:03 UTC, r21 still had exact progress 10731 on all 13 nodes
+and 104 ranks.  Active/tmux/parent/PID/GPU ownership was exact, errors and ECC
+counts were zero, peak temperature was 52 C, W&B remained fresh, and no new
+critic spike or non-finite value appeared.  It remains untouched until the
+corrected immutable snapshot and replacement canary are ready for an exact
+handoff.
+
+======================================================================
+36. R22 SNAPSHOT REPRODUCIBILITY AND EXACT-13 READINESS
+======================================================================
+
+The required two-controller snapshot check caught one more reproducibility
+bug before any GPU handoff.  With identical source bytes, `umask 022` produced
+snapshot `src-5d2afe...`, while `umask 077` produced `src-0a3148...`.
+Their content manifests differed only at `source_modes.nul`: the defm branch
+created the structural `submodules` parent with `mkdir -p`, so it became 0555
+under the first umask but 0500 under the second.  Because signed directory
+modes are intentionally part of source identity, both the manifest and archive
+digest correctly exposed this builder-side nondeterminism.
+
+The defm branch now copies the source modes of both `submodules` and
+`submodules/defm` onto those generated staging directories before the existing
+global write-bit removal.  This preserves the source permission contract
+instead of hard-coding a mode.  The snapshot fixture now creates a real defm
+`model_factory.py`, uses distinctive 0751/0750 source directory modes, compares
+independent 022/077 caches, and checks the extracted parent is 0551.  The
+targeted snapshot suite, shell syntax and diff checks passed.  Two independent
+real-repository builds then had identical manifest bytes, snapshot ID, archive
+SHA256 and byte-for-byte tar output; an independent reviewer reproduced the
+same result.
+
+The resulting r22 candidate is
+`src-4c16760193077a478e56aa94aa4289451e0ee4e9f3cd8eed6df380a319228d1d`,
+with archive SHA256
+`c92722599c7de310c11b4b12f5249c5244d4cd0ef8d48eca40fc1a8c891dce99`.
+The authenticated archive was placed in the controller cache, then installed
+and verified on the exact 13 authorized nodes.  A second idempotent prepare
+returned zero with 13/13 source verifications and 13/13 immutable NumPy runtime
+overlay verifications.  `PREPARE_DATA=0` left every node-local bank unchanged
+and no GPU process was started or stopped.
+
+The complete canary dry-run returned zero for 13 nodes x 8 GPUs and 6656
+environments.  All 13 generated rank controls carried target/save 8/8,
+fixed-BC and motion intervals 1/1, PPO tiers 0.0 through 0.7 at iterations
+0 through 7, reset curricula 0 through 8, and an explicitly disabled terminal
+guard with start -1.  The formal dry-run likewise generated 13 exact controls
+with target 40000, save/fixed intervals 100, motion interval 4, PPO target 0.7,
+700-step tiers through iteration 4900, and the enabled reference-600/start-4900/
+ratio-2.0/absolute-0.160/patience-3 forgetting guard.  Both used fresh W&B
+identity semantics and no training-resume aliases.
+
+An independent launch-environment review then caught a controller-only typo in
+the initially reconstructed NCCL CAS digest.  Dry-run and `PREPARE_DATA=0` do
+not load that library, so they correctly did not authenticate the nonexistent
+path.  The operational environment was corrected to the exact local/runtime
+digest `e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899`.
+The regular, non-symlink 0444 `libnccl.so.2` payload now rehashes to this value
+on all 13 nodes.  Both canary and formal dry-runs were repeated; each emitted
+13 exact NCCL exports, 13 launch ranks and no errors.  This operational fix did
+not change the signed source snapshot.
+
+The apparent r21 lifecycle warning was also resolved without weakening the
+new atomic contract.  All 13 r21 sessions are a uniform legacy layout: the
+three tmux environment identity fields are truly absent, while all three
+legacy options exactly match active token/command/epoch; the immutable control,
+ordered rank topology, master ports and unique pane identities also match.
+The current helper's narrow legacy-stop path accepts only this complete
+options-only shape plus five explicit authorization fields, captures a stable
+PID/start-time/UID process-tree receipt, and proves descendant closure before
+releasing the exact reservation pair.  The frozen r21 stop lacks those
+guarantees and will not be used.  No stop occurred during this audit.
+
+At 2026-07-15 05:19:19 UTC r21 remained healthy at exact progress 10879 on all
+13 nodes with 104/104 processes and GPUs, zero errors/ECC, peak temperature
+50 C and fresh W&B/logs.  Its fixed-set MSE remained about 0.3016 at iteration
+10800, reinforcing the need for the fresh r22 schedule and guard while leaving
+the diagnostic job untouched until the final regression and exact handoff.
+
+======================================================================
+37. R21 DIAGNOSTIC CLOSURE AND EXACT RESOURCE HANDOFF
+======================================================================
+
+The r21 diagnostic was kept alive until the post-snapshot lifecycle helper had
+proved its narrow legacy authorization boundary.  It reached
+`HOLOSOMA_PROGRESS completed_iteration=12451`; the final fixed-set observations
+were still around 0.3231, confirming that the healthy finite run did not satisfy
+the student-retention objective.  Its last rank-zero log write was 2026-07-15
+10:24:06 UTC.
+
+The handoff used the current helper rather than the frozen r21 stop path.  Every
+node had to match the explicit snapshot/token/epoch/run-stamp/target tuple, the
+single hash-bound control-script pane, and the captured PID/start-time/UID/
+PPID/process-group/session receipt.  Exact descendant and cgroup closure was
+proved before the two rendezvous reservations were released.  The post-stop
+audit found no r21 tmux, training worker, GPU application or listener on its
+ports.  No process-name `pkill`, wildcard session match or unrelated task kill
+was used, and r21 remains diagnostic evidence only rather than a resume source.
+
+======================================================================
+38. LIFECYCLE/CGROUP HARDENING AND RELEASE-TEST INVOCATION BOUNDARY
+======================================================================
+
+The lifecycle namespace was hardened for cross-UID/group access: mutable
+per-user directories are 0700, state/incoming files are private, lock targets
+are authenticated regular files, and atomic tmux environment identity is
+checked together with legacy options.  The real cgroup-v2 fixtures cover
+freeze intent, canonical receipt publication, controller disconnect, tmux
+failure/retry, a `setsid` descendant and a reparented member which must remain
+fail-closed.  This is an ownership and accidental-interference boundary; a
+malicious process running as the same UID remains outside the claim.
+
+A release rerun also exposed a test-runner assumption rather than a production
+stop defect.  The legacy wrong-pane fixture wrote `$$` and assumed the top-level
+test shell was not a process-group/session leader.  A PTY makes that shell its
+own leader, so production correctly advanced to the stricter argv rejection
+while the fixture expected the earlier leader rejection.  The fixture now uses
+a uniquely tokened background child which inherits, but cannot lead, the
+caller's group/session under either PTY or non-PTY execution.  It registers the
+PID for token-safe EXIT cleanup and explicitly checks the intended precondition
+before invoking the stop validator.
+
+======================================================================
+39. TERMINAL FIXED-BC PROOF, RNG BOUNDARY AND RESUME EQUIVALENCE
+======================================================================
+
+The final fixed-BC observation is now forced on the last actual update when the
+run target is off cadence.  Periodic guard history remains on its original
+timeline; an off-grid terminal proof cannot retroactively change the guard.
+The strict terminal state binds completed/target/checkpoint iterations,
+cadence, scheduled/guard flags, exact sample and weighted counts, rank strata,
+frozen dataset SHA256, guard configuration/state/threshold/verdict and its own
+canonical digest.  A guard-enabled terminal MSE must be within the frozen
+threshold even if that final point is the only terminal observation.
+
+Checkpoint collection, the terminal proof and dataset consensus all preserve
+Python, NumPy, torch CPU and CUDA RNG streams, including synchronized error
+paths.  The configured final checkpoint and ONNX export must authenticate the
+same terminal state/digest before the single completion marker can be emitted.
+Full resume validates and then clears stale terminal proof; actor-only policy
+initialization clears it without importing critic/optimizer/iteration/env
+state; matching evaluation re-export may preserve it.  An aligned final guard
+trip can still publish its explicit non-success diagnostic checkpoint without
+forging a completion proof.
+
+A new honestly scoped single-rank core resume A/B test performs a real
+`PPO.save`, safe `PPO.load`, canonical reset and next SGD update.  It compares
+actor/critic parameters and outputs, optimizer groups/LRs/moments, RNG and a
+toy environment/curriculum across a legal iteration-4 PPO/DAgger schedule.  It
+is a core checkpoint equivalence smoke, not a claim of real AS/perception or
+multi-rank trajectory equivalence.  Fixed/core/logging/resume combinations
+passed 492 tests; checkpoint/ONNX/load combinations passed 186.  The final
+project-owned Python range passed 2228 tests with four expected skips and zero
+failures across 90 files, excluding only vendored/archived clones and three
+external simulator e2e files.
+
+======================================================================
+40. FIRST R22 CANARY FAILURE, TRANSACTIONAL ROLLBACK AND ROOT CAUSE
+======================================================================
+
+The first post-terminal-proof candidate was independently built under umask
+022 and 077 as
+`src-acd691213cbc6e807d22c64f6d313b0d85c9bda71640aaa781d47a6610330fcf`
+with archive SHA256
+`bd049482e3c88a7a2420940b4a46e6ae010477bfdb320a3e4b9c588e9329b4da`.
+Exact-13 canary/formal dry-runs and two `PREPARE_DATA=0` source/runtime passes
+succeeded.  The fresh canary
+`as_debug30_ws104_scientific_canary_r22_20260715_131536` then started all 13
+node transactions but never reached distributed provenance acceptance.  Two
+nodes exited and the startup controller rolled back every exact owned session,
+active record and rendezvous reservation.  A post-rollback audit found 13/13
+tmux absent, 104 GPUs idle and ports 29881/29882 free.  Failure occurred before
+a W&B run was finalized.
+
+The validator correctly reported that provenance had recorded
+`HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES` and
+`HOLOSOMA_RESET_TO_DEFAULT_POSE` as unset, while delegated box/torso wrappers
+later changed them to `True` and `False`.  The direct AS launcher now
+canonicalizes its two aliases, accepts equivalent boolean spellings, rejects
+conflicts/invalid values and exports the HOLOSOMA mappings before phase-one
+provenance.  The batch node payload first erases both aliases/mappings and then
+sets the fixed scientific values exactly once.  An adversarial schema audit
+found no third post-provenance field drift, but did find
+`FORCE_EIGHT_GPU_CONFIG`: a node-local value could rewrite NPROC/GPU tokens in
+the terminal torso wrapper.  Batch controls now erase it as well.  Real dry-run
+payload tests prove an ambient forced-eight value neither leaks nor changes the
+controller NPROC, and provenance/final-command tests bind the two semantic
+values.  Focused provenance regression passed 119 tests; syntax, whitespace,
+invalid/conflict cases and two independent reviews found no P0/P1/P2 blocker.
+
+======================================================================
+41. R22 PACKAGE-DRIFT FAILURE, CLEAN ROLLBACK AND SCIENTIFIC DEPENDENCY PROFILE
+======================================================================
+
+The next exact-13 canary reached the source/runtime preflight but stopped before
+simulator construction because the node environments did not have one package
+identity: Hugging Face and OmegaConf versions differed across the fleet.  The
+startup transaction rolled every node back to one authenticated `rolled_back`
+terminal state; no tmux session, GPU application, rendezvous listener or W&B
+training run remained.  This failure established that checking only NumPy was
+insufficient even though the effective r22 actor is the small tracking CNN and
+the critic is an MLP.
+
+The active AS configuration dependency graph was therefore derived from the
+real preset and imports.  Its explicit runtime roots are `attrs`, `numpy` and
+`omegaconf`; the exact active transitive closure is
+`antlr4-python3-runtime`, `attrs`, `numpy`, `omegaconf` and `pyyaml`.
+Hugging Face is not part of the HoloSoma scientific DeFM contract: DeFM weights
+must be local, SHA-authenticated and strict-loaded, and the network/pretrained
+download branch is forbidden.  Provenance now records only this active AS
+runtime plus torch/Isaac identities; the asset manifest requires torchvision,
+OmegaConf and Pillow only when a DeFM encoder is actually selected.
+
+An initial lazy-import change inside the DeFM gitlink was rejected as
+undeliverable from a fresh superproject clone.  The submodule was restored
+clean.  The parent HoloSoma factory now imports the pinned architecture modules
+directly, reads the pinned YAML with OmegaConf, forces CNN constructors to
+`pretrained=False`, validates the model/config identity, and retains the local
+SHA plus strict state-dict load.  With Hugging Face imports actively blocked,
+the three real ViT, RegNet and EfficientNet checkpoints all passed SHA
+validation, strict load and finite forward; neither `defm.model_factory` nor a
+Hugging Face module was imported.
+
+======================================================================
+42. EXACT AS-CORE OVERLAY, TRANSACTIONAL INSTALLER AND PRE-INTENT BARRIER
+======================================================================
+
+The old NumPy-named overlay was upgraded to runtime contract v2 with the full
+AS-core closure.  Its signed distribution contract binds the exact profile,
+full Python version, cache tag, SOABI, machine architecture, distribution
+metadata, import roots and complete file tree.  The verifier rejects writable,
+extra, missing, aliased and bytecode entries; enforces the exact reachable
+distribution closure; proves every contracted metadata/module import resolves
+inside the overlay; rejects already-preloaded contracted modules; and, in the
+normal non-isolated launch process, proves the live interpreter is actually
+bound to the requested overlay.  Independent controller builds under umask
+022/077 and different locales produce identical runtime identity and archive
+bytes.
+
+The batch launcher now distributes and installs that archive on every node.
+The controller first binds the caller archive by inode, owner, mode, size and
+SHA, copies the authenticated FD stream into a private mode-0700 controller
+namespace while hashing the same bytes, and performs gzip/embedded-manifest
+checks and every SCP from that sealed single-link snapshot.  This closes the
+previous verify-by-FD/use-by-path replacement window.  Remote SCP input is
+accepted independently of login umask, then normalized to 0400 before the
+installer re-authenticates it.  Remote paths are restricted to a canonical
+shell-safe absolute character set so legacy SCP cannot interpret a configured
+root as shell syntax.
+
+The new installer validates a private runtime/incoming/lock namespace, exact
+transport digest and size, canonical tar names/parents/modes/uid/gid/mtime,
+member/count/size limits, and rejects traversal, duplicate, link, sparse or
+special members.  Extraction uses no-follow/exclusive files in a private
+same-filesystem candidate.  A per-runtime FD-bound lock now covers stale
+candidate cleanup, extraction, strict isolated verification, atomic publication
+and final re-verification.  An archive authenticated before the lock is checked
+again by stable pathname identity while holding the lock; controller token
+revocation therefore prevents a disconnected old process from publishing
+late.  Ambiguous publish failures perform exact token cleanup and a same-lock
+probe: only a strict verified final plus cleanup is promoted to success, while
+cleanup plus missing is a terminal failed transaction.  Invalid arguments can
+no longer delete arbitrary same-UID files or their parent directories.
+
+Scientific prepare/launch/all now require the exact overlay by default; only
+an explicit compatibility value disables it.  Status and stop deliberately
+ignore even malformed stale runtime variables.  Prepare installs or strictly
+reuses the overlay, then verifies its live binding.  Launch performs the same
+installer probe and normal-process live-binding verification in parallel on
+all nodes before lifecycle hardening, launch intent, rendezvous reservation or
+tmux creation; prepare, launch preflight, health and train payload retain their
+own repeated checks.
+
+The focused dependency/overlay/provenance/resume range passed 250 tests.  The
+real overlay/installer matrix passed deterministic dual builds, fresh/probe/
+reuse, concurrent publication, corrupt-final fail-closed behavior, malicious
+tar inputs, unauthenticated-input preservation, stale-candidate recovery and
+the open-FD pathname-revocation race.  Two independent adversarial reviews
+found no remaining P0/P1 in this runtime transaction.  Full launcher and
+project-wide regression, final artifact identities and the replacement canary
+are recorded in the next section after they reach terminal evidence.
+
+======================================================================
+43. R22 STUDENT-POLICY TERMINAL GATE, RESET ENDPOINTS AND FINAL LAUNCHER FIXES
+======================================================================
+
+Fresh/policy-init reset curricula now use an exclusive update target.  For an
+eight-update canary the two reset schedules cover iterations 0 through 7; for
+the 40,000-update formal run they cover 2500 through 39999.  Partial, reversed,
+overflowing and target-equal fresh schedules fail before arithmetic or
+simulator construction.  The box wrappers pass one validated eight-field
+reset contract to the base launcher, and forwarded target/reset/checkpoint
+options are rejected instead of being allowed to override controller values.
+The base positional parser also now classifies every option-shaped first token
+before a `.pt` suffix, so `--training.checkpoint=...pt` and
+`--training.policy-init-checkpoint=...pt` cannot be consumed as a teacher path
+and hidden from the owned-option guard.
+
+Policy initialization for the formal run is accepted only from a private,
+single-link, mode-0400 content-addressed checkpoint under a mode-0700 cache and
+mode-0500 sealed object directory.  The controller requires terminal target 8,
+completed iteration 7, next iteration 8, exact 104-rank fixed-BC proof, exact
+W&B run, fresh-run provenance and the exact immutable source snapshot.  Direct
+`train(config)`, `TrainingContext` and the normal CLI all execute this gate
+before simulator imports; PPO validates the terminal payload and live actor
+shape/dtype again before changing actor state.  Only actor and its enabled
+normalizer are loaded.  Critic, both optimizers, iteration, RNG, environment,
+curricula and W&B identity remain fresh.
+
+Direct RunSim now reproduces episode camera pose randomization, multiplicative
+depth noise and dropout with the same reset ordering and authenticated sensor
+state used in training.  The final scientific launch contracts keep all four
+experimental supervised shortcuts disabled.  A launcher regression also
+found and fixed a test synchronization race: the runtime archive revocation
+fixture now waits for both the authenticated archive FD and install-lock FD,
+so it tests the intended lock-internal recheck rather than racing pre-lock
+hash authentication.
+
+The source builder now pins `LC_ALL=C` before every path discovery/sort/tar
+operation.  Real case-sensitive paths had different collation under C and
+en_US.utf8; the updated locale/umask test and two full-repository builds prove
+identical snapshot ID, manifest, archive digest and archive bytes.  The final
+Python range covered 90 project test files and passed 2344 tests with 4
+expected skips.  The final launcher suite completed with rc=0, 7 PASS, 0 FAIL
+in 1840 seconds.
+
+======================================================================
+44. R22 REPLACEMENT CANARY AND ACTIVE FORMAL RUN
+======================================================================
+
+The final immutable source was independently built under umask 022/C/UTC and
+umask 077/en_US.utf8/Pacific-Honolulu, then installed and authenticated on the
+exact 13 authorized nodes.  First prepare installed source on 13/13 and reused
+the exact Python runtime on 13/13; a second prepare reused both identities on
+13/13 with PREPARE_DATA=0.  Pre-launch checks found 104/104 GPUs idle, no live
+training/lifecycle/rendezvous owner and all canary/formal ports free.
+
+The fresh replacement canary ran as session
+`as_debug30_ws104_r22c_20260716_014429`, W&B
+`zihanw22/carry-any/gwinraxq`, on 13 nodes x 8 GPUs with 64 environments per
+GPU and target 8.  All ranks reached progress 8; W&B finalized successfully
+with `model_00008.pt` and `model_00008.onnx`.  The private controller gate
+authenticated completed=7, next=8, target=8, world=104, the terminal fixed-BC
+proof, W&B identity and source snapshot before permitting formal policy init.
+
+The active formal session is
+`as_debug30_ws104_r22f_20260716_020038`, W&B
+`zihanw22/carry-any/fdbn50pr`.  It uses 13 x 8 = 104 ranks, 64 environments per
+GPU (6656 total), rank-visible GPUs, eight-rank local NCCL reduction and 13
+CPU/Gloo leaders.  The target is 40,000 updates, save/fixed-BC intervals are
+100, and motion metrics run every 4 iterations.  The MLP actor dimensions are
+`[512,256,128]`; one epoch and 64 minibatches use actor/critic LR 1e-3,
+initial/minimum std 0.01 and zero entropy coefficient.  PPO rises from 0.0 to
+0.7 in 700-update tiers through iteration 4900, retaining BC weight 0.3.  The
+fixed-BC reference closes at 600 and the forgetting guard starts at 4900 with
+ratio 2.0, absolute mu-MSE 0.160 and three consecutive evaluations.
+
+The bounded launch handshake passed on all nodes.  Two initial health windows
+showed 13/13 live sessions, 104/104 GPU applications, all-rank progress first
+8-9 and then exactly 14, and zero Traceback/RuntimeError/NCCL/OOM/non-finite
+patterns.  This is the current scientific run to monitor; it is not a resume
+of the earlier r21 lineage.
+
+At 2026-07-16 02:17 UTC the first ten-minute formal health window reported
+13/13 live sessions, all-rank progress 34-35, maximum log age 17 seconds,
+W&B state `running`, and zero fatal/NCCL/OOM/non-finite patterns.
+
+======================================================================
+45. W&B BOXER RUN-CHECKPOINT RETENTION CLEANUP
+======================================================================
+
+At 2026-07-16 19:22 UTC the user-authorized cleanup of run files in
+`zihanw22/boxer` completed.  For runs whose recorded runtime was at least one
+hour, retention was applied independently by extension: the five newest
+`.pt` files and the five newest `.onnx` files were retained.  Runs shorter
+than one hour had all `.pt` and `.onnx` run files removed.  Runtime came from
+W&B summary `_runtime` when available and otherwise from the server-recorded
+heartbeat/creation interval; all 154 runs were classifiable and none was
+running during the cleanup.
+
+The deletion plan contained 3,562 files totaling 62,693,173,648 bytes.  All
+3,562 server deletions succeeded with zero API failures.  An independent
+fresh Public API scan of all 154 runs then found 450 checkpoint files totaling
+10,659,752,108 bytes: exactly 225 `.pt` and 225 `.onnx`.  No sub-hour run
+retained a checkpoint and no eligible run exceeded five files of either
+extension.  W&B storage-accounting dashboards may update asynchronously after
+file deletion.
