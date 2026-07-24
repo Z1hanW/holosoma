@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace as dataclass_replace
+import hashlib
+import io
 import json
 import math
 import re
@@ -22,6 +24,13 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma"))
 sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma_inference"))
 
 from holosoma_inference.tools.patch_motion_onnx import patch_model
+from holosoma_inference.utils.embedded_motion_timeline import (
+    embedded_motion_timeline_contract_from_metadata,
+    read_stable_regular_file_bytes,
+)
+from holosoma_inference.utils.policy_contract import (
+    effective_motion_transition_settings_from_metadata,
+)
 
 
 DEFAULT_MODEL = Path(
@@ -179,31 +188,18 @@ def _extract_terrain_cfg(metadata: dict) -> dict:
     }
 
 
-def _extract_control_dt_s(metadata: dict) -> float | None:
-    exp_cfg = metadata.get("experiment_config", {})
-    sim_cfg = exp_cfg.get("simulator", {}).get("config", {}).get("sim", {})
-    fps = float(sim_cfg.get("fps", 0.0) or 0.0)
-    control_decimation = float(sim_cfg.get("control_decimation", 0.0) or 0.0)
-    if fps <= 0.0 or control_decimation <= 0.0:
-        return None
-    return control_decimation / fps
-
-
 def _transition_step_counts(metadata: dict) -> tuple[int, int]:
-    motion_cfg = _extract_motion_cfg(metadata)
-    if not motion_cfg:
-        return 0, 0
-    control_dt_s = _extract_control_dt_s(metadata)
-    if control_dt_s is None or control_dt_s <= 0.0:
-        return 0, 0
+    """Return only digest-authenticated transitions actually used in training.
 
-    prepend_steps = 0
-    append_steps = 0
-    if bool(motion_cfg.get("enable_default_pose_prepend", False)):
-        prepend_steps = max(0, round(float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) / control_dt_s))
-    if bool(motion_cfg.get("enable_default_pose_append", False)):
-        append_steps = max(0, round(float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) / control_dt_s))
-    return prepend_steps, append_steps
+    Raw MotionConfig flags are requests, not an effective timeline: global
+    multi-clip training intentionally ignores the requested append and may
+    disable a requested prepend when the runtime implementation is unavailable.
+    ``patch_model`` uses the same authenticated contract for policy reference
+    tensors, so the web-demo object tracks and frame count must use it too.
+    """
+
+    settings = effective_motion_transition_settings_from_metadata(metadata)
+    return int(settings["prepend"]["steps"]), int(settings["append"]["steps"])
 
 
 def _quat_wxyz_to_rpy(quat_wxyz: np.ndarray) -> tuple[float, float, float]:
@@ -321,7 +317,11 @@ def _read_motion_summary(
     obs_dim: int,
     apply_training_motion_transitions: bool,
 ) -> dict:
-    with np.load(motion_path, allow_pickle=True) as data:
+    motion_payload = read_stable_regular_file_bytes(
+        motion_path,
+        label="Demo motion source",
+    )
+    with np.load(io.BytesIO(motion_payload), allow_pickle=False) as data:
         body_names = _decode_names(np.asarray(data["body_names"]))
         joint_names = _decode_names(np.asarray(data["joint_names"]))
         root_idx = _resolve_root_body_index(body_names)
@@ -342,6 +342,25 @@ def _read_motion_summary(
                 raw_object_size = np.asarray(data[key], dtype=np.float32)
                 break
         fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+
+    timeline_contract = embedded_motion_timeline_contract_from_metadata(
+        metadata,
+        required=True,
+    )
+    assert timeline_contract is not None
+    if hashlib.sha256(motion_payload).hexdigest() != timeline_contract["source_motion_sha256"]:
+        raise RuntimeError(
+            "Motion source changed between ONNX patching and demo-config materialization."
+        )
+    expected_materialization = (
+        "effective_training_timeline"
+        if apply_training_motion_transitions
+        else "raw_unsafe_diagnostic"
+    )
+    if timeline_contract["materialization"] != expected_materialization:
+        raise RuntimeError(
+            "Demo-config transition mode diverged from patched ONNX timeline provenance."
+        )
 
     if joint_pos.shape[1] == len(joint_names) + 7:
         joint_pos = joint_pos[:, 7:]
@@ -385,6 +404,10 @@ def _read_motion_summary(
     object_ang_vel_aug = _repeat_endpoints(object_ang_vel_w, prepend_steps, append_steps)
     object_size_aug = _repeat_endpoints(object_size, prepend_steps, append_steps)
     frame_count = int(joint_pos.shape[0] + prepend_steps + append_steps)
+    if frame_count != int(timeline_contract["embedded_frame_count"]):
+        raise RuntimeError(
+            "Demo-config frame count diverged from patched ONNX timeline provenance."
+        )
 
     return {
         "fps": fps,
@@ -619,15 +642,17 @@ def _stage_clip_bundle(
     bundle_dir: Path,
     scene_path: Path,
     effort_limits: dict[str, float],
-    apply_training_motion_transitions: bool,
+    unsafe_skip_training_motion_transitions: bool,
 ) -> tuple[dict, dict]:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     patched_model_path = bundle_dir / "policy.onnx"
+    apply_training_motion_transitions = not unsafe_skip_training_motion_transitions
     patch_model(
         model_path.resolve(),
         motion_path.resolve(),
         patched_model_path.resolve(),
         apply_training_motion_transitions=apply_training_motion_transitions,
+        unsafe_allow_raw_motion_timeline=unsafe_skip_training_motion_transitions,
     )
 
     metadata = _read_onnx_metadata(patched_model_path)
@@ -714,7 +739,7 @@ def stage_assets(
     motion_paths: list[Path],
     motion_root: Path | None,
     output_dir: Path,
-    apply_training_motion_transitions: bool,
+    unsafe_skip_training_motion_transitions: bool,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     if any(output_dir.iterdir()):
@@ -747,7 +772,7 @@ def stage_assets(
             bundle_dir=clips_dir / bundle_id,
             scene_path=scene_xml_path,
             effort_limits=effort_limits,
-            apply_training_motion_transitions=apply_training_motion_transitions,
+            unsafe_skip_training_motion_transitions=unsafe_skip_training_motion_transitions,
         )
         manifest_clips.append(clip_manifest_entry)
         if default_clip_id is None:
@@ -776,18 +801,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--max-clips", type=int, default=DEFAULT_MAX_CLIPS)
     parser.add_argument("--preferred-clip-stem", type=str, default=DEFAULT_MOTION.stem)
-    parser.set_defaults(apply_training_motion_transitions=False)
     parser.add_argument(
-        "--apply-training-motion-transitions",
-        dest="apply_training_motion_transitions",
+        "--unsafe-skip-training-motion-transitions",
+        dest="unsafe_skip_training_motion_transitions",
         action="store_true",
-        help="Patch motion outputs with the training-time default-pose prepend/append transitions.",
-    )
-    parser.add_argument(
-        "--no-apply-training-motion-transitions",
-        dest="apply_training_motion_transitions",
-        action="store_false",
-        help="Use the raw motion clip without training-time prepend/append transitions (default).",
+        help=(
+            "Build an explicitly non-scientific diagnostic bundle whose embedded motion skips "
+            "the authenticated effective training transition."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -805,7 +826,9 @@ def main() -> None:
         motion_paths=motion_paths,
         motion_root=motion_root,
         output_dir=args.output_dir.expanduser().resolve(),
-        apply_training_motion_transitions=bool(args.apply_training_motion_transitions),
+        unsafe_skip_training_motion_transitions=bool(
+            args.unsafe_skip_training_motion_transitions
+        ),
     )
     print(json.dumps({"output_dir": str(args.output_dir.resolve()), "clip_count": manifest["clip_count"]}, indent=2))
 

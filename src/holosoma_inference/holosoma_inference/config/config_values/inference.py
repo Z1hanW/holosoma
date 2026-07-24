@@ -55,23 +55,44 @@ g1_29dof_wbt = InferenceConfig(
     task=task.wbt,
 )
 
+_object_generalist_task = replace(
+    task.wbt,
+    use_sim_time=True,
+    auto_start_motion=True,
+    use_sim_state=True,
+    prefer_sim_ref_from_sim_state=True,
+    restart_motion_on_clock_reset=True,
+)
+
 g1_29dof_wbt_w_object = replace(
     g1_29dof_wbt,
     observation=observation.wbt_w_object,
-    task=task.wbt,
+    task=_object_generalist_task,
 )
 
-g1_29dof_wbt_object_generalist = replace(
+g1_29dof_wbt_w_object_history1 = replace(
     g1_29dof_wbt,
-    observation=observation.wbt_object_generalist,
-    task=replace(
-        task.wbt,
-        use_sim_time=True,
-        auto_start_motion=True,
-        use_sim_state=True,
-        prefer_sim_ref_from_sim_state=True,
-        restart_motion_on_clock_reset=True,
-    ),
+    observation=observation.wbt_w_object_history1,
+    task=_object_generalist_task,
+)
+
+g1_29dof_wbt_w_object_legacy = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_w_object_legacy,
+    task=_object_generalist_task,
+)
+
+g1_29dof_wbt_object_velocity_generalist = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_velocity_generalist,
+    task=_object_generalist_task,
+)
+
+# The current training experiment named ``wbt_w_object_generalist`` uses the
+# split-target, history-5 contract.  Keep this public name tied to the current
+# training source; the velocity-bearing v2 layout has an explicit name above.
+g1_29dof_wbt_object_generalist = replace(
+    g1_29dof_wbt_w_object,
 )
 
 g1_29dof_wbt_object_distill = replace(
@@ -102,6 +123,21 @@ g1_29dof_wbt_object_distill_mujoco = replace(
     ),
 )
 
+g1_29dof_wbt_object_as_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_as_depth_distill,
+)
+
+g1_29dof_wbt_object_as_contact_aware_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_as_contact_aware_depth_distill,
+)
+
+g1_29dof_wbt_object_as_contact_aware_history5_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_as_contact_aware_history5_depth_distill,
+)
+
 g1_29dof_wbt_object_contact_aware_depth_distill = replace(
     g1_29dof_wbt_object_distill,
     observation=observation.wbt_contact_aware_depth_distill,
@@ -110,6 +146,11 @@ g1_29dof_wbt_object_contact_aware_depth_distill = replace(
 g1_29dof_wbt_object_contact_aware_drop_button_depth_distill = replace(
     g1_29dof_wbt_object_distill,
     observation=observation.wbt_contact_aware_drop_button_depth_distill,
+)
+
+g1_29dof_wbt_object_contact_aware_dual_button_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_contact_aware_dual_button_depth_distill,
 )
 
 g1_29dof_wbt_object_mocap_distill = replace(
@@ -161,16 +202,29 @@ DEFAULTS = {
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
     "g1-29dof-wbt-w-object": g1_29dof_wbt_w_object,
+    "g1-29dof-wbt-w-object-history1": g1_29dof_wbt_w_object_history1,
+    "g1-29dof-wbt-object-generalist-history1": g1_29dof_wbt_w_object_history1,
+    "g1-29dof-wbt-w-object-legacy": g1_29dof_wbt_w_object_legacy,
     "g1-29dof-wbt-object-generalist": g1_29dof_wbt_object_generalist,
+    "g1-29dof-wbt-object-velocity-generalist": g1_29dof_wbt_object_velocity_generalist,
     "g1-29dof-wbt-w-obj": g1_29dof_wbt_object_generalist,
     "g1-29dof-w-obj": g1_29dof_wbt_object_generalist,
     "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-depth-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-object-distill-mujoco": g1_29dof_wbt_object_distill_mujoco,
+    "g1-29dof-wbt-object-as-depth-distill": g1_29dof_wbt_object_as_depth_distill,
+    "g1-29dof-wbt-as-depth-distill": g1_29dof_wbt_object_as_depth_distill,
+    "g1-29dof-wbt-object-as-contact-aware-depth-distill": g1_29dof_wbt_object_as_contact_aware_depth_distill,
+    "g1-29dof-wbt-as-contact-aware-depth-distill": g1_29dof_wbt_object_as_contact_aware_depth_distill,
+    "g1-29dof-wbt-object-as-contact-aware-history5-depth-distill": g1_29dof_wbt_object_as_contact_aware_history5_depth_distill,
+    "g1-29dof-wbt-as-contact-aware-history5-depth-distill": g1_29dof_wbt_object_as_contact_aware_history5_depth_distill,
     "g1-29dof-wbt-object-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
     "g1-29dof-wbt-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
     "g1-29dof-wbt-object-contact-aware-drop-button-depth-distill": g1_29dof_wbt_object_contact_aware_drop_button_depth_distill,
     "g1-29dof-wbt-contact-aware-drop-button-depth-distill": g1_29dof_wbt_object_contact_aware_drop_button_depth_distill,
+    "g1-29dof-wbt-object-contact-aware-dual-button-depth-distill": g1_29dof_wbt_object_contact_aware_dual_button_depth_distill,
+    "g1-29dof-wbt-contact-aware-dual-button-depth-distill": g1_29dof_wbt_object_contact_aware_dual_button_depth_distill,
+    "g1-29dof-wbt-object-contact-aware-pickup-drop-button-depth-distill": g1_29dof_wbt_object_contact_aware_dual_button_depth_distill,
     "g1-29dof-wbt-object-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-wbt-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-videomimic": g1_29dof_videomimic,

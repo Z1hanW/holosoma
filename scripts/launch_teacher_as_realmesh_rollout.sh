@@ -59,6 +59,24 @@ is_truthy() {
   esac
 }
 
+release_launch_lock() {
+  if [[ -n "${LAUNCH_LOCK_KEEPALIVE_FD:-}" ]]; then
+    exec {LAUNCH_LOCK_KEEPALIVE_FD}>&-
+    LAUNCH_LOCK_KEEPALIVE_FD=""
+  fi
+  if [[ -n "${LAUNCH_LOCK_HOLDER_PROCESS_PID:-}" ]]; then
+    wait "${LAUNCH_LOCK_HOLDER_PROCESS_PID}" 2>/dev/null || true
+    LAUNCH_LOCK_HOLDER_PROCESS_PID=""
+  fi
+}
+
+launch_lock_only_exit_cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  release_launch_lock
+  exit "${status}"
+}
+
 detect_gpu_list() {
   if command -v nvidia-smi >/dev/null 2>&1; then
     local detected
@@ -74,15 +92,78 @@ detect_gpu_list() {
 GPU_LIST="${GPU_LIST:-$(detect_gpu_list)}"
 IFS=',' read -r -a GPUS <<< "${GPU_LIST}"
 NUM_SHARDS="${NUM_SHARDS:-${#GPUS[@]}}"
+if ! [[ "${NUM_SHARDS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] NUM_SHARDS must be a positive integer. Got: ${NUM_SHARDS}" >&2
+  exit 2
+fi
 if [[ "${#GPUS[@]}" -ne "${NUM_SHARDS}" ]]; then
   echo "[ERROR] GPU_LIST must contain NUM_SHARDS entries. GPU_LIST=${GPU_LIST} NUM_SHARDS=${NUM_SHARDS}" >&2
   exit 2
 fi
+declare -A _SEEN_GPUS=()
+for gpu in "${GPUS[@]}"; do
+  if ! [[ "${gpu}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "[ERROR] GPU_LIST entries must be canonical non-negative integer indices. Got: ${gpu@Q}" >&2
+    exit 2
+  fi
+  if [[ -n "${_SEEN_GPUS[${gpu}]+x}" ]]; then
+    echo "[ERROR] GPU_LIST contains duplicate GPU index ${gpu}; independent shards require unique devices." >&2
+    exit 2
+  fi
+  _SEEN_GPUS["${gpu}"]=1
+done
+if command -v nvidia-smi >/dev/null 2>&1; then
+  mapfile -t _AVAILABLE_GPUS < <(
+    nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null \
+      | sed 's/[[:space:]]//g; /^[[:space:]]*$/d'
+  )
+  declare -A _AVAILABLE_GPU_SET=()
+  for gpu in "${_AVAILABLE_GPUS[@]}"; do
+    [[ -n "${gpu}" ]] && _AVAILABLE_GPU_SET["${gpu}"]=1
+  done
+  for gpu in "${GPUS[@]}"; do
+    if [[ -z "${_AVAILABLE_GPU_SET[${gpu}]+x}" ]]; then
+      echo "[ERROR] GPU_LIST selects unavailable GPU index ${gpu}; available=${_AVAILABLE_GPUS[*]:-<none>}." >&2
+      exit 2
+    fi
+  done
+  unset _AVAILABLE_GPUS _AVAILABLE_GPU_SET
+fi
+unset _SEEN_GPUS
 
-mkdir -p "${SHARD_ROOT}" "${OUTPUT_ROOT}/shards" "${LOG_ROOT}" "${TMP_ROOT}"
-export TMPDIR="${TMP_ROOT}"
-export TMP="${TMP_ROOT}"
-export TEMP="${TMP_ROOT}"
+ROLLOUT_CONTRACT_JSON="$("${PYTHON_BIN}" - \
+  "${HEADLESS}" "${DISABLE_RANDOMIZATION}" "${START_AT_TIMESTEP_ZERO_PROB}" \
+  "${FREEZE_AT_TIMESTEP_ZERO_PROB}" "${RESET_NOISE_SCALE}" "${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
+  "${MAX_EPISODE_LENGTH_S}" "${PHYSX_GPU_COLLISION_STACK_SIZE}" "${SUCCESS_POSITION_THRESHOLD}" \
+  "${MIN_CONTACT_FRAMES}" "${CONTACT_FORCE_THRESHOLD}" "${CONTACT_VOXEL_SIZE}" \
+  "${FOOT_OBJECT_CONTACT_FORCE_THRESHOLD}" "${MIDDLE_FOOT_CONTACT_START_FRAC}" \
+  "${MIDDLE_FOOT_CONTACT_END_FRAC}" "${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}" \
+  "PCI_BUS_ID" <<'PY'
+import json
+import sys
+
+keys = (
+    "headless",
+    "disable_randomization",
+    "start_at_timestep_zero_prob",
+    "freeze_at_timestep_zero_prob",
+    "reset_noise_scale",
+    "use_adaptive_timesteps_sampler",
+    "max_episode_length_s",
+    "physx_gpu_collision_stack_size",
+    "success_position_threshold",
+    "min_contact_frames",
+    "contact_force_threshold",
+    "contact_voxel_size",
+    "foot_object_contact_force_threshold",
+    "middle_foot_contact_start_frac",
+    "middle_foot_contact_end_frac",
+    "object_collider_type",
+    "cuda_device_order",
+)
+print(json.dumps(dict(zip(keys, sys.argv[1:], strict=True)), sort_keys=True, separators=(",", ":")))
+PY
+)"
 
 prepare_args=(
   "${PYTHON_BIN}" scripts/prepare_teacher_as_realmesh_rollout.py prepare-shards
@@ -94,24 +175,78 @@ prepare_args=(
   --expected-total "${SOURCE_EXPECTED_TOTAL}"
   --allowed-categories "${ALLOWED_CATEGORIES}"
   --exclude-clips "${REALMESH_EXCLUDE_CLIPS}"
+  --rollout-contract-json "${ROLLOUT_CONTRACT_JSON}"
 )
-"${prepare_args[@]}" > "${SHARD_ROOT}/prepare_stdout.json"
-PER_GPU_ENVS="$("${PYTHON_BIN}" - "${SHARD_ROOT}/manifest.json" <<'PY'
+
+if is_truthy "${DRY_RUN}"; then
+  PLAN_JSON="$("${prepare_args[@]}" --dry-run)"
+  mapfile -t PLAN_VALUES < <(printf '%s' "${PLAN_JSON}" | "${PYTHON_BIN}" -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+print(payload["per_gpu_envs"])
+print(payload["selected_clip_count"])
+for shard in payload["shards"]:
+    print(shard["count"])
+')
+  PER_GPU_ENVS="${PLAN_VALUES[0]}"
+  SELECTED_CLIPS="${PLAN_VALUES[1]}"
+else
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "[ERROR] setsid is required for owned shard process-group cleanup." >&2
+    exit 2
+  fi
+  if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1))); then
+    echo "[ERROR] Bash >= 5.1 is required for fail-fast wait -n -p shard supervision." >&2
+    exit 2
+  fi
+  # All rollout launches can write one or more of the shard, output, target,
+  # generation, and compatibility-view namespaces.  A single lexical global
+  # lock avoids both partial-resource overlap and a TARGET_BANK symlink changing
+  # its resolved lock identity after an atomic generation switch.
+  LAUNCH_LOCK_ROOT="${SCRIPT_DIR}/data/ds_as_data/_teacher_rollout_launch_locks"
+  LAUNCH_LOCK_NAME="global.lock"
+  LAUNCH_LOCK_TIMEOUT_S="${TEACHER_ROLLOUT_LAUNCH_LOCK_TIMEOUT_S:-0}"
+  coproc LAUNCH_LOCK_HOLDER {
+    "${PYTHON_BIN}" scripts/hold_no_follow_lock.py \
+      --root "${LAUNCH_LOCK_ROOT}" \
+      --name "${LAUNCH_LOCK_NAME}" \
+      --timeout-seconds "${LAUNCH_LOCK_TIMEOUT_S}"
+  }
+  LAUNCH_LOCK_HOLDER_PROCESS_PID="${LAUNCH_LOCK_HOLDER_PID}"
+  LAUNCH_LOCK_READ_FD="${LAUNCH_LOCK_HOLDER[0]}"
+  if ! IFS= read -r LAUNCH_LOCK_STATUS <&"${LAUNCH_LOCK_READ_FD}" || [[ "${LAUNCH_LOCK_STATUS}" != "LOCKED" ]]; then
+    wait "${LAUNCH_LOCK_HOLDER_PROCESS_PID}" 2>/dev/null || true
+    echo "[ERROR] Another teacher rollout owns this shard/output/target scope." >&2
+    exit 2
+  fi
+  exec {LAUNCH_LOCK_READ_FD}<&-
+  LAUNCH_LOCK_KEEPALIVE_FD="${LAUNCH_LOCK_HOLDER[1]}"
+  trap launch_lock_only_exit_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -p "${SHARD_ROOT}" "${OUTPUT_ROOT}/shards" "${LOG_ROOT}" "${TMP_ROOT}"
+  export TMPDIR="${TMP_ROOT}"
+  export TMP="${TMP_ROOT}"
+  export TEMP="${TMP_ROOT}"
+  "${prepare_args[@]}" > "${LOG_ROOT}/prepare_manifest_stdout.json"
+  PREPARED_MANIFEST_SHA256="$(sha256sum "${SHARD_ROOT}/manifest.json" | awk '{print $1}')"
+  mapfile -t PLAN_VALUES < <("${PYTHON_BIN}" - "${SHARD_ROOT}/manifest.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-print(json.loads(Path(sys.argv[1]).read_text())["per_gpu_envs"])
+payload = json.loads(Path(sys.argv[1]).read_text())
+print(payload["per_gpu_envs"])
+print(payload["selected_clip_count"])
+for shard in payload["shards"]:
+    print(shard["count"])
 PY
-)"
-SELECTED_CLIPS="$("${PYTHON_BIN}" - "${SHARD_ROOT}/manifest.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-print(json.loads(Path(sys.argv[1]).read_text())["selected_clip_count"])
-PY
-)"
+  )
+  PER_GPU_ENVS="${PLAN_VALUES[0]}"
+  SELECTED_CLIPS="${PLAN_VALUES[1]}"
+fi
 
 echo "[INFO] run_id=${RUN_ID}"
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
@@ -135,7 +270,7 @@ if is_truthy "${DRY_RUN}"; then
     shard_output="${OUTPUT_ROOT}/shards/${shard_name}"
     gpu="${GPUS[${shard_idx}]}"
     local_rank=$((LOCAL_RANK_OFFSET + shard_idx))
-    expected_count="$(wc -l < "${shard_dir}/clip_ids.txt" | tr -d ' ')"
+    expected_count="${PLAN_VALUES[$((shard_idx + 2))]}"
     echo "[DRY_RUN] ${shard_name}: gpu=${gpu} local_rank=${local_rank} envs=${PER_GPU_ENVS} clips=${expected_count}"
     echo "[DRY_RUN] AS_DATA_DIR=${shard_dir}"
     echo "[DRY_RUN] OUTPUT_DIR=${shard_output}"
@@ -164,8 +299,93 @@ if is_truthy "${DRY_RUN}"; then
   exit 0
 fi
 
+# Resolve/download exactly once, publish under the content digest, and pass the
+# same immutable local file to every independent shard. Re-resolving a mutable
+# W&B run file per GPU can otherwise create a mixed-teacher output bank.
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma:${SCRIPT_DIR}/src/holosoma_inference:${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+TEACHER_CHECKPOINT_SOURCE="${TEACHER_CHECKPOINT}"
+TEACHER_CHECKPOINT_CACHE_ROOT="${TEACHER_CHECKPOINT_CACHE_ROOT:-${SCRIPT_DIR}/.checkpoint_cache/teacher_realmesh_rollout}"
+TEACHER_CHECKPOINT="$("${PYTHON_BIN}" scripts/resolve_exact_checkpoint.py \
+  --ref "${TEACHER_CHECKPOINT_SOURCE}" \
+  --cache-root "${TEACHER_CHECKPOINT_CACHE_ROOT}")"
+TEACHER_CHECKPOINT_SHA256="$(sha256sum "${TEACHER_CHECKPOINT}" | awk '{print $1}')"
+if [[ -n "${TEACHER_CHECKPOINT_EXPECTED_SHA256:-}" && "${TEACHER_CHECKPOINT_SHA256}" != "${TEACHER_CHECKPOINT_EXPECTED_SHA256}" ]]; then
+  echo "[ERROR] Resolved teacher SHA256 mismatch: actual=${TEACHER_CHECKPOINT_SHA256} expected=${TEACHER_CHECKPOINT_EXPECTED_SHA256}" >&2
+  exit 2
+fi
+echo "[INFO] immutable_teacher_checkpoint=${TEACHER_CHECKPOINT}"
+echo "[INFO] teacher_checkpoint_sha256=${TEACHER_CHECKPOINT_SHA256}"
+
 declare -a PIDS=()
 declare -a SHARD_LOGS=()
+declare -A ACTIVE_SHARDS=()
+declare -A OWNED_SHARD_GROUPS=()
+CLEANUP_DISARMED=0
+CLEANUP_RUNNING=0
+
+terminate_owned_shards() {
+  local pid deadline any_running
+  local -A cleanup_pids=()
+  local -a owned_pids=()
+  ((CLEANUP_RUNNING == 0)) || return 0
+  CLEANUP_RUNNING=1
+  for pid in "${!OWNED_SHARD_GROUPS[@]}"; do
+    cleanup_pids["${pid}"]=1
+  done
+  # Close the tiny signal window between `cmd &` and recording `$!`.  The lock
+  # holder is the only non-shard background job and is excluded explicitly.
+  while IFS= read -r pid; do
+    [[ -n "${pid}" && "${pid}" != "${LAUNCH_LOCK_HOLDER_PROCESS_PID:-}" ]] && cleanup_pids["${pid}"]=1
+  done < <(jobs -pr)
+  owned_pids=("${!cleanup_pids[@]}")
+  if ((${#owned_pids[@]} > 0)); then
+    echo "[INFO] Terminating ${#owned_pids[@]} owned rollout shard process group(s)." >&2
+  fi
+  for pid in "${owned_pids[@]}"; do
+    kill -TERM -- "${pid}" 2>/dev/null || true
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+  done
+  deadline=$((SECONDS + 10))
+  while ((SECONDS < deadline)); do
+    any_running=0
+    for pid in "${owned_pids[@]}"; do
+      if kill -0 -- "${pid}" 2>/dev/null || kill -0 -- "-${pid}" 2>/dev/null; then
+        any_running=1
+        break
+      fi
+    done
+    ((any_running == 0)) && break
+    sleep 0.2
+  done
+  for pid in "${owned_pids[@]}"; do
+    kill -KILL -- "${pid}" 2>/dev/null || true
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+  done
+  for pid in "${owned_pids[@]}"; do
+    wait "${pid}" 2>/dev/null || true
+    unset 'ACTIVE_SHARDS[$pid]'
+  done
+  release_launch_lock
+}
+
+launcher_exit_cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if ((CLEANUP_DISARMED == 0)); then
+    terminate_owned_shards
+  else
+    release_launch_lock
+  fi
+  exit "${status}"
+}
+
+launcher_hup() { exit 129; }
+launcher_int() { exit 130; }
+launcher_term() { exit 143; }
+trap launcher_exit_cleanup EXIT
+trap launcher_hup HUP
+trap launcher_int INT
+trap launcher_term TERM
 
 for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
   shard_name="$(printf 'shard_%02d' "${shard_idx}")"
@@ -180,13 +400,25 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
   echo "[INFO] Starting ${shard_name}: gpu=${gpu} local_rank=${local_rank} envs=${PER_GPU_ENVS} clips=${expected_count}"
   (
     set -euo pipefail
+    exec {LAUNCH_LOCK_KEEPALIVE_FD}>&-
     cd "${SCRIPT_DIR}"
-    export HOLOSOMA_DEVICE="cuda:${gpu}"
-    export LOCAL_RANK="${local_rank}"
+    export CUDA_DEVICE_ORDER=PCI_BUS_ID
+    export CUDA_VISIBLE_DEVICES="${gpu}"
+    export HOLOSOMA_DEVICE="cuda:0"
+    # Each shard is an independent single-process rollout. Never inherit a
+    # parent torchrun topology, which would reinterpret LOCAL_RANK as a device
+    # index and can route shard 40+ to a nonexistent GPU.
+    unset WORLD_SIZE RANK GROUP_RANK ROLE_RANK ROLE_WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
+    export LOCAL_RANK=0
     export AS_DATA_DIR="${shard_dir}"
     export AS_OBJECT_MAP="${shard_dir}/_clip_object_urdf_map.json"
     export AS_EXPECTED_TOTAL="${expected_count}"
-    export AS_SINGLE_SLOT_MOTION_DIR="${shard_dir}/_single_slot_motion_bank"
+    export TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256="${PREPARED_MANIFEST_SHA256}"
+    export TEACHER_ROLLOUT_EXPECTED_CLIP_IDS_FILE="${shard_dir}/clip_ids.txt"
+    export TEACHER_ROLLOUT_SHARD_NAME="${shard_name}"
+    # The prepared shard itself already is the authenticated single-slot bank;
+    # never let inference create a mutable child inside the read-only snapshot.
+    export AS_SINGLE_SLOT_MOTION_DIR="${shard_dir}"
     export NUM_ENVS="${PER_GPU_ENVS}"
     export HEADLESS="${HEADLESS}"
     export OUTPUT_DIR="${shard_output}"
@@ -207,6 +439,7 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
     export PYTHON_BIN="${PYTHON_BIN}"
     export REAL_MESH_OBJECT_SPAWN=1
     export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=0
+    export HOLOSOMA_OBJECT_COLLIDER_TYPE="${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}"
     shard_tmp="${TMP_ROOT}/${shard_name}"
     mkdir -p "${shard_tmp}"
     export TMPDIR="${shard_tmp}"
@@ -230,33 +463,54 @@ for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
       cmd+=(--no-save-face-heatmap-png)
     fi
 
-    "${cmd[@]}"
+    # Make every owned shard its own process group so a launcher-side failure
+    # can terminate that shard and all descendants without touching unrelated
+    # jobs on the host.
+    exec setsid "${cmd[@]}"
   ) > "${shard_log}" 2>&1 &
-  PIDS+=("$!")
+  shard_pid="$!"
+  PIDS+=("${shard_pid}")
+  ACTIVE_SHARDS["${shard_pid}"]="${shard_idx}"
+  OWNED_SHARD_GROUPS["${shard_pid}"]=1
 done
 
-status=0
-for idx in "${!PIDS[@]}"; do
-  pid="${PIDS[$idx]}"
-  if wait "${pid}"; then
-    echo "[INFO] ${SHARD_LOGS[$idx]} finished"
+while ((${#ACTIVE_SHARDS[@]} > 0)); do
+  completed_pid=""
+  if wait -n -p completed_pid "${!ACTIVE_SHARDS[@]}"; then
+    shard_status=0
   else
-    echo "[ERROR] ${SHARD_LOGS[$idx]} failed" >&2
-    status=1
+    shard_status=$?
   fi
+  if [[ -z "${completed_pid}" || -z "${ACTIVE_SHARDS[${completed_pid}]+x}" ]]; then
+    echo "[ERROR] Could not identify the completed owned rollout shard (wait status=${shard_status})." >&2
+    exit 1
+  fi
+  completed_idx="${ACTIVE_SHARDS[${completed_pid}]}"
+  if ((shard_status == 0)); then
+    unset 'ACTIVE_SHARDS[$completed_pid]'
+    if kill -0 -- "-${completed_pid}" 2>/dev/null; then
+      echo "[ERROR] ${SHARD_LOGS[$completed_idx]} left descendants in its owned process group." >&2
+      exit 1
+    fi
+    echo "[INFO] ${SHARD_LOGS[$completed_idx]} finished"
+    continue
+  fi
+  echo "[ERROR] ${SHARD_LOGS[$completed_idx]} failed with status ${shard_status}" >&2
+  echo "[ERROR] A realmesh rollout shard failed; leaving diagnostic outputs under ${OUTPUT_ROOT}/shards" >&2
+  exit "${shard_status}"
 done
-
-if [[ "${status}" -ne 0 ]]; then
-  echo "[ERROR] At least one realmesh rollout shard failed; leaving partial outputs under ${OUTPUT_ROOT}/shards" >&2
-  exit "${status}"
-fi
 
 merge_cmd=(
   "${PYTHON_BIN}" scripts/prepare_teacher_as_realmesh_rollout.py merge
   --output-root "${OUTPUT_ROOT}"
   --target-bank "${TARGET_BANK}"
   --source-bank "${SOURCE_AS_DATA_DIR}"
+  --prepared-manifest "${SHARD_ROOT}/manifest.json"
+  --prepared-manifest-sha256 "${PREPARED_MANIFEST_SHA256}"
   --contact-export-name "${CONTACT_EXPORT_NAME}"
+  --expected-teacher-checkpoint-sha256 "${TEACHER_CHECKPOINT_SHA256}"
+  --teacher-checkpoint-path "${TEACHER_CHECKPOINT}"
+  --teacher-checkpoint-source "${TEACHER_CHECKPOINT_SOURCE}"
 )
 if is_truthy "${FORCE}"; then
   merge_cmd+=(--force)
@@ -265,6 +519,9 @@ if is_truthy "${SAVE_OBJECT_FRAME_VIS}"; then
   merge_cmd+=(--save-visualization)
 fi
 "${merge_cmd[@]}" | tee "${LOG_ROOT}/merge.log"
+CLEANUP_DISARMED=1
+release_launch_lock
+trap - EXIT HUP INT TERM
 
 if is_truthy "${LAUNCH_VISER}"; then
   export PYTHONPATH="${SCRIPT_DIR}/src/holosoma:${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"

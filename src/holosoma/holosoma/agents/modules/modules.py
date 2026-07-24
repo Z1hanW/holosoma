@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import inspect
+import math
+import numbers
 import os
 import sys
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,7 +14,20 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from holosoma.config_types.algo import LayerConfig, ModuleConfig
+from holosoma.config_types.algo import (
+    MAX_FLOW_INTEGRATION_STEPS,
+    MAX_FLOW_NOISE_STD,
+    LayerConfig,
+    ModuleConfig,
+)
+from holosoma.utils.checkpoint_validation import (
+    load_verified_torch_checkpoint,
+    validate_finite_tree,
+)
+from holosoma.utils.defm_source import (
+    require_module_within_defm_root,
+    resolve_defm_source_root,
+)
 
 
 class ImgChLayerNorm(nn.Module):
@@ -464,10 +481,48 @@ class ConditionalFlowMLP(nn.Module):
             raise ValueError("ConditionalFlowMLP requires hidden_dims to be set.")
         self.condition_dim = int(condition_dim)
         self.action_dim = int(action_dim)
-        self.integration_steps = max(1, int(getattr(layer_config, "flow_integration_steps", 4)))
-        self.train_noise_std = float(getattr(layer_config, "flow_train_noise_std", 1.0))
-        self.time_epsilon = min(max(float(getattr(layer_config, "flow_time_epsilon", 1e-4)), 0.0), 0.49)
-        self.inference_noise_std = max(0.0, float(getattr(layer_config, "flow_inference_noise_std", 0.0)))
+        raw_integration_steps = getattr(layer_config, "flow_integration_steps", 4)
+        if (
+            type(raw_integration_steps) is not int
+            or not 1 <= raw_integration_steps <= MAX_FLOW_INTEGRATION_STEPS
+        ):
+            raise ValueError(
+                f"flow_integration_steps must be an integer in [1, {MAX_FLOW_INTEGRATION_STEPS}] "
+                f"(bool is not allowed), got {raw_integration_steps!r}."
+            )
+        self.integration_steps = raw_integration_steps
+
+        def finite_flow_float(
+            name: str,
+            default: float,
+            *,
+            upper: float | None = None,
+        ) -> float:
+            raw_value = getattr(layer_config, name, default)
+            if isinstance(raw_value, bool) or not isinstance(raw_value, numbers.Real):
+                raise ValueError(
+                    f"{name} must be a real number (bool is not allowed), got {raw_value!r}."
+                )
+            try:
+                value = float(raw_value)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite real number, got {raw_value!r}.") from exc
+            if not math.isfinite(value) or value < 0.0 or (upper is not None and value > upper):
+                interval = f"[0.0, {upper}]" if upper is not None else "[0.0, infinity)"
+                raise ValueError(f"{name} must be finite and in {interval}, got {raw_value!r}.")
+            return value
+
+        self.train_noise_std = finite_flow_float(
+            "flow_train_noise_std",
+            1.0,
+            upper=MAX_FLOW_NOISE_STD,
+        )
+        self.time_epsilon = finite_flow_float("flow_time_epsilon", 1e-4, upper=0.49)
+        self.inference_noise_std = finite_flow_float(
+            "flow_inference_noise_std",
+            0.0,
+            upper=MAX_FLOW_NOISE_STD,
+        )
         self.net = build_mlp_layer(
             self.condition_dim + self.action_dim + 1,
             layer_config.hidden_dims,
@@ -604,38 +659,119 @@ class FarTrackingDepthSmallEncoder(nn.Module):
 
 @lru_cache(maxsize=1)
 def _resolve_defm_repo_root() -> Path:
-    env_root = os.environ.get("HOLOSOMA_DEFM_ROOT", "").strip()
-    candidates: list[Path] = []
-    if env_root:
-        candidates.append(Path(env_root).expanduser())
-    this_file = Path(__file__).resolve()
-    for parent in this_file.parents:
-        candidates.append(parent / "defm")
-        candidates.append(parent / "submodules" / "defm")
-    for candidate in candidates:
-        if (candidate / "defm" / "model_factory.py").is_file():
-            return candidate
-    raise FileNotFoundError(
-        "Unable to locate the local DeFM source tree. Set HOLOSOMA_DEFM_ROOT to a directory containing "
-        "'defm/model_factory.py'."
-    )
+    return resolve_defm_source_root(environ=os.environ, anchor=Path(__file__))
 
 
 @lru_cache(maxsize=1)
 def _load_defm_runtime():
     repo_root = _resolve_defm_repo_root()
     repo_root_str = str(repo_root)
+    # The pinned DeFM source conditionally changes attention/FFN operators when
+    # xFormers happens to be installed.  Canonicalize the optional dependency
+    # off so node images cannot silently select different numerical graphs.
+    os.environ["XFORMERS_DISABLED"] = "1"
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name == "defm" or module_name.startswith("defm."):
+            require_module_within_defm_root(
+                module,
+                repo_root,
+                name=module_name,
+            )
+            if bool(getattr(module, "XFORMERS_AVAILABLE", False)):
+                raise RuntimeError(
+                    f"{module_name} was imported with xFormers enabled before HoloSoma established "
+                    "the pinned DeFM runtime. Restart in a clean process with XFORMERS_DISABLED=1."
+                )
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
     try:
-        from defm.model_factory import create_defm_model
-        from defm.utils.utils import preprocess_depth_batch
+        from omegaconf import OmegaConf
+
+        vision_transformer_module = importlib.import_module("defm.models.vision_transformer")
+        resnet_module = importlib.import_module("defm.models.resnet_bifpn")
+        efficientnet_module = importlib.import_module("defm.models.efficientnet_bifpn")
+        regnet_module = importlib.import_module("defm.models.regnet_bifpn")
+        utils_module = importlib.import_module("defm.utils.utils")
     except Exception as exc:
         raise RuntimeError(
             f"Failed to import DeFM from local source tree at {repo_root}. "
             "Make sure its Python dependencies are installed."
         ) from exc
-    return create_defm_model, preprocess_depth_batch
+    for module_name, module in (
+        ("defm.models.vision_transformer", vision_transformer_module),
+        ("defm.models.resnet_bifpn", resnet_module),
+        ("defm.models.efficientnet_bifpn", efficientnet_module),
+        ("defm.models.regnet_bifpn", regnet_module),
+        ("defm.utils.utils", utils_module),
+    ):
+        require_module_within_defm_root(module, repo_root, name=module_name)
+    vision_transformers = vision_transformer_module.__dict__
+    ResNetBiFPN = resnet_module.ResNetBiFPN
+    EfficientNetBiFPN = efficientnet_module.EfficientNetBiFPN
+    RegNetBiFPN = regnet_module.RegNetBiFPN
+    preprocess_depth_batch = utils_module.preprocess_depth_batch
+
+    def get_defm_config(model_name: str):
+        if (
+            not isinstance(model_name, str)
+            or not model_name
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in model_name)
+        ):
+            raise ValueError(f"Invalid DeFM model name: {model_name!r}")
+        config_path = repo_root / "defm" / "configs" / f"{model_name}.yaml"
+        if not config_path.is_file() or config_path.is_symlink():
+            raise FileNotFoundError(f"Pinned DeFM config is missing or aliased: {config_path}")
+        return OmegaConf.load(config_path)
+
+    def create_uninitialized_defm_model(model_name, pretrained=False, pretrained_path=None):
+        """Construct architecture only; HoloSoma authenticates and loads weights."""
+
+        if pretrained or pretrained_path is not None:
+            raise ValueError(
+                "Internal DeFM architecture factory does not load weights; "
+                "HoloSoma must verify them before strict state loading."
+            )
+        cfg = get_defm_config(model_name)
+        architecture = str(cfg.arch)
+        if "vit" in architecture:
+            constructor = vision_transformers.get(architecture)
+            if not callable(constructor):
+                raise ValueError(f"Unsupported pinned DeFM ViT architecture: {architecture}")
+            return constructor(
+                img_size=cfg.global_crops_size,
+                patch_size=cfg.patch_size,
+                in_chans=cfg.in_chans,
+                init_values=cfg.layerscale,
+                ffn_layer=cfg.ffn_layer,
+                block_chunks=cfg.block_chunks,
+                qkv_bias=cfg.qkv_bias,
+                proj_bias=cfg.proj_bias,
+                ffn_bias=cfg.ffn_bias,
+                num_register_tokens=cfg.num_register_tokens,
+                interpolate_offset=cfg.interpolate_offset,
+                interpolate_antialias=cfg.interpolate_antialias,
+            )
+        if "resnet" in architecture:
+            return ResNetBiFPN(
+                backbone_name=architecture,
+                out_channels=cfg.out_channels,
+                pretrained=False,
+            )
+        if "efficientnet" in architecture:
+            return EfficientNetBiFPN(
+                backbone_name=architecture,
+                out_channels=cfg.out_channels,
+                pretrained=False,
+            )
+        if "regnet" in architecture:
+            return RegNetBiFPN(
+                backbone_name=architecture,
+                out_channels=cfg.out_channels,
+                pretrained=False,
+            )
+        raise ValueError(f"Unsupported pinned DeFM architecture: {architecture}")
+
+    return create_uninitialized_defm_model, preprocess_depth_batch
 
 
 def _resolve_defm_forward_batch_size(model_name: str, freeze_backbone: bool) -> int:
@@ -669,6 +805,7 @@ class DeFMEncoder(nn.Module):
         output_key: str | None = None,
         pretrained: bool = True,
         pretrained_path: str | None = None,
+        pretrained_sha256: str | None = None,
         freeze_backbone: bool = True,
         target_size: int | tuple[int, int] | None = 224,
         patch_size: int | None = 14,
@@ -684,11 +821,25 @@ class DeFMEncoder(nn.Module):
         self.output_key = output_key
         self.pretrained = bool(pretrained)
         self.pretrained_path = pretrained_path
+        self.pretrained_sha256 = pretrained_sha256
         self.freeze_backbone = bool(freeze_backbone)
         self.target_size = target_size
         self.patch_size = patch_size
         self.use_no_bifpn = bool(use_no_bifpn)
         self.backbone_dim = int(backbone_dim)
+        target_h, target_w = self._resolve_target_hw()
+        if target_h <= 0 or target_w <= 0:
+            raise ValueError(
+                f"{self.model_name} resolved an invalid preprocessing target {(target_h, target_w)}."
+            )
+        if target_h < self.input_height or target_w < self.input_width:
+            raise ValueError(
+                f"{self.model_name} does not support preprocessing downsampling from "
+                f"{(self.input_height, self.input_width)} to {(target_h, target_w)}: the pinned "
+                "DeFM torchvision Resize applies antialiasing, while the ONNX-safe runtime path "
+                "cannot export the equivalent antialiased operator. Configure an input/target size "
+                "that only preserves or upsamples each spatial dimension."
+            )
         self.backbone: nn.Module | None = None
         self._preprocess_depth_batch = None
         self.forward_batch_size = _resolve_defm_forward_batch_size(self.model_name, self.freeze_backbone)
@@ -696,24 +847,102 @@ class DeFMEncoder(nn.Module):
         self.register_buffer("_defm_std", torch.tensor([0.139357, 0.271314, 0.297177]).view(1, 3, 1, 1))
         self.proj = nn.Identity() if output_dim == self.backbone_dim else nn.Linear(self.backbone_dim, output_dim)
 
-    def _ensure_backbone(self, device: torch.device) -> None:
+    def _ensure_backbone(
+        self,
+        device: torch.device,
+        *,
+        load_pretrained: bool | None = None,
+    ) -> None:
         if self.backbone is None:
             create_defm_model, preprocess_depth_batch = _load_defm_runtime()
             backbone = create_defm_model(
                 self.model_name,
-                pretrained=self.pretrained,
-                pretrained_path=self.pretrained_path,
+                pretrained=False,
+                pretrained_path=None,
             )
+            should_load_pretrained = (
+                self.pretrained if load_pretrained is None else self.pretrained and load_pretrained
+            )
+            if should_load_pretrained:
+                if not isinstance(self.pretrained_path, str) or not self.pretrained_path.strip():
+                    raise ValueError(
+                        f"{self.model_name} pretrained initialization requires a local pretrained_path; "
+                        "implicit network downloads are forbidden."
+                    )
+                if not isinstance(self.pretrained_sha256, str):
+                    raise ValueError(
+                        f"{self.model_name} pretrained initialization requires pretrained_sha256."
+                    )
+                checkpoint, actual_sha256 = load_verified_torch_checkpoint(
+                    self.pretrained_path,
+                    expected_sha256=self.pretrained_sha256,
+                    map_location="cpu",
+                )
+                if isinstance(checkpoint, Mapping) and "model" in checkpoint:
+                    checkpoint = checkpoint["model"]
+                if not isinstance(checkpoint, Mapping):
+                    raise ValueError(
+                        f"{self.model_name} pretrained checkpoint must contain a tensor mapping."
+                    )
+                validate_finite_tree(checkpoint, path=f"{self.model_name}_pretrained_state")
+                try:
+                    backbone.load_state_dict(dict(checkpoint), strict=True)
+                except RuntimeError as exc:
+                    raise ValueError(
+                        f"{self.model_name} pretrained checkpoint schema does not exactly match the "
+                        "pinned architecture."
+                    ) from exc
+                if actual_sha256 != self.pretrained_sha256:  # defensive: loader already proves this.
+                    raise RuntimeError(f"{self.model_name} pretrained digest changed after validation.")
             if self.freeze_backbone:
                 backbone.eval()
                 for param in backbone.parameters():
                     param.requires_grad_(False)
             self.backbone = backbone.to(device)
             self._preprocess_depth_batch = preprocess_depth_batch
-        elif next(self.backbone.parameters()).device != device:
-            self.backbone = self.backbone.to(device)
+        else:
+            # Some test/export backbones are parameterless, while a real
+            # backbone may expose only buffers.  Do not assume that
+            # ``parameters()`` is non-empty when checking its current device.
+            device_anchor = next(self.backbone.parameters(), None)
+            if device_anchor is None:
+                device_anchor = next(self.backbone.buffers(), None)
+            if device_anchor is None or device_anchor.device != device:
+                self.backbone = self.backbone.to(device)
         if self.freeze_backbone and self.backbone is not None:
             self.backbone.eval()
+
+    def materialize_for_setup(self, device: torch.device | str) -> None:
+        """Construct the lazy backbone before sync, optimizer, or state I/O.
+
+        PPO invokes this setup hook inside an RNG-preserving boundary.  A
+        forward-only lazy construction is too late: trainable backbone
+        parameters would be absent from the optimizer and all DeFM parameters
+        would miss the initial distributed broadcast.  It would also make a
+        fresh module's strict state-dict schema differ from a trained module.
+        """
+
+        self._ensure_backbone(torch.device(device))
+
+    def materialize_for_checkpoint_restore(self, device: torch.device | str) -> None:
+        """Construct only the architecture before an authenticated strict restore."""
+
+        self._ensure_backbone(torch.device(device), load_pretrained=False)
+
+    def train(self, mode: bool = True):
+        """Keep a frozen backbone in eval mode across parent ``train()`` calls.
+
+        ``nn.Module.train()`` recurses into every child.  Without this
+        override, PPO's normal eval/train transitions would reactivate frozen
+        BatchNorm running-stat updates even though all backbone parameters have
+        ``requires_grad=False``.  That would make rollout and minibatch policy
+        means depend on different batch statistics.
+        """
+
+        super().train(mode)
+        if self.freeze_backbone and self.backbone is not None:
+            self.backbone.eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         flat = x.view(x.shape[0], -1)
@@ -814,6 +1043,7 @@ class DeFMViTS14Encoder(DeFMEncoder):
         *,
         pretrained: bool = True,
         pretrained_path: str | None = None,
+        pretrained_sha256: str | None = None,
         freeze_backbone: bool = True,
         target_size: int | tuple[int, int] | None = 224,
         patch_size: int | None = 14,
@@ -827,6 +1057,7 @@ class DeFMViTS14Encoder(DeFMEncoder):
             output_key=None,
             pretrained=pretrained,
             pretrained_path=pretrained_path,
+            pretrained_sha256=pretrained_sha256,
             freeze_backbone=freeze_backbone,
             target_size=target_size,
             patch_size=patch_size,
@@ -845,6 +1076,7 @@ class DeFMRegNetY800MFEncoder(DeFMEncoder):
         *,
         pretrained: bool = True,
         pretrained_path: str | None = None,
+        pretrained_sha256: str | None = None,
         freeze_backbone: bool = True,
         target_size: int | tuple[int, int] | None = 224,
         patch_size: int | None = None,
@@ -858,6 +1090,7 @@ class DeFMRegNetY800MFEncoder(DeFMEncoder):
             output_key="global_backbone",
             pretrained=pretrained,
             pretrained_path=pretrained_path,
+            pretrained_sha256=pretrained_sha256,
             freeze_backbone=freeze_backbone,
             target_size=target_size,
             patch_size=patch_size,
@@ -876,6 +1109,7 @@ class DeFMEfficientNetB2Encoder(DeFMEncoder):
         *,
         pretrained: bool = True,
         pretrained_path: str | None = None,
+        pretrained_sha256: str | None = None,
         freeze_backbone: bool = True,
         target_size: int | tuple[int, int] | None = 224,
         patch_size: int | None = None,
@@ -889,6 +1123,7 @@ class DeFMEfficientNetB2Encoder(DeFMEncoder):
             output_key="global_backbone",
             pretrained=pretrained,
             pretrained_path=pretrained_path,
+            pretrained_sha256=pretrained_sha256,
             freeze_backbone=freeze_backbone,
             target_size=target_size,
             patch_size=patch_size,
@@ -946,23 +1181,40 @@ class PerceptionTimeGRU(nn.Module):
         out, self.hidden = self.gru(x.unsqueeze(1), self.hidden)
         return out[:, -1, :]
 
-    def forward_sequence(self, x_seq: torch.Tensor, dones_seq: torch.Tensor | None = None) -> torch.Tensor:
-        """Process a sequence (x_seq: [T, B, input_dim]) with optional done resets."""
+    def forward_sequence(
+        self,
+        x_seq: torch.Tensor,
+        dones_seq: torch.Tensor | None = None,
+        initial_hidden: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Process a collected sequence with rollout-consistent recurrent state.
+
+        ``initial_hidden`` is the hidden state immediately before ``x_seq[0]``.
+        A stored ``dones_seq[t]`` describes the transition *after* ``x_seq[t]``
+        was consumed, so its reset applies before the following observation.
+        """
         if x_seq.ndim != 3:
             raise ValueError(f"PerceptionTimeGRU sequence expects [T, B, D], got {x_seq.shape}")
         t_steps, batch = x_seq.shape[0], x_seq.shape[1]
         x_proj = self.pre_mlp(x_seq.reshape(-1, x_seq.shape[-1])).view(t_steps, batch, -1)
-        device = x_seq.device
-        h = torch.zeros(1, batch, self.hidden_dim, device=device)
+        if initial_hidden is None:
+            h = torch.zeros(1, batch, self.hidden_dim, device=x_seq.device, dtype=x_proj.dtype)
+        else:
+            if initial_hidden.shape != (1, batch, self.hidden_dim):
+                raise ValueError(
+                    "PerceptionTimeGRU initial_hidden must have shape "
+                    f"(1, {batch}, {self.hidden_dim}), got {tuple(initial_hidden.shape)}."
+                )
+            h = initial_hidden
         outputs = []
         for t in range(t_steps):
+            out, h = self.gru(x_proj[t].unsqueeze(1), h)
+            outputs.append(out[:, -1, :])
             if dones_seq is not None:
                 done_mask = dones_seq[t].view(-1).bool()
                 if done_mask.any():
-                    keep = (~done_mask).float().view(1, -1, 1)
+                    keep = (~done_mask).to(dtype=h.dtype).view(1, -1, 1)
                     h = h * keep
-            out, h = self.gru(x_proj[t].unsqueeze(1), h)
-            outputs.append(out[:, -1, :])
         return torch.stack(outputs, dim=0)
 
 
@@ -1137,6 +1389,7 @@ class BaseModule(nn.Module):
                 output_dim=output_dim,
                 pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
                 pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                pretrained_sha256=getattr(layer_config, "perception_pretrained_sha256", None),
                 freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
                 target_size=getattr(layer_config, "perception_target_size", None),
                 patch_size=getattr(layer_config, "perception_patch_size", None),
@@ -1154,6 +1407,7 @@ class BaseModule(nn.Module):
                 output_dim=output_dim,
                 pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
                 pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                pretrained_sha256=getattr(layer_config, "perception_pretrained_sha256", None),
                 freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
                 target_size=getattr(layer_config, "perception_target_size", None),
                 patch_size=getattr(layer_config, "perception_patch_size", None),
@@ -1171,6 +1425,7 @@ class BaseModule(nn.Module):
                 output_dim=output_dim,
                 pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
                 pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                pretrained_sha256=getattr(layer_config, "perception_pretrained_sha256", None),
                 freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
                 target_size=getattr(layer_config, "perception_target_size", None),
                 patch_size=getattr(layer_config, "perception_patch_size", None),

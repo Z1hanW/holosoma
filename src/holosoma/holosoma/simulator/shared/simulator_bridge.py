@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -70,6 +71,7 @@ class SimulatorBridge:
         self._logged_active_command_summaries = 0
         self._logged_default_pose_hold = False
         self._logged_initial_pose_hold = False
+        self._logged_rejected_lowcmd_generation = False
         self._default_hold_q: np.ndarray | None = None
         self._default_hold_kp: np.ndarray | None = None
         self._default_hold_kd: np.ndarray | None = None
@@ -99,6 +101,11 @@ class SimulatorBridge:
         self._logged_lowcmd_latch = False
         self._logged_lowcmd_lockstep = False
         self._last_zmq_torque_preview: list[float] | None = None
+        # The generation is both an episode counter and a producer-session
+        # identity. Starting from a random bounded base prevents stale t=0
+        # packets buffered by a still-running policy from authenticating after
+        # run_sim itself is restarted.
+        self._episode_generation = secrets.randbits(62) or 1
         self._sim_state_trace_path = os.environ.get("HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH", "").strip() or None
         self._sim_state_trace_handle = None
 
@@ -201,10 +208,32 @@ class SimulatorBridge:
         self._logged_active_command_summaries = 0
         self._logged_default_pose_hold = False
         self._logged_initial_pose_hold = False
+        self._logged_rejected_lowcmd_generation = False
         self._initial_hold_q = None
         self._zmq_lowcmd_substep = 0
         self._zmq_lowcmd_hold_physics = False
         self._last_zmq_torque_preview = None
+
+    def reset_control_phase(self) -> None:
+        """Clear queued control state without declaring a new physical episode."""
+
+        if self._use_zmq_lowcmd:
+            self._reset_zmq_lowcmd_runtime_state()
+
+    def reset_episode_state(self) -> None:
+        """Advance the episode identity and clear all queued control state."""
+
+        if self._episode_generation >= (1 << 63) - 1:
+            raise RuntimeError("Simulator bridge episode generation exhausted.")
+        invalidate_perception = getattr(
+            getattr(self, "perception_obs_shm_pub", None),
+            "invalidate",
+            None,
+        )
+        if callable(invalidate_perception):
+            invalidate_perception()
+        self._episode_generation += 1
+        self.reset_control_phase()
 
     def _build_default_pose_hold_targets(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         default_joint_angles = getattr(self.simulator.robot_config.init_state, "default_joint_angles", {}) or {}
@@ -344,8 +373,19 @@ class SimulatorBridge:
         except (TypeError, ValueError):
             return None
 
+    def _payload_episode_generation(self, payload: dict | None) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        value = payload.get("episode_generation")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return int(value)
+
+    def _payload_matches_current_episode(self, payload: dict | None) -> bool:
+        return self._payload_episode_generation(payload) == self._episode_generation
+
     def _payload_is_new_for_lockstep(self, payload: dict | None) -> bool:
-        if not self._payload_is_active(payload):
+        if not self._payload_is_active(payload) or not self._payload_matches_current_episode(payload):
             return False
 
         seq = self._payload_seq(payload)
@@ -360,6 +400,16 @@ class SimulatorBridge:
         return True
 
     def _queue_lowcmd_payload(self, payload: dict, *, lowcmd_boundary: bool) -> None:
+        if not self._payload_matches_current_episode(payload):
+            if not self._logged_rejected_lowcmd_generation:
+                logger.warning(
+                    "Rejecting split lowcmd from a different or missing episode generation: "
+                    "received={}, current={}",
+                    self._payload_episode_generation(payload),
+                    self._episode_generation,
+                )
+                self._logged_rejected_lowcmd_generation = True
+            return
         if self._zmq_lowcmd_lockstep_control_boundary:
             self._pending_lowcmd_payload = payload
             return
@@ -578,6 +628,34 @@ class SimulatorBridge:
         torques = torch.clamp(torques, -torque_limit, torque_limit)
         return torques.detach().cpu().numpy().astype(np.float32, copy=False)
 
+    def apply_initialization_default_pose_hold(self) -> None:
+        """Apply the nominal zero-action hold without consuming bridge input.
+
+        Direct RunSim uses this while its bridge is temporarily detached during
+        the one control-tick perception warm-up.  It mirrors the nominal
+        default-pose PD action used by training startup while preventing a
+        connected sender from changing the authenticated initialization step.
+        """
+
+        q_target, kp, kd = self._build_default_pose_hold_targets()
+        q_actual = self.simulator.dof_pos[0]
+        dq_actual = self.simulator.dof_vel[0]
+        device = q_actual.device
+        dtype = q_actual.dtype
+        torque_limit = torch.as_tensor(
+            self.simulator.robot_config.dof_effort_limit_list,
+            device=device,
+            dtype=dtype,
+        )
+        torques = (
+            torch.as_tensor(kp, device=device, dtype=dtype)
+            * (torch.as_tensor(q_target, device=device, dtype=dtype) - q_actual)
+            - torch.as_tensor(kd, device=device, dtype=dtype) * dq_actual
+        )
+        self.simulator.apply_torques_at_dof(
+            torch.clamp(torques, -torque_limit, torque_limit)
+        )
+
     def _compute_zmq_lowcmd_torques(self) -> np.ndarray | None:
         payload = self._latest_lowcmd_payload
         cmd_is_active = self._payload_is_active(payload)
@@ -672,6 +750,7 @@ class SimulatorBridge:
 
             payload = {
                 "sim_time_ms": int(round(self.simulator.time() * 1000.0)),
+                "episode_generation": int(self._episode_generation),
                 "robot_root_state": robot_root_state,
                 "robot_dof_pos": robot_dof_pos,
                 "robot_dof_vel": robot_dof_vel,
@@ -687,6 +766,9 @@ class SimulatorBridge:
                     "last_applied_seq": self._last_applied_lowcmd_seq,
                     "policy_sim_time_ms": self._payload_policy_sim_time_ms(latest),
                     "pending_policy_sim_time_ms": self._payload_policy_sim_time_ms(pending),
+                    "episode_generation": int(self._episode_generation),
+                    "command_episode_generation": self._payload_episode_generation(latest),
+                    "pending_command_episode_generation": self._payload_episode_generation(pending),
                     "substep": int(self._zmq_lowcmd_substep),
                     "control_boundary": bool(self._is_zmq_lowcmd_control_boundary()),
                     "lockstep": bool(self._zmq_lowcmd_lockstep_control_boundary),
@@ -701,6 +783,9 @@ class SimulatorBridge:
                 extra_payload = extra_payload_provider()
                 if isinstance(extra_payload, dict):
                     payload.update(extra_payload)
+            # Episode identity is a reserved transport field and must not be
+            # replaceable by an optional simulator-specific payload provider.
+            payload["episode_generation"] = int(self._episode_generation)
 
             self.sim_state_pub.publish(payload)
             if self._sim_state_trace_path is not None:
@@ -721,23 +806,41 @@ class SimulatorBridge:
         provider = getattr(self.simulator, "_split_sim_perception_provider", None)
         if not callable(provider):
             return
+        contract_provider = getattr(self.simulator, "_split_sim_perception_contract_provider", None)
+        if not callable(contract_provider):
+            raise RuntimeError(
+                "Split perception publisher has no effective observation-contract provider."
+            )
+        perception_contract_sha256 = contract_provider()
+        if not isinstance(perception_contract_sha256, str) or len(perception_contract_sha256) != 64:
+            raise RuntimeError("Split perception observation-contract provider returned an invalid SHA-256.")
 
         try:
             perception_obs = provider()
             if perception_obs is None:
                 return
+            sim_time_ms = int(round(self.simulator.time() * 1000.0))
             if not self._logged_perception_obs_publish:
                 logger.info("Publishing split sim perception obs with {} values", len(perception_obs))
                 self._logged_perception_obs_publish = True
             if self.perception_obs_pub is not None:
                 self.perception_obs_pub.publish(
                     {
-                        "sim_time_ms": int(round(self.simulator.time() * 1000.0)),
+                        "sim_time_ms": sim_time_ms,
+                        "episode_generation": int(self._episode_generation),
                         "perception_obs": perception_obs,
+                        "perception_contract_sha256": perception_contract_sha256,
                     }
                 )
             if self.perception_obs_shm_pub is not None:
-                self.perception_obs_shm_pub.publish(perception_obs)
+                self.perception_obs_shm_pub.publish(
+                    perception_obs,
+                    sim_time_ms=sim_time_ms,
+                    contract_sha256=perception_contract_sha256,
+                    episode_generation=int(self._episode_generation),
+                )
+        except (RuntimeError, ValueError) as exc:
+            raise RuntimeError("Failed to publish authenticated perception obs.") from exc
         except Exception as exc:  # pragma: no cover - best effort side-channel
             logger.warning("Failed to publish perception obs: {}", exc)
 
@@ -749,7 +852,14 @@ class SimulatorBridge:
         return bool(getattr(self.robot_bridge, "received_external_active_command", False))
 
     def should_hold_physics(self) -> bool:
-        return bool(self._use_zmq_lowcmd and self._zmq_lowcmd_hold_physics)
+        # A reset request is queued from inside bridge.step(), after MuJoCo's
+        # start-of-step pending-reset check.  Hold the old episode here so it
+        # cannot consume one extra physics substep before the next loop enters
+        # the real reset boundary.
+        return bool(
+            getattr(self.simulator, "_pending_reset", False)
+            or (self._use_zmq_lowcmd and self._zmq_lowcmd_hold_physics)
+        )
 
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.

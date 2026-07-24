@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import zmq
 from loguru import logger
@@ -16,6 +17,8 @@ class SimStateSub:
         self.context: zmq.Context | None = None
         self.socket: zmq.Socket | None = None
         self.last_state: dict | None = None
+        self.last_receive_monotonic_ns: int | None = None
+        self.message_sequence = 0
 
     def start(self) -> None:
         self.context = zmq.Context()
@@ -31,7 +34,14 @@ class SimStateSub:
             return
         while True:
             try:
-                self.last_state = json.loads(self.socket.recv_string(zmq.NOBLOCK))
+                state = json.loads(self.socket.recv_string(zmq.NOBLOCK))
+                if not isinstance(state, dict):
+                    raise ValueError(
+                        f"sim-state payload must be a JSON object, got {type(state).__name__}"
+                    )
+                self.last_state = state
+                self.last_receive_monotonic_ns = time.monotonic_ns()
+                self.message_sequence += 1
             except zmq.Again:
                 break
 

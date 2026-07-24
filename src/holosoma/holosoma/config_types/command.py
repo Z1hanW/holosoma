@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any
+from typing import Annotated, Any, Literal
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+
+# These bounds are intentionally generous relative to normal motion clips,
+# but prevent malformed scientific configs from allocating enormous smoothing
+# kernels or overflowing segment-index arithmetic before runtime validation.
+MAX_CONTACT_AWARE_SMOOTHING_STEPS = 4096
+MAX_CONTACT_AWARE_SEGMENT_STEPS = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,9 @@ class NoiseToInitialPoseConfig:
 
     dof_pos: float = 0.0
     """Noise scale for the initial dof position."""
+
+    dof_vel: float = 0.0
+    """Noise scale for the initial dof velocity in rad/s."""
 
     root_pos: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     """noise scale for root position x, y, z."""
@@ -148,11 +159,35 @@ class MotionConfig:
     """Optional root directory of exported per-clip ``contact_intervals.json`` files.
 
     When set, adaptive timestep sampling logs additional contact-relative probability masses
-    to W&B/TensorBoard, and uniform ``t1`` window sampling can use the same bank. The bank is
-    matched by clip id, so it can live outside the motion bank.
+    to W&B/TensorBoard, uniform ``t1`` window sampling can use the same bank, and contact-aware
+    command/button observations retain the exported training timebase even when reset sampling
+    is disabled (for example during evaluation). The bank is matched by clip id, so it can live
+    outside the motion bank.
     """
 
-    contact_aware_carry_window_mode: str = "rel_z"
+    contact_interval_runtime_prepend_compensation: bool = False
+    """Convert exported wall-clock contact intervals into runtime motion time.
+
+    Contact exporters index physical rollout steps, while the multi-clip
+    runtime prepend holds motion time at zero.  New runs that combine those
+    two features must enable this conversion explicitly.  The default remains
+    ``False`` so checkpoints trained with the legacy, uncompensated timeline
+    keep their original observation/reward semantics when evaluated or
+    resumed.
+    """
+
+    contact_aware_button_window_mode: Literal[
+        "contact_interval",
+        "kinematic_lift",
+    ] = "contact_interval"
+    """How automatic pickup/drop button transition labels are derived.
+
+    ``contact_interval`` preserves the legacy exported-sidecar behavior.
+    ``kinematic_lift`` uses the source motion's object-to-root relative-height
+    trace and is deliberately independent of the root-command carry window.
+    """
+
+    contact_aware_carry_window_mode: Literal["rel_z", "peak_height"] = "rel_z"
     """How contact-aware root-command active windows are derived.
 
     ``rel_z`` preserves the original object-root relative-height rule. ``peak_height`` uses
@@ -160,26 +195,41 @@ class MotionConfig:
     stably near the clip's peak carry height.
     """
 
-    contact_aware_peak_height_alpha: float = 0.91
+    contact_aware_peak_height_alpha: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.91
     """Peak-height fraction used by ``contact_aware_carry_window_mode='peak_height'``.
 
     The threshold is ``min_height + alpha * (max_height - min_height)``.
     """
 
-    contact_aware_peak_height_smoothing_steps: int = 5
+    contact_aware_peak_height_smoothing_steps: Annotated[
+        int,
+        Field(strict=True, ge=1, le=MAX_CONTACT_AWARE_SMOOTHING_STEPS),
+    ] = 5
     """Centered edge-padded moving-average window for peak-height carry-window detection."""
 
-    contact_aware_sparse_root_command_mode: str = "tracking_error"
+    contact_aware_sparse_root_command_mode: Literal[
+        "tracking_error",
+        "t1_aligned_segment",
+    ] = "tracking_error"
     """Root command used by ``actor_obs_root_contact_aware``.
 
     ``tracking_error`` preserves the original robot-to-target root delta. ``t1_aligned_segment``
     uses a non-overlap motion segment command anchored at carry-window start ``t1``.
     """
 
-    contact_aware_sparse_root_segment_steps: int = 30
+    contact_aware_sparse_root_segment_steps: Annotated[
+        int,
+        Field(strict=True, ge=1, le=MAX_CONTACT_AWARE_SEGMENT_STEPS),
+    ] = 30
     """Segment length, in motion frames, for ``contact_aware_sparse_root_command_mode='t1_aligned_segment'``."""
 
-    contact_aware_sparse_root_zero_yaw_threshold_deg: float = 0.0
+    contact_aware_sparse_root_zero_yaw_threshold_deg: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=180.0, allow_inf_nan=False),
+    ] = 0.0
     """Zero sparse yaw commands whose absolute value is at or below this threshold in degrees."""
 
     uniform_t1_window_sampling_enabled: bool = False

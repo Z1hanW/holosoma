@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from holosoma.managers.observation.base import ObservationTermBase
+from holosoma.managers.observation.base import ObservationTermBase, reusable_observation_base_term
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.utils.rotations import (
     calc_heading,
@@ -62,6 +62,7 @@ def get_projected_gravity(env: WholeBodyTrackingManager) -> torch.Tensor:
     return quat_rotate_inverse(_base_quat(env), gravity_vector(env), w_last=True)
 
 
+@reusable_observation_base_term
 def base_lin_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Base linear velocity in base frame.
 
@@ -74,6 +75,7 @@ def base_lin_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
     return get_base_lin_vel(env)
 
 
+@reusable_observation_base_term
 def base_ang_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Base angular velocity in base frame.
 
@@ -98,6 +100,7 @@ def projected_gravity(env: WholeBodyTrackingManager) -> torch.Tensor:
     return get_projected_gravity(env)
 
 
+@reusable_observation_base_term
 def dof_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Joint positions relative to default positions.
 
@@ -110,6 +113,7 @@ def dof_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
     return env.simulator.dof_pos - env.default_dof_pos
 
 
+@reusable_observation_base_term
 def dof_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Joint velocities.
 
@@ -122,6 +126,7 @@ def dof_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
     return env.simulator.dof_vel
 
 
+@reusable_observation_base_term
 def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Last actions taken by the policy.
 
@@ -521,6 +526,7 @@ def _clip_pickup_goal_xy_yaw_root_heading(
     return cached
 
 
+@reusable_observation_base_term
 def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     return motion_command.command
@@ -679,6 +685,7 @@ def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return pos.view(env.num_envs, -1)
 
 
+@reusable_observation_base_term
 def motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     _, ori = subtract_frame_transforms(
@@ -717,6 +724,7 @@ def robot_body_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return mat[..., :2].reshape(mat.shape[0], -1)
 
 
+@reusable_observation_base_term
 def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     pos, _ = subtract_frame_transforms(
@@ -728,6 +736,7 @@ def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return pos.view(env.num_envs, -1)
 
 
+@reusable_observation_base_term
 def obj_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     _, ori = subtract_frame_transforms(
@@ -740,6 +749,7 @@ def obj_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return mat[..., :2].reshape(mat.shape[0], -1)
 
 
+@reusable_observation_base_term
 def obj_target_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Target object position in robot-ref frame."""
     motion_command = _get_motion_command_and_assert_type(env)
@@ -755,6 +765,7 @@ def obj_target_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return pos_b.view(env.num_envs, -1)
 
 
+@reusable_observation_base_term
 def obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Target object orientation in robot-ref frame as rot6d."""
     motion_command = _get_motion_command_and_assert_type(env)
@@ -771,6 +782,7 @@ def obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return rot_mat[..., :2].reshape(rot_mat.shape[0], -1)
 
 
+@reusable_observation_base_term
 def obj_size(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Active object size from motion metadata."""
     motion_command = _get_motion_command_and_assert_type(env)
@@ -780,6 +792,15 @@ def obj_size(env: WholeBodyTrackingManager) -> torch.Tensor:
 
 
 def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Legacy v1 object-velocity observation retained for checkpoint identity.
+
+    This historical implementation incorrectly treated a velocity as a point
+    and subtracted robot position (metres) from object velocity (metres/sec).
+    New configurations must use :func:`obj_lin_vel_b_v2`; keeping this symbol
+    unchanged lets deployment reject old metadata explicitly instead of
+    silently changing the semantics of an existing checkpoint.
+    """
+
     motion_command = _get_motion_command_and_assert_type(env)
     unit_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
     vel_b, _ = subtract_frame_transforms(
@@ -789,6 +810,17 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
         unit_quat,
     )
     return vel_b.view(env.num_envs, -1)
+
+
+def obj_lin_vel_b_v2(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Rotate object world linear velocity into the robot-reference frame."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    return quat_rotate_inverse(
+        motion_command.robot_ref_quat_w,
+        motion_command.simulator_object_lin_vel_w,
+        w_last=True,
+    ).view(env.num_envs, -1)
 
 
 def obj_ang_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:

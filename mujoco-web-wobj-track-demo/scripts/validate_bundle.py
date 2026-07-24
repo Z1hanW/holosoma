@@ -98,7 +98,7 @@ def main() -> None:
     assert config["observation"]["actor_obs_concatenate"] is True, config["observation"]
     assert config["use_root_reference_at_clip_start"] is True, config
     assert config["prefer_sim_ref_from_sim_state"] is True, config
-    assert config["apply_training_motion_transitions"] is False, config
+    assert config["apply_training_motion_transitions"] is True, config
     assert motion_cfg["frame_count"] > 0
     assert motion_cfg["object_pos_w"] is not None
     assert motion_cfg["object_quat_wxyz"] is not None

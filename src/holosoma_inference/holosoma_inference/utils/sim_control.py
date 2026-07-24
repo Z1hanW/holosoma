@@ -42,9 +42,9 @@ class SimControlPush:
         except Exception as exc:
             logger.warning("Sim control publish failed: {}", exc)
 
-    def request_reset(self, reason: str, motion_init_mode: str | None = None) -> None:
+    def request_reset(self, reason: str, motion_init_mode: str | None = None) -> bool:
         if not self.enabled or self.socket is None:
-            return
+            return False
         payload_dict = {"action": "reset", "reason": str(reason)}
         if motion_init_mode is not None:
             payload_dict["motion_init_mode"] = str(motion_init_mode)
@@ -52,13 +52,14 @@ class SimControlPush:
         for _ in range(20):
             try:
                 self.socket.send_string(payload, zmq.NOBLOCK)
-                return
+                return True
             except zmq.Again:
                 time.sleep(0.01)
             except Exception as exc:
                 logger.warning("Sim control reset publish failed: {}", exc)
-                return
+                return False
         logger.warning("Sim control reset publish dropped after retries")
+        return False
 
     def close(self) -> None:
         socket = self.socket
@@ -99,6 +100,7 @@ class ManualRootCommandPub:
         enabled: bool,
         mode: str,
         command: list[float] | tuple[float, float, float],
+        pickup_button: float | bool | None = None,
         drop_button: float | bool | None = None,
     ) -> None:
         if not self.enabled or self.socket is None:
@@ -109,6 +111,8 @@ class ManualRootCommandPub:
             "command": [float(command[0]), float(command[1]), float(command[2])],
             "time": time.time(),
         }
+        if pickup_button is not None:
+            payload["pickup_button"] = 1.0 if bool(pickup_button) else 0.0
         if drop_button is not None:
             payload["drop_button"] = 1.0 if bool(drop_button) else 0.0
         try:

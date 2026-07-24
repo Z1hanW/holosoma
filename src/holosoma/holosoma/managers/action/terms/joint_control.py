@@ -44,7 +44,10 @@ class JointPositionActionTerm(ActionTermBase):
         # Initialize torque buffer
         self.torques = torch.zeros(env.num_envs, self._action_dim, device=env.device)
 
-        # Cache previous DOF velocities for derivative control
+        # Only velocity control consumes this history. Keep the tensor for the
+        # compatibility accessor, but avoid a redundant device copy on every
+        # physics substep for the P/T controllers.
+        self._uses_prev_dof_vel = env.robot_config.control.control_type == "V"
         self._prev_dof_vel = torch.zeros(env.num_envs, env.num_dof, device=env.device)
 
         # Default actuator scaling (may be overridden by randomization terms)
@@ -149,8 +152,9 @@ class JointPositionActionTerm(ActionTermBase):
         self.torques[:] = self._compute_torques(self._actions_after_delay)
         # Apply torques to simulator
         self.env.simulator.apply_torques_at_dof(self.torques)
-        # Cache velocities for next derivative computation
-        self._prev_dof_vel.copy_(self.env.simulator.dof_vel)
+        # Cache velocities only for the V-controller derivative term.
+        if self._uses_prev_dof_vel:
+            self._prev_dof_vel.copy_(self.env.simulator.dof_vel)
 
     def _compute_torques(self, actions: torch.Tensor) -> torch.Tensor:
         """Compute torques from actions using PD controller.
@@ -219,11 +223,13 @@ class JointPositionActionTerm(ActionTermBase):
         else:
             self.torques[env_ids] = 0.0
 
-        # Reset cached velocities
-        if env_ids is None:
-            self._prev_dof_vel.zero_()
-        else:
-            self._prev_dof_vel[env_ids] = 0.0
+        # P/T control never reads this buffer, so resetting it would only add a
+        # device kernel on the reset hot path.
+        if self._uses_prev_dof_vel:
+            if env_ids is None:
+                self._prev_dof_vel.zero_()
+            else:
+                self._prev_dof_vel[env_ids] = 0.0
 
     # ------------------------------------------------------------------
     # Hooks for randomization manager

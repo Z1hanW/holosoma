@@ -345,7 +345,7 @@ for path_entry in sys.path:
 sys.path = sanitized_sys_path
 
 try:
-    import torch
+    from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
     from holosoma.utils.eval_utils import load_checkpoint
 except Exception:
     print(json.dumps({}))
@@ -407,7 +407,7 @@ def resolve_saved_path(raw_path: str | None) -> str | None:
 try:
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
-        blob = torch.load(checkpoint_path, map_location="cpu")
+        blob, _checkpoint_sha256 = load_verified_torch_checkpoint(checkpoint_path, map_location="cpu")
 except Exception:
     print(json.dumps({}))
     sys.exit(0)
@@ -1178,6 +1178,9 @@ echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
+if is_truthy "${VISER_ENABLE_PICKUP_BUTTON_GUI:-0}"; then
+  echo "[INFO] pickup_button_gui=${VISER_ENABLE_PICKUP_BUTTON_GUI} pickup_button_default=${VISER_PICKUP_BUTTON_DEFAULT:-1}"
+fi
 if is_truthy "${VISER_ENABLE_DROP_BUTTON_GUI:-0}"; then
   echo "[INFO] drop_button_gui=${VISER_ENABLE_DROP_BUTTON_GUI} drop_button_default=${VISER_DROP_BUTTON_DEFAULT:-0}"
 fi
@@ -1207,20 +1210,23 @@ echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
 echo "  2) Set 'Root dX/dY/dYaw' as the desired root-frame relative command."
 echo "  3) Use 'Zero Root Command' to reset the relative root command to zero."
-SIM_CONTROL_STEP=6
-if is_truthy "${VISER_ENABLE_DROP_BUTTON_GUI:-0}"; then
-  echo "  4) Use 'Drop Control > Drop Button' to switch actor_obs_drop_button from 0 to 1."
-  echo "  5) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
-  echo "  6) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
-  SIM_CONTROL_STEP=7
-else
-  echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
-  echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+NEXT_CONTROL_STEP=4
+if is_truthy "${VISER_ENABLE_PICKUP_BUTTON_GUI:-0}"; then
+  echo "  ${NEXT_CONTROL_STEP}) Use 'Pickup Control > Pickup Button': 1 before pickup, then switch to 0 at carry start."
+  NEXT_CONTROL_STEP=$((NEXT_CONTROL_STEP + 1))
 fi
+if is_truthy "${VISER_ENABLE_DROP_BUTTON_GUI:-0}"; then
+  echo "  ${NEXT_CONTROL_STEP}) Use 'Drop Control > Drop Button' to switch actor_obs_drop_button from 0 to 1."
+  NEXT_CONTROL_STEP=$((NEXT_CONTROL_STEP + 1))
+fi
+echo "  ${NEXT_CONTROL_STEP}) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
+NEXT_CONTROL_STEP=$((NEXT_CONTROL_STEP + 1))
+echo "  ${NEXT_CONTROL_STEP}) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+NEXT_CONTROL_STEP=$((NEXT_CONTROL_STEP + 1))
 if is_truthy "${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"; then
-  echo "  ${SIM_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
+  echo "  ${NEXT_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
 else
-  echo "  ${SIM_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the selected motion state)."
+  echo "  ${NEXT_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the selected motion state)."
 fi
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"

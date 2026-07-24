@@ -282,7 +282,14 @@ def validate_keep_bank_copy(
             except Exception as exc:
                 bad.append(f"{clip_dir.name}: invalid metadata.json: {exc}")
         if not clip_id:
-            clip_id = clip_dir.name.split("_", 1)[1].strip() if "_" in clip_dir.name else clip_dir.name.strip()
+            normalized = clip_dir.name.strip()
+            if normalized in clip_ids:
+                clip_id = normalized
+            else:
+                prefix, separator, suffix = normalized.partition("_")
+                clip_id = suffix.strip() if separator and prefix.isdecimal() and suffix.strip() else normalized
+        if clip_id in contact_ids:
+            bad.append(f"{clip_id}: duplicate contact directory")
         contact_ids.add(clip_id)
         for file_name in required_contact_files:
             if not (clip_dir / file_name).is_file():

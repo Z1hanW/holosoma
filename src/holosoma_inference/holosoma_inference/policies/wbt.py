@@ -1,13 +1,16 @@
+import hashlib
+import io
 import json
+import math
 import os
 import sys
 import threading
 import time
+from collections.abc import Mapping
+from numbers import Integral, Real
 from pathlib import Path
 
 import numpy as np
-import onnx
-import onnxruntime
 import pinocchio as pin
 from defusedxml import ElementTree
 from loguru import logger
@@ -18,6 +21,20 @@ from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
+from holosoma_inference.utils.button_window_contract import (
+    embedded_button_window_contract_from_metadata,
+    kinematic_lift_window_from_rel_z_np,
+    validated_contact_aware_button_window_mode,
+)
+from holosoma_inference.utils.contact_sidecar_contract import (
+    embedded_contact_sidecar_contract_from_metadata,
+    policy_requires_contact_window,
+)
+from holosoma_inference.utils.embedded_motion_timeline import (
+    embedded_motion_timeline_contract_from_metadata,
+    embedded_motion_tensors_sha256,
+    read_stable_regular_file_bytes,
+)
 from holosoma_inference.utils.math.misc import get_index_of_a_in_b
 from holosoma_inference.utils.math.quat import (
     matrix_from_quat,
@@ -32,12 +49,142 @@ from holosoma_inference.utils.math.quat import (
     xyzw_to_wxyz,
 )
 from holosoma_inference.utils.policy_overlay import PolicyOverlayPub
+from holosoma_inference.utils.policy_contract import (
+    actor_perception_input_name_from_metadata,
+    effective_motion_transition_settings_from_metadata,
+    perception_observation_contract_sha256_from_metadata,
+    validate_onnx_policy_contract,
+)
 from holosoma_inference.utils.sim_control import ManualRootCommandSub
 from holosoma_inference.utils.sim_state import SimStateSub
 
 
 def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
+
+
+_ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS_ENV = (
+    "HOLOSOMA_ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS"
+)
+
+
+def _validated_runtime_motion_transition_settings(
+    metadata: Mapping[str, object],
+    *,
+    apply_training_motion_transitions: bool,
+) -> dict[str, object]:
+    """Validate the artifact timeline and reject a silently raw WBT rollout."""
+
+    if type(apply_training_motion_transitions) is not bool:
+        raise ValueError("task.apply_training_motion_transitions must be boolean.")
+    settings = effective_motion_transition_settings_from_metadata(metadata)
+    has_applied_transition = any(
+        bool(settings[phase_name]["applied"])
+        for phase_name in ("prepend", "append")
+    )
+    if has_applied_transition and not apply_training_motion_transitions:
+        message = (
+            "This WBT artifact was trained with an authenticated effective motion transition, but "
+            "task.apply_training_motion_transitions=False would execute a non-equivalent raw timeline."
+        )
+        if not _truthy_env(_ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS_ENV):
+            raise RuntimeError(
+                message
+                + f" Set {_ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS_ENV}=1 only for an "
+                "explicitly non-scientific diagnostic rollout."
+            )
+        logger.warning(
+            "{} {}=1 explicitly permits this non-equivalent diagnostic rollout.",
+            message,
+            _ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS_ENV,
+        )
+    return settings
+
+
+def _map_source_window_to_materialized_timeline(
+    window: tuple[int, int],
+    *,
+    source_semantics: str,
+    prepend_steps: int,
+) -> tuple[int, int]:
+    """Map a training motion-time window onto a materialized runtime prepend.
+
+    Global training holds ``time_steps == 0`` throughout the runtime prepend.
+    Therefore a source window beginning at zero includes the whole prefix;
+    positive starts are shifted after it.
+    """
+
+    start, end = (int(window[0]), int(window[1]))
+    prepend_steps = int(prepend_steps)
+    if source_semantics != "global_multi_clip_runtime" or prepend_steps <= 0:
+        return start, end
+    return (0 if start == 0 else prepend_steps + start, prepend_steps + end)
+
+
+def _infer_contact_export_clip_id(directory_name: str) -> str:
+    """Strip an exporter ordering prefix without corrupting normal clip IDs."""
+
+    normalized = str(directory_name).strip()
+    prefix, separator, suffix = normalized.partition("_")
+    if separator and prefix.isdecimal() and suffix.strip():
+        return suffix.strip()
+    return normalized
+
+
+def _resolve_contact_export_clip_id(directory_name: str, active_clip_ids: set[str]) -> str:
+    normalized = str(directory_name).strip()
+    if normalized in active_clip_ids:
+        return normalized
+    return _infer_contact_export_clip_id(normalized)
+
+
+_CONTACT_WINDOW_OBSERVATION_TERMS = frozenset(
+    {
+        "sparse_target_root_trajectory_command_contact_aware",
+        "drop_button",
+        "pickup_button",
+    }
+)
+
+_MAX_CONTACT_AWARE_SMOOTHING_STEPS = 4096
+
+
+def _validated_contact_aware_carry_window_config(
+    motion_cfg: Mapping[str, object],
+) -> tuple[str, float, int]:
+    """Validate the serialized training values again at their point of use."""
+
+    mode_raw = motion_cfg.get("contact_aware_carry_window_mode", "rel_z")
+    if not isinstance(mode_raw, str) or mode_raw not in {"rel_z", "peak_height"}:
+        raise ValueError(
+            "motion_config.contact_aware_carry_window_mode must be exactly "
+            f"'rel_z' or 'peak_height', got {mode_raw!r}."
+        )
+
+    alpha_raw = motion_cfg.get("contact_aware_peak_height_alpha", 0.91)
+    if (
+        isinstance(alpha_raw, (bool, np.bool_))
+        or not isinstance(alpha_raw, Real)
+        or not math.isfinite(float(alpha_raw))
+        or not 0.0 <= float(alpha_raw) <= 1.0
+    ):
+        raise ValueError(
+            "motion_config.contact_aware_peak_height_alpha must be a finite real number "
+            f"in [0, 1], got {alpha_raw!r}."
+        )
+
+    smoothing_raw = motion_cfg.get("contact_aware_peak_height_smoothing_steps", 5)
+    if (
+        isinstance(smoothing_raw, (bool, np.bool_))
+        or not isinstance(smoothing_raw, Integral)
+        or not 1 <= int(smoothing_raw) <= _MAX_CONTACT_AWARE_SMOOTHING_STEPS
+    ):
+        raise ValueError(
+            "motion_config.contact_aware_peak_height_smoothing_steps must be an integer in "
+            f"[1, {_MAX_CONTACT_AWARE_SMOOTHING_STEPS}], got {smoothing_raw!r}."
+        )
+
+    return mode_raw, float(alpha_raw), int(smoothing_raw)
 
 
 FAKE_BODY_NAME_ALIASES: dict[str, str] = {
@@ -126,19 +273,105 @@ class MotionData:
     _OBJECT_SIZE_KEYS = (
         "object_size",
         "box_size",
-        "object_scale",
-        "box_scale",
     )
+    _OBJECT_SCALE_KEYS = ("object_scale", "box_scale")
 
-    def __init__(self, motion_path: Path, robot_dof_names: list[str], body_name_ref: str):
+    def __init__(
+        self,
+        motion_path: Path,
+        robot_dof_names: list[str],
+        body_name_ref: str,
+        *,
+        motion_payload: bytes | None = None,
+        expected_source_sha256: str | None = None,
+    ):
         if motion_path.suffix.lower() != ".npz":
             raise ValueError(f"Only .npz motion files are supported in inference: {motion_path}")
+        if motion_payload is None:
+            motion_payload = read_stable_regular_file_bytes(
+                motion_path,
+                label="Inference motion source",
+            )
+        elif not isinstance(motion_payload, bytes) or not motion_payload:
+            raise ValueError("motion_payload must be non-empty immutable bytes when provided.")
+        source_sha256 = hashlib.sha256(motion_payload).hexdigest()
+        if expected_source_sha256 is not None:
+            if (
+                not isinstance(expected_source_sha256, str)
+                or len(expected_source_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in expected_source_sha256)
+            ):
+                raise ValueError("expected_source_sha256 must be a lowercase SHA-256 digest.")
+            if source_sha256 != expected_source_sha256:
+                raise ValueError(
+                    "External motion source SHA-256 does not match patched ONNX provenance: "
+                    f"expected={expected_source_sha256}, actual={source_sha256}, path={motion_path}."
+                )
 
-        with np.load(motion_path, allow_pickle=True) as data:
-            body_names = self._decode_names(data["body_names"])
-            joint_names = self._decode_names(data["joint_names"])
+        try:
+            archive = np.load(io.BytesIO(motion_payload), allow_pickle=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Motion file {motion_path} must be a non-pickled NumPy NPZ archive."
+            ) from exc
+        if not isinstance(archive, np.lib.npyio.NpzFile):
+            raise ValueError(f"Motion file {motion_path} must be a NumPy NPZ archive.")
+        with archive as data:
+            required_keys = {
+                "body_names",
+                "joint_names",
+                "joint_pos",
+                "joint_vel",
+                "body_pos_w",
+                "body_quat_w",
+            }
+            missing_keys = sorted(required_keys.difference(data.files))
+            if missing_keys:
+                raise ValueError(f"Motion file {motion_path} is missing required fields: {missing_keys}.")
+            if "fps" not in data:
+                raise ValueError(f"Motion file {motion_path} is missing required scalar fps metadata.")
+            fps_values = np.asarray(data["fps"]).reshape(-1)
+            if fps_values.size != 1:
+                raise ValueError(
+                    f"Motion file {motion_path} fps metadata must contain exactly one value, "
+                    f"got shape {np.asarray(data['fps']).shape}."
+                )
+            if fps_values.dtype.kind not in {"i", "u", "f"}:
+                raise ValueError(
+                    f"Motion file {motion_path} fps metadata must be a real numeric scalar, "
+                    f"got dtype {fps_values.dtype}."
+                )
+            try:
+                fps = float(fps_values[0])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Motion file {motion_path} fps metadata must be numeric.") from exc
+            if not math.isfinite(fps) or fps <= 0.0:
+                raise ValueError(
+                    f"Motion file {motion_path} fps metadata must be finite and positive, got {fps!r}."
+                )
 
-            joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
+            try:
+                body_names_raw = data["body_names"]
+                joint_names_raw = data["joint_names"]
+            except ValueError as exc:
+                raise ValueError(
+                    f"Motion file {motion_path} contains pickled/object name arrays; "
+                    "use fixed-width Unicode or bytes arrays."
+                ) from exc
+            body_names = self._decode_names(
+                body_names_raw,
+                field="body_names",
+                source=motion_path,
+            )
+            joint_names = self._decode_names(
+                joint_names_raw,
+                field="joint_names",
+                source=motion_path,
+            )
+
+            joint_pos = self._load_float_array(data, "joint_pos", source=motion_path)
+            if joint_pos.ndim != 2:
+                raise ValueError(f"Unexpected joint_pos shape {joint_pos.shape} in {motion_path}; expected rank 2.")
             if joint_pos.shape[1] == len(joint_names) + 7:
                 joint_pos = joint_pos[:, 7:]
             elif joint_pos.shape[1] != len(joint_names):
@@ -147,7 +380,9 @@ class MotionData:
                     f"expected {len(joint_names)} or {len(joint_names) + 7} columns."
                 )
 
-            joint_vel = np.asarray(data["joint_vel"], dtype=np.float32)
+            joint_vel = self._load_float_array(data, "joint_vel", source=motion_path)
+            if joint_vel.ndim != 2:
+                raise ValueError(f"Unexpected joint_vel shape {joint_vel.shape} in {motion_path}; expected rank 2.")
             if joint_vel.shape[1] == len(joint_names) + 6:
                 joint_vel = joint_vel[:, 6:]
             elif joint_vel.shape[1] != len(joint_names):
@@ -156,21 +391,105 @@ class MotionData:
                     f"expected {len(joint_names)} or {len(joint_names) + 6} columns."
                 )
 
-            body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
-            body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
-            object_pos_w = np.asarray(data["object_pos_w"], dtype=np.float32) if "object_pos_w" in data else None
-            object_quat_w = np.asarray(data["object_quat_w"], dtype=np.float32) if "object_quat_w" in data else None
-            self.object_size = self._extract_object_size_np(data, joint_pos.shape[0], source=str(motion_path))
+            body_pos_w = self._load_float_array(data, "body_pos_w", source=motion_path)
+            body_quat_w = self._load_float_array(data, "body_quat_w", source=motion_path)
+            object_pos_w = (
+                self._load_float_array(data, "object_pos_w", source=motion_path)
+                if "object_pos_w" in data
+                else None
+            )
+            object_quat_w = (
+                self._load_float_array(data, "object_quat_w", source=motion_path)
+                if "object_quat_w" in data
+                else None
+            )
+            object_size = (
+                self._extract_object_size_np(data, joint_pos.shape[0], source=str(motion_path))
+                if object_pos_w is not None
+                else np.ones((joint_pos.shape[0], 3), dtype=np.float32)
+            )
+
+        frame_count = int(joint_pos.shape[0])
+        if frame_count <= 0:
+            raise ValueError(f"Motion file {motion_path} must contain at least one frame.")
+        if joint_vel.shape[0] != frame_count:
+            raise ValueError(
+                f"Motion frame-count mismatch in {motion_path}: joint_pos has {frame_count} frames but "
+                f"joint_vel has {joint_vel.shape[0]}."
+            )
+        expected_body_pos_shape = (frame_count, len(body_names), 3)
+        if body_pos_w.shape != expected_body_pos_shape:
+            raise ValueError(
+                f"Unexpected body_pos_w shape {body_pos_w.shape} in {motion_path}; "
+                f"expected {expected_body_pos_shape}."
+            )
+        expected_body_quat_shape = (frame_count, len(body_names), 4)
+        if body_quat_w.shape != expected_body_quat_shape:
+            raise ValueError(
+                f"Unexpected body_quat_w shape {body_quat_w.shape} in {motion_path}; "
+                f"expected {expected_body_quat_shape}."
+            )
+        if (object_pos_w is None) != (object_quat_w is None):
+            raise ValueError(
+                f"Motion file {motion_path} must provide object_pos_w and object_quat_w together."
+            )
+        if object_pos_w is not None:
+            if object_pos_w.shape != (frame_count, 3):
+                raise ValueError(
+                    f"Unexpected object_pos_w shape {object_pos_w.shape} in {motion_path}; "
+                    f"expected {(frame_count, 3)}."
+                )
+            if object_quat_w.shape != (frame_count, 4):
+                raise ValueError(
+                    f"Unexpected object_quat_w shape {object_quat_w.shape} in {motion_path}; "
+                    f"expected {(frame_count, 4)}."
+                )
+        arrays_to_validate = {
+            "joint_pos": joint_pos,
+            "joint_vel": joint_vel,
+            "body_pos_w": body_pos_w,
+            "body_quat_w": body_quat_w,
+            "object_size": object_size,
+        }
+        if object_pos_w is not None:
+            arrays_to_validate["object_pos_w"] = object_pos_w
+            arrays_to_validate["object_quat_w"] = object_quat_w
+        for field, values in arrays_to_validate.items():
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"Motion field {field} in {motion_path} contains non-finite values.")
+        if np.any(object_size <= 0.0):
+            raise ValueError(f"Motion object_size in {motion_path} must contain strictly positive extents.")
+        for field, quaternions in (
+            ("body_quat_w", body_quat_w),
+            ("object_quat_w", object_quat_w),
+        ):
+            if quaternions is None:
+                continue
+            norms = np.linalg.norm(quaternions, axis=-1)
+            if not np.allclose(norms, 1.0, rtol=0.0, atol=1.0e-3):
+                raise ValueError(
+                    f"Motion field {field} in {motion_path} must contain unit WXYZ quaternions."
+                )
+
+        if len(set(robot_dof_names)) != len(robot_dof_names):
+            raise ValueError("Runtime robot DOF names must be unique when loading motion data.")
+        missing_dofs = [name for name in robot_dof_names if name not in joint_names]
+        if missing_dofs:
+            raise ValueError(f"Motion file {motion_path} is missing runtime robot DOFs: {missing_dofs}.")
+        if body_name_ref not in body_names:
+            raise ValueError(f"Reference body {body_name_ref!r} is absent from motion file {motion_path}.")
 
         joint_indices = get_index_of_a_in_b(robot_dof_names, joint_names)
         self.motion_path = motion_path
+        self.source_sha256 = source_sha256
+        self.source_size = len(motion_payload)
+        self.fps = fps
         self.body_names = tuple(body_names)
         self.joint_pos = joint_pos[:, joint_indices]
         self.joint_vel = joint_vel[:, joint_indices]
-        self.frame_count = self.joint_pos.shape[0]
-
-        if body_quat_w.ndim != 3 or body_quat_w.shape[2] != 4:
-            raise ValueError(f"Unexpected body_quat_w shape {body_quat_w.shape} in {motion_path}")
+        self.source_frame_count = frame_count
+        self.frame_count = frame_count
+        self.object_size = object_size
 
         self.ref_body_index = body_names.index(body_name_ref)
         self.ref_pos_w = body_pos_w[:, self.ref_body_index, :]
@@ -210,9 +529,28 @@ class MotionData:
     def _extract_object_size_np(cls, data: dict, length: int, *, source: str) -> np.ndarray:
         for key in cls._OBJECT_SIZE_KEYS:
             if key in data:
-                raw = np.asarray(data[key], dtype=np.float32)
+                raw = np.asarray(data[key])
+                if raw.dtype.kind != "f":
+                    raise ValueError(
+                        f"Motion field {key} in {source} must use a real floating dtype, got {raw.dtype}."
+                    )
                 return cls._normalize_object_size_array(raw, length, source=f"{source}:{key}")
+        scale_keys = [key for key in cls._OBJECT_SCALE_KEYS if key in data]
+        if scale_keys:
+            raise ValueError(
+                f"Motion file {source} provides mesh scale field(s) {scale_keys} but no physical "
+                "object_size/box_size extents; scale and size are not interchangeable."
+            )
         return np.ones((length, 3), dtype=np.float32)
+
+    @staticmethod
+    def _load_float_array(data, field: str, *, source: Path) -> np.ndarray:
+        raw = np.asarray(data[field])
+        if raw.dtype.kind != "f":
+            raise ValueError(
+                f"Motion field {field} in {source} must use a real floating dtype, got {raw.dtype}."
+            )
+        return raw.astype(np.float32, copy=False)
 
     @staticmethod
     def _resolve_root_body_index(body_names: list[str]) -> int:
@@ -225,14 +563,33 @@ class MotionData:
         return 0
 
     @staticmethod
-    def _decode_names(arr: np.ndarray) -> list[str]:
+    def _decode_names(arr: np.ndarray, *, field: str, source: Path) -> list[str]:
+        arr = np.asarray(arr)
+        if arr.dtype.kind not in {"U", "S"}:
+            raise ValueError(
+                f"Motion field {field} in {source} must use a Unicode/bytes string dtype, got {arr.dtype}."
+            )
+        if arr.ndim != 1 or arr.size == 0:
+            raise ValueError(f"Motion field {field} in {source} must be a non-empty rank-1 name array.")
         names = arr.tolist()
         decoded: list[str] = []
         for name in names:
             if isinstance(name, bytes):
-                decoded.append(name.decode("utf-8"))
+                try:
+                    decoded_name = name.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"Motion field {field} in {source} contains a non-UTF-8 name."
+                    ) from exc
             else:
-                decoded.append(str(name))
+                decoded_name = str(name)
+            if not decoded_name or decoded_name != decoded_name.strip() or "\x00" in decoded_name:
+                raise ValueError(
+                    f"Motion field {field} in {source} contains an empty, padded, or NUL name."
+                )
+            decoded.append(decoded_name)
+        if len(set(decoded)) != len(decoded):
+            raise ValueError(f"Motion field {field} in {source} contains duplicate names.")
         return decoded
 
 
@@ -275,6 +632,172 @@ def _smooth_1d_edge_padded(values: np.ndarray, window_steps: int) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid").astype(np.float32, copy=False)
 
 
+_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS = (
+    ("left_wrist", "right_wrist"),
+    (
+        "left_elbow",
+        "right_elbow",
+        "left_wrist_roll",
+        "right_wrist_roll",
+        "left_wrist_pitch",
+        "right_wrist_pitch",
+        "torso",
+    ),
+)
+_CONTACT_STAGE_RELEASE_LEAD_STEPS = 30
+_CONTACT_INTERVAL_FALLBACK_FILES = {
+    "left_wrist": "left_wrist_contact_interval_steps.npy",
+    "right_wrist": "right_wrist_contact_interval_steps.npy",
+    "left_elbow": "left_elbow_contact_interval_steps.npy",
+    "right_elbow": "right_elbow_contact_interval_steps.npy",
+    "left_wrist_roll": "left_wrist_roll_contact_interval_steps.npy",
+    "right_wrist_roll": "right_wrist_roll_contact_interval_steps.npy",
+    "left_wrist_pitch": "left_wrist_pitch_contact_interval_steps.npy",
+    "right_wrist_pitch": "right_wrist_pitch_contact_interval_steps.npy",
+    "torso": "torso_contact_interval_steps.npy",
+}
+_CONTACT_INTERVAL_REGION_ALIASES = {
+    "left_palm": "left_wrist",
+    "right_palm": "right_wrist",
+}
+
+
+def _normalize_contact_interval(raw_interval) -> tuple[int, int] | None:
+    if isinstance(raw_interval, (list, tuple)):
+        if len(raw_interval) != 2 or any(
+            isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral)
+            for value in raw_interval
+        ):
+            return None
+    try:
+        values = np.asarray(raw_interval).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if values.size != 2 or values.dtype.kind not in {"i", "u"}:
+        return None
+    start, end = int(values[0]), int(values[1])
+    if start < 0 or end <= start:
+        return None
+    return start, end
+
+
+def _select_primary_contact_interval(intervals_by_region: dict[str, object]) -> tuple[int, int] | None:
+    """Mirror the training-side union of all recognized carry regions."""
+
+    normalized: dict[str, tuple[int, int]] = {}
+    for raw_name, raw_interval in intervals_by_region.items():
+        name = _CONTACT_INTERVAL_REGION_ALIASES.get(str(raw_name).strip(), str(raw_name).strip())
+        interval = _normalize_contact_interval(raw_interval)
+        if name and interval is not None:
+            normalized[name] = interval
+
+    carry_intervals = [
+        normalized[name]
+        for region_group in _CONTACT_INTERVAL_PRIMARY_REGION_GROUPS
+        for name in region_group
+        if name in normalized
+    ]
+    if carry_intervals:
+        return (
+            min(interval[0] for interval in carry_intervals),
+            max(interval[1] for interval in carry_intervals),
+        )
+    if normalized:
+        return (
+            min(interval[0] for interval in normalized.values()),
+            max(interval[1] for interval in normalized.values()),
+        )
+    return None
+
+
+def _convert_contact_interval_timebase(
+    interval: tuple[int, int],
+    *,
+    metadata: Mapping[str, object] | None,
+    motion_fps: float | None,
+) -> tuple[int, int]:
+    """Convert exported contact steps to the active motion timebase.
+
+    This intentionally mirrors the training-side helper without importing the
+    training package into the standalone inference runtime.
+    """
+
+    if not metadata:
+        return int(interval[0]), int(interval[1])
+    raw_source_fps = metadata.get("contact_interval_fps", metadata.get("fps"))
+    if raw_source_fps is None:
+        return int(interval[0]), int(interval[1])
+    if (
+        isinstance(raw_source_fps, (bool, np.bool_))
+        or not isinstance(raw_source_fps, Real)
+        or isinstance(motion_fps, (bool, np.bool_))
+        or not isinstance(motion_fps, Real)
+    ):
+        raise ValueError(
+            f"Contact interval FPS metadata must be real numeric values: source={raw_source_fps!r}, "
+            f"motion={motion_fps!r}."
+        )
+    try:
+        source_fps = float(raw_source_fps)
+        target_fps = float(motion_fps)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Contact interval FPS metadata must be numeric: source={raw_source_fps!r}, "
+            f"motion={motion_fps!r}."
+        ) from exc
+    if (
+        not math.isfinite(source_fps)
+        or source_fps <= 0.0
+        or not math.isfinite(target_fps)
+        or target_fps <= 0.0
+    ):
+        raise ValueError(
+            f"Contact interval FPS values must be finite and positive: source={source_fps}, "
+            f"motion={target_fps}."
+        )
+    start_step, end_step = int(interval[0]), int(interval[1])
+    if math.isclose(source_fps, target_fps, rel_tol=0.0, abs_tol=1.0e-9):
+        return start_step, end_step
+
+    scale = target_fps / source_fps
+    converted_start = int(math.ceil(start_step * scale - 1.0e-9))
+    converted_end = int(math.ceil(end_step * scale - 1.0e-9))
+    if converted_end <= converted_start:
+        raise ValueError(
+            "Contact interval became empty after FPS conversion: "
+            f"interval={interval}, source_fps={source_fps}, motion_fps={target_fps}, "
+            f"converted={(converted_start, converted_end)}."
+        )
+    return converted_start, converted_end
+
+
+def _load_contact_interval_from_dir(clip_dir: Path) -> tuple[int, int] | None:
+    intervals_by_region: dict[str, object] = {}
+    json_path = clip_dir / "contact_intervals.json"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Ignoring invalid contact interval file '{}': {}", json_path, exc)
+        else:
+            if isinstance(payload, dict):
+                intervals_by_region.update(payload)
+
+    if not intervals_by_region:
+        for region_name, file_name in _CONTACT_INTERVAL_FALLBACK_FILES.items():
+            interval_path = clip_dir / file_name
+            if not interval_path.is_file():
+                continue
+            try:
+                intervals_by_region[region_name] = np.load(
+                    interval_path,
+                    allow_pickle=False,
+                )
+            except Exception as exc:
+                logger.warning("Ignoring invalid contact interval file '{}': {}", interval_path, exc)
+    return _select_primary_contact_interval(intervals_by_region)
+
+
 def _extract_motion_cfg_from_metadata(metadata: dict[str, object]) -> dict | None:
     experiment_config = metadata.get("experiment_config")
     if not isinstance(experiment_config, dict):
@@ -304,13 +827,42 @@ def _extract_control_dt_from_metadata(metadata: dict[str, object]) -> float | No
     experiment_config = metadata.get("experiment_config")
     if not isinstance(experiment_config, dict):
         return None
-    sim_cfg = experiment_config.get("simulator", {}).get("config", {}).get("sim", {})
+    simulator = experiment_config.get("simulator")
+    if simulator is None:
+        return None
+    if not isinstance(simulator, dict):
+        raise ValueError("experiment_config.simulator must be a mapping.")
+    simulator_config = simulator.get("config")
+    if simulator_config is None:
+        return None
+    if not isinstance(simulator_config, dict):
+        raise ValueError("experiment_config.simulator.config must be a mapping.")
+    sim_cfg = simulator_config.get("sim")
+    if sim_cfg is None:
+        return None
     if not isinstance(sim_cfg, dict):
+        raise ValueError("experiment_config.simulator.config.sim must be a mapping.")
+
+    has_fps = "fps" in sim_cfg
+    has_decimation = "control_decimation" in sim_cfg
+    if not has_fps and not has_decimation:
         return None
-    fps = float(sim_cfg.get("fps", 0.0) or 0.0)
-    control_decimation = float(sim_cfg.get("control_decimation", 0.0) or 0.0)
-    if fps <= 0.0 or control_decimation <= 0.0:
-        return None
+    if has_fps != has_decimation:
+        raise ValueError("Serialized simulator timebase must declare both fps and control_decimation.")
+
+    raw_fps = sim_cfg["fps"]
+    raw_decimation = sim_cfg["control_decimation"]
+    if isinstance(raw_fps, (bool, np.bool_)) or isinstance(raw_decimation, (bool, np.bool_)):
+        raise ValueError("Serialized simulator fps and control_decimation must be real numeric values.")
+    fps = float(raw_fps)
+    control_decimation = float(raw_decimation)
+    if (
+        not math.isfinite(fps)
+        or not math.isfinite(control_decimation)
+        or fps <= 0.0
+        or control_decimation <= 0.0
+    ):
+        raise ValueError("Serialized simulator fps and control_decimation must be finite and positive.")
     return control_decimation / fps
 
 
@@ -403,7 +955,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_command_0 = None
         self.ref_quat_xyzw_0 = None
         self.ref_pos_xyz_t = None
+        self._last_motion_output_timestep: int | None = None
         self._contact_aware_carry_window: tuple[int, int] | None = None
+        self._contact_aware_contact_window: tuple[int, int] | None = None
+        self._contact_aware_button_window: tuple[int, int] | None = None
+        self._motion_transition_prepend_steps = 0
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -427,6 +983,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._sim_state_sub: SimStateSub | None = None
         self._manual_sparse_root_command_sub: ManualRootCommandSub | None = None
         self._manual_sparse_root_command_log_key: tuple[bool, str] | None = None
+        self._manual_pickup_button_log_value: float | None = None
         self._manual_drop_button_log_value: float | None = None
         self._keyboard_sparse_root_command_enabled = _truthy_env("HOLOSOMA_KEYBOARD_ROOT_COMMAND")
         self._keyboard_sparse_root_command_mode = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE", "manual").strip().lower()
@@ -460,16 +1017,34 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_sparse_command_mode = "motion"
         self._last_sparse_manual_enabled = False
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
         self._auto_start_motion_clip_hold_start_time: float | None = None
         self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
+        self._motion_end_reset_episode_generation: int | None = None
         self._disable_motion_end_sim_reset = (
             _truthy_env("HOLOSOMA_DISABLE_AUTO_RESET")
             or _truthy_env("HOLOSOMA_DISABLE_MOTION_END_RESET")
             or _truthy_env("HOLOSOMA_DISABLE_CLIP_END_RESET")
         )
+        self._training_freeze_zero_prob = 0.0
+        self._training_freeze_zero_extra_holds = 0
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
+        self._logged_first_policy_step_debug = False
+        self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
+        self._suppress_root_reference_at_clip_start = False
+        self._warm_autostart_obs_history = os.environ.get("HOLOSOMA_WARM_AUTOSTART_OBS_HISTORY", "1") != "0"
+        self._dryrun_autostart_policy_history = os.environ.get(
+            "HOLOSOMA_DRYRUN_AUTOSTART_POLICY_HISTORY", "0"
+        ) != "0"
+        self._autostart_policy_history_prime_steps_override = os.environ.get(
+            "HOLOSOMA_AUTOSTART_POLICY_DRYRUN_STEPS", ""
+        ).strip()
+        self._auto_start_history_snapshot: dict[str, dict[str, np.ndarray]] | None = None
 
         obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
         self._uses_videomimic = any(
@@ -489,26 +1064,30 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._uses_sparse_root_command_contact_aware = (
             "sparse_target_root_trajectory_command_contact_aware" in obs_terms
         )
+        self._uses_contact_window_observation = bool(
+            obs_terms.intersection(_CONTACT_WINDOW_OBSERVATION_TERMS)
+        )
         self._uses_sparse_root_command = (
             "sparse_target_root_trajectory_command" in obs_terms
             or self._uses_sparse_root_command_contact_aware
         )
         self._uses_object_mocap_distill = "obj_current_pose_size_b" in obs_terms
-        self._uses_object_generalist = any(
-            term in obs_terms
-            for term in (
-                "obj_target_pose_size_b",
-                "obj_pos_b",
-                "obj_ori_b",
-                "obj_lin_vel_b",
-                "obj_ang_vel_b",
-            )
-        )
+        current_object_terms = {
+            "obj_size",
+            "obj_target_ori_b",
+            "obj_target_pos_b",
+            "obj_pos_b",
+            "obj_ori_b",
+        }
+        legacy_object_terms = {"obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"}
+        velocity_object_terms = legacy_object_terms | {"obj_lin_vel_b", "obj_ang_vel_b"}
+        self._uses_current_object_obs = current_object_terms.issubset(obs_terms)
+        self._uses_velocity_object_obs = velocity_object_terms.issubset(obs_terms)
         self._uses_legacy_object_obs = (
-            all(term in obs_terms for term in ("obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"))
-            and "obj_lin_vel_b" not in obs_terms
-            and "obj_ang_vel_b" not in obs_terms
+            legacy_object_terms.issubset(obs_terms)
+            and not {"obj_lin_vel_b", "obj_ang_vel_b"}.intersection(obs_terms)
         )
+        self._uses_object_generalist = self._uses_current_object_obs or self._uses_velocity_object_obs
         self._motion_data: MotionData | None = None
         self._motion_cfg: dict | None = None
         self._motion_align_quat_wxyz: np.ndarray | None = None
@@ -520,6 +1099,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._action_output_name: str | None = None
         self._onnx_output_fetch: list[str] = []
         self._motion_output_names: set[str] = set()
+        self._embedded_motion_frame_count: int | None = None
         self._motion_alignment_enabled = False
         try:
             self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
@@ -595,7 +1175,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._motion_index_offset != 0:
             logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
 
-        if self.config.task.use_sim_state:
+        if self.config.task.use_sim_state and not callable(
+            getattr(self.interface, "get_latest_sim_state_snapshot", None)
+        ):
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
             self._sim_state_sub.start()
 
@@ -695,11 +1277,21 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _should_use_root_reference_at_clip_start(self) -> bool:
         if not bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)):
             return False
-        use_root = int(self._get_motion_index()) == 0
+        if self._suppress_root_reference_at_clip_start:
+            return False
+        use_root = self._remaining_root_reference_clip_start_obs > 0 and int(self._get_motion_index()) == 0
         if use_root and not self._logged_root_reference_clip_start:
             logger.info("Using robot root as observation reference at clip start to match training step-0 semantics.")
             self._logged_root_reference_clip_start = True
         return use_root
+
+    def _consume_root_reference_at_clip_start(self) -> None:
+        """Consume the one observation for which training uses root as ref body."""
+        if self._remaining_root_reference_clip_start_obs <= 0:
+            return
+        # If the clock advanced before an actor observation could be built,
+        # the special step-0 state is no longer reproducible.
+        self._remaining_root_reference_clip_start_obs = 0
 
     def _get_observation_reference_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         if self._should_use_root_reference_at_clip_start():
@@ -713,24 +1305,175 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return np.asarray(robot_state_data[:, 3:7], dtype=np.float32)
         return self._get_ref_body_orientation_in_world(robot_state_data)
 
+    def _get_autostart_policy_history_prime_steps(self) -> int:
+        override = self._autostart_policy_history_prime_steps_override
+        if override:
+            try:
+                return max(0, int(override))
+            except ValueError:
+                if not getattr(self, "_logged_invalid_autostart_policy_history_prime_steps", False):
+                    self.logger.warning(
+                        "Ignoring invalid HOLOSOMA_AUTOSTART_POLICY_DRYRUN_STEPS={!r}",
+                        override,
+                    )
+                    self._logged_invalid_autostart_policy_history_prime_steps = True
+                return 0
+
+        actor_history_lengths = [
+            int(history_length)
+            for group_name, history_length in self.history_length_dict.items()
+            if str(group_name).startswith("actor_obs")
+        ]
+        history_len = max(actor_history_lengths, default=1)
+        return max(0, history_len - 1)
+
+    def _prime_auto_start_policy_history(self, robot_state_data: np.ndarray) -> bool:
+        """Run an explicitly requested, non-equivalent diagnostic warmup.
+
+        Training history contains only states reached by real simulator steps
+        and actions that were actually applied.  Repeated policy calls on one
+        frozen state cannot reproduce that contract, so this legacy diagnostic
+        is disabled by default and must never be used for scientific parity.
+        """
+        if not self._dryrun_autostart_policy_history or not self._warm_autostart_obs_history:
+            return False
+        if self._obs_input_name is None or self._action_output_name is None:
+            return False
+
+        prime_steps = self._get_autostart_policy_history_prime_steps()
+        if prime_steps <= 0:
+            return False
+
+        augmented_state = self._augment_robot_state_with_sim_state(robot_state_data)
+        if augmented_state is None:
+            return False
+
+        perception_input_name = getattr(
+            self,
+            "_perception_obs_input_name",
+            getattr(self, "_perception_input_name", None),
+        )
+        perception_obs: np.ndarray | None = None
+        if perception_input_name is not None:
+            perception_dim = self._get_onnx_input_dim(perception_input_name)
+            try:
+                perception_obs = self._get_split_perception_obs(
+                    perception_dim,
+                    target_sim_time_ms=self._get_control_tick_sim_time_ms(),
+                    target_episode_generation=self._get_control_tick_episode_generation(),
+                )
+            except RuntimeError as exc:
+                if not getattr(self, "_logged_auto_start_history_prime_waiting_for_perception_obs", False):
+                    self.logger.info("Skipping auto-start history priming until perception is available: {}", exc)
+                    self._logged_auto_start_history_prime_waiting_for_perception_obs = True
+                return False
+
+        self._reset_observation_history_state()
+        self._auto_start_history_snapshot = None
+        self.motion_timestep = 0
+        self.motion_start_timestep = None
+        self._last_clock_reading = None
+        self._last_motion_output_timestep = None
+        if self.motion_command_0 is not None:
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._refresh_motion_outputs_for_current_timestep()
+        self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = (
+            1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
+        )
+
+        def run_prime_policy(actor_obs: np.ndarray) -> None:
+            input_feed = {self._obs_input_name: actor_obs}
+            if perception_input_name is not None and perception_obs is not None:
+                input_feed[perception_input_name] = perception_obs
+            if self._time_step_input_name is not None:
+                input_feed[self._time_step_input_name] = np.array([[0]], dtype=np.float32)
+
+            outputs = self.policy(input_feed)
+            self._update_policy_action_state(
+                outputs[self._action_output_name],
+                label=f"ONNX output {self._action_output_name!r} during history priming",
+            )
+            if self._uses_motion_command and not self._should_source_motion_outputs_from_motion_data():
+                joint_pos = outputs.get("joint_pos")
+                joint_vel = outputs.get("joint_vel")
+                if joint_pos is not None and joint_vel is not None:
+                    self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+                    self.ref_quat_xyzw_t = outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t)
+                    self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+
+        seed_obs = self.prepare_obs_for_rl(augmented_state)
+        run_prime_policy(seed_obs["actor_obs"])
+
+        self._consume_root_reference_at_clip_start()
+
+        for _ in range(max(0, prime_steps - 1)):
+            primed_obs = self.prepare_obs_for_rl(augmented_state)
+            run_prime_policy(primed_obs["actor_obs"])
+
+        self._preserve_obs_history_on_next_motion_start = True
+        self._preserve_root_reference_state_on_next_motion_start = True
+        self.logger.info(
+            "Ran non-equivalent diagnostic auto-start history warmup over {} unpublished actor steps "
+            "at motion timestep 0.",
+            prime_steps,
+        )
+        return True
+
     @staticmethod
     def _extract_motion_config(metadata: dict) -> dict | None:
-        motion_cfg = metadata.get("motion_config")
-        if isinstance(motion_cfg, dict):
-            return motion_cfg
-
+        top_level_present = "motion_config" in metadata
+        top_level_cfg = metadata.get("motion_config")
         exp_cfg = metadata.get("experiment_config")
-        if not isinstance(exp_cfg, dict):
-            return None
-
-        motion_cfg = (
-            exp_cfg.get("command", {})
-            .get("setup_terms", {})
-            .get("motion_command", {})
-            .get("params", {})
-            .get("motion_config", {})
+        command = exp_cfg.get("command") if isinstance(exp_cfg, dict) else None
+        setup_terms = command.get("setup_terms") if isinstance(command, dict) else None
+        motion_command = (
+            setup_terms.get("motion_command")
+            if isinstance(setup_terms, dict)
+            else None
         )
-        return motion_cfg if isinstance(motion_cfg, dict) else None
+        params = motion_command.get("params") if isinstance(motion_command, dict) else None
+        nested_present = isinstance(params, dict) and "motion_config" in params
+        nested_cfg = params.get("motion_config") if nested_present else None
+
+        if nested_present:
+            if not isinstance(nested_cfg, dict):
+                raise ValueError(
+                    "experiment_config motion_config must be a mapping."
+                )
+            if top_level_present:
+                if not isinstance(top_level_cfg, dict):
+                    raise ValueError(
+                        "Top-level and experiment_config motion_config metadata disagree."
+                    )
+                canonical_top = json.dumps(
+                    top_level_cfg,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                canonical_nested = json.dumps(
+                    nested_cfg,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_top != canonical_nested:
+                    raise ValueError(
+                        "Top-level and experiment_config motion_config metadata disagree; "
+                        "the serialized experiment_config is canonical."
+                    )
+            return nested_cfg
+
+        if not top_level_present:
+            return None
+        if not isinstance(top_level_cfg, dict):
+            raise ValueError("Legacy top-level motion_config metadata must be a mapping.")
+        return top_level_cfg
 
     @staticmethod
     def _find_repo_root(start: Path) -> Path:
@@ -785,30 +1528,278 @@ class WholeBodyTrackingPolicy(BasePolicy):
             ref_name = "torso_link"
 
         robot_dof_names = metadata.get("dof_names") or list(self.config.robot.dof_names)
-        self._motion_data = MotionData(motion_path, list(robot_dof_names), ref_name)
+        embedded_timeline_contract = embedded_motion_timeline_contract_from_metadata(metadata)
+        expected_source_sha256 = (
+            embedded_timeline_contract["source_motion_sha256"]
+            if embedded_timeline_contract is not None
+            else None
+        )
+        self._motion_data = MotionData(
+            motion_path,
+            list(robot_dof_names),
+            ref_name,
+            expected_source_sha256=expected_source_sha256,
+        )
         self._motion_body_names = tuple(self._motion_data.body_names)
-        self._maybe_apply_training_motion_transitions_to_motion_data(metadata, ref_name)
+        self._motion_transition_prepend_steps = self._maybe_apply_training_motion_transitions_to_motion_data(
+            metadata, ref_name
+        )
+        if embedded_timeline_contract is not None:
+            has_effective_transition = bool(
+                int(embedded_timeline_contract["effective_prepend_steps"])
+                or int(embedded_timeline_contract["effective_append_steps"])
+            )
+            runtime_materialization = (
+                "effective_training_timeline"
+                if self.config.task.apply_training_motion_transitions
+                or not has_effective_transition
+                else "raw_unsafe_diagnostic"
+            )
+            if runtime_materialization == embedded_timeline_contract["materialization"]:
+                runtime_tensors_sha256, runtime_frame_count = embedded_motion_tensors_sha256(
+                    {
+                        "joint_pos": self._motion_data.joint_pos,
+                        "joint_vel": self._motion_data.joint_vel,
+                        "ref_pos_xyz": self._motion_data.ref_pos_w,
+                        "ref_quat_xyzw": self._motion_data.ref_quat_w[:, [1, 2, 3, 0]],
+                    }
+                )
+                if (
+                    runtime_tensors_sha256
+                    != embedded_timeline_contract["embedded_tensors_sha256"]
+                    or runtime_frame_count
+                    != int(embedded_timeline_contract["embedded_frame_count"])
+                ):
+                    raise RuntimeError(
+                        "External motion materialization does not reproduce the digest-bound "
+                        "timeline embedded in the ONNX artifact."
+                    )
+            else:
+                logger.warning(
+                    "External motion runtime materialization {} intentionally differs from ONNX "
+                    "artifact materialization {}; this is permitted only by the explicit unsafe "
+                    "diagnostic overrides already validated for this rollout.",
+                    runtime_materialization,
+                    embedded_timeline_contract["materialization"],
+                )
         self._motion_cfg = motion_cfg or {}
         self._contact_aware_carry_window = None
+        self._contact_aware_button_window = self._load_contact_aware_button_window(onnx_path)
+        if validated_contact_aware_button_window_mode(self._motion_cfg) == "contact_interval":
+            self._contact_aware_contact_window = self._contact_aware_button_window
+        else:
+            # Preserve the sidecar independently for rel-z root release
+            # capping.  Kinematic button labels must never become that cap.
+            self._contact_aware_contact_window = self._load_contact_interval_window(
+                onnx_path
+            )
+        freeze_prob_raw = self._motion_cfg.get("freeze_at_timestep_zero_prob", 0.0)
+        try:
+            freeze_prob = float(freeze_prob_raw or 0.0)
+        except (TypeError, ValueError):
+            freeze_prob = 0.0
+        self._training_freeze_zero_prob = min(max(freeze_prob, 0.0), 0.999)
+        freeze_holds_override = os.environ.get("HOLOSOMA_TRAINING_FREEZE_ZERO_EXTRA_HOLDS")
+        if freeze_holds_override not in (None, ""):
+            try:
+                self._training_freeze_zero_extra_holds = max(0, int(freeze_holds_override))
+            except ValueError:
+                self._training_freeze_zero_extra_holds = 0
+                logger.warning(
+                    "Ignoring invalid HOLOSOMA_TRAINING_FREEZE_ZERO_EXTRA_HOLDS={!r}",
+                    freeze_holds_override,
+                )
+        elif self._training_freeze_zero_prob > 0.0:
+            # Deployment is deterministic; use the geometric expectation of
+            # training's Bernoulli timestep-0 hold distribution.
+            self._training_freeze_zero_extra_holds = int(
+                min(
+                    200,
+                    round(
+                        self._training_freeze_zero_prob
+                        / max(1.0e-6, 1.0 - self._training_freeze_zero_prob)
+                    ),
+                )
+            )
+        else:
+            self._training_freeze_zero_extra_holds = 0
+        self._training_freeze_zero_remaining_holds = 0
         alignment_from_metadata = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
         self._motion_alignment_enabled = bool(alignment_from_metadata or self._force_motion_alignment)
         if self._motion_alignment_enabled and not alignment_from_metadata and self._force_motion_alignment:
             logger.info("Forcing runtime motion alignment for split sim2sim inference.")
 
-    def _maybe_apply_training_motion_transitions_to_motion_data(self, metadata: dict, ref_name: str) -> None:
-        if self._motion_data is None or not bool(self.config.task.apply_training_motion_transitions):
-            return
+    def _reset_per_model_motion_state_for_setup(self) -> None:
+        """Clear motion state that must never leak between preloaded policy slots."""
 
-        motion_cfg = _extract_motion_cfg_from_metadata(metadata)
+        self._motion_output_names = set(self.onnx_output_names)
+        self._motion_data = None
+        self._motion_cfg = None
+        self._effective_motion_transition_settings = None
+        self._embedded_motion_frame_count = None
+        self._motion_body_names = ()
+        self._motion_transition_prepend_steps = 0
+        self._contact_aware_carry_window = None
+        self._contact_aware_contact_window = None
+        self._contact_aware_button_window = None
+        self._training_freeze_zero_prob = 0.0
+        self._training_freeze_zero_extra_holds = 0
+        self._motion_alignment_enabled = False
+        self.motion_command_0 = None
+        self.motion_command_t = None
+        self.ref_quat_xyzw_0 = None
+        self.ref_quat_xyzw_t = None
+        self.ref_pos_xyz_t = None
+
+    def _has_embedded_motion_outputs(self) -> bool:
+        required_motion_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"}
+        output_names = set(getattr(self, "_motion_output_names", ()))
+        return required_motion_outputs.issubset(output_names)
+
+    def _active_motion_frame_count(self) -> int | None:
+        """Return the validated timeline length used by this runtime policy.
+
+        External MotionData takes precedence because an explicitly diagnostic
+        transition override may intentionally materialize a timeline different
+        from the graph.  A provenance-bearing self-contained graph can use its
+        authenticated embedded frame count.  Legacy combined graphs have no
+        safe length provenance here and retain their historical behavior.
+        """
+
+        motion_data = getattr(self, "_motion_data", None)
+        if motion_data is not None:
+            frame_count = int(getattr(motion_data, "frame_count", 0) or 0)
+            return frame_count if frame_count > 0 else None
+        embedded_frame_count = getattr(self, "_embedded_motion_frame_count", None)
+        if embedded_frame_count is None or not self._has_embedded_motion_outputs():
+            return None
+        frame_count = int(embedded_frame_count)
+        return frame_count if frame_count > 0 else None
+
+    def _policy_requires_external_motion_data(self) -> bool:
+        return bool(self._uses_motion_command and not self._has_embedded_motion_outputs())
+
+    def _will_apply_authenticated_motion_transition(self) -> bool:
+        """Return whether this runtime will materialize an authenticated transition.
+
+        ``apply_training_motion_transitions`` is enabled for canonical WBT
+        deployment so artifacts with an applied transition reproduce their
+        training timeline.  That default must not turn an explicitly inactive
+        contract into an external motion-file dependency, however.
+        """
+
+        if not bool(
+            getattr(self.config.task, "apply_training_motion_transitions", False)
+        ):
+            return False
+        settings = getattr(self, "_effective_motion_transition_settings", None)
+        if not isinstance(settings, Mapping):
+            return False
+        return any(
+            isinstance(settings.get(phase_name), Mapping)
+            and settings[phase_name].get("applied") is True
+            for phase_name in ("prepend", "append")
+        )
+
+    def _policy_requires_motion_data_for_setup(self) -> bool:
+        """Identify real external motion consumers for the active artifact."""
+
+        return bool(
+            self._uses_videomimic
+            or self._uses_object_mocap_distill
+            or self._uses_object_generalist
+            or self._uses_legacy_object_obs
+            or self._uses_sparse_root_command
+            # ``drop_button``/``pickup_button`` can be selected without a
+            # sparse-root term. Their authenticated sidecar window is still
+            # indexed on the external motion timeline, so treating a complete
+            # embedded-output graph as self-contained would silently replace
+            # the training button signal with an empty/fallback window.
+            or bool(getattr(self, "_uses_contact_window_observation", False))
+            or self._will_apply_authenticated_motion_transition()
+            or self._policy_requires_external_motion_data()
+        )
+
+    def _should_source_motion_outputs_from_motion_data(self) -> bool:
+        return bool(
+            self._uses_motion_command
+            and self._motion_data is not None
+            and (
+                self._will_apply_authenticated_motion_transition()
+                or not self._has_embedded_motion_outputs()
+            )
+        )
+
+    def _get_motion_outputs_from_motion_data(self, motion_timestep: int) -> dict[str, np.ndarray] | None:
+        if self._motion_data is None or self._motion_data.frame_count <= 0:
+            return None
+        idx = max(0, min(int(motion_timestep), self._motion_data.frame_count - 1))
+        return {
+            "joint_pos": self._motion_data.joint_pos[idx : idx + 1].astype(np.float32, copy=False),
+            "joint_vel": self._motion_data.joint_vel[idx : idx + 1].astype(np.float32, copy=False),
+            "ref_quat_xyzw": wxyz_to_xyzw(self._motion_data.ref_quat_w[idx : idx + 1]).astype(
+                np.float32,
+                copy=False,
+            ),
+            "ref_pos_xyz": self._motion_data.ref_pos_w[idx : idx + 1].astype(np.float32, copy=False),
+        }
+
+    def _validate_runtime_motion_timebase(self, metadata: dict) -> None:
+        """Require the runtime, training config, and selected motion to advance at one shared rate."""
+
+        if isinstance(self.rl_rate, (bool, np.bool_)):
+            raise ValueError(f"Inference rl_rate must be a finite positive frequency, got {self.rl_rate!r}.")
+        try:
+            runtime_fps = float(self.rl_rate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Inference rl_rate must be a finite positive frequency, got {self.rl_rate!r}."
+            ) from exc
+        if not math.isfinite(runtime_fps) or runtime_fps <= 0.0:
+            raise ValueError(f"Inference rl_rate must be finite and positive, got {runtime_fps!r}.")
+
+        if self._motion_data is not None:
+            motion_fps = float(self._motion_data.fps)
+            if not math.isclose(motion_fps, runtime_fps, rel_tol=1.0e-6, abs_tol=1.0e-6):
+                raise ValueError(
+                    "Motion FPS must match the inference policy control frequency because runtime advances "
+                    "one motion frame per control step: "
+                    f"motion.fps={motion_fps}, rl_rate={runtime_fps}. Resample the motion or use the "
+                    "training control frequency."
+                )
+
+        try:
+            training_control_dt = _extract_control_dt_from_metadata(metadata)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Serialized simulator control timebase is malformed.") from exc
+        if training_control_dt is not None:
+            training_fps = 1.0 / float(training_control_dt)
+            if not math.isclose(training_fps, runtime_fps, rel_tol=1.0e-6, abs_tol=1.0e-6):
+                raise ValueError(
+                    "Inference rl_rate does not match the serialized training control frequency: "
+                    f"rl_rate={runtime_fps}, training_control_fps={training_fps}."
+                )
+
+    def _maybe_apply_training_motion_transitions_to_motion_data(self, metadata: dict, ref_name: str) -> int:
+        apply_transitions = self.config.task.apply_training_motion_transitions
+        transition_settings = _validated_runtime_motion_transition_settings(
+            metadata,
+            apply_training_motion_transitions=apply_transitions,
+        )
+        if self._motion_data is None or not apply_transitions:
+            return 0
         init_state = _extract_robot_init_state_from_metadata(metadata)
-        control_dt = _extract_control_dt_from_metadata(metadata)
-        if not isinstance(motion_cfg, dict) or not isinstance(init_state, dict) or control_dt is None or control_dt <= 0.0:
-            return
-
-        needs_prepend = bool(motion_cfg.get("enable_default_pose_prepend", False))
-        needs_append = bool(motion_cfg.get("enable_default_pose_append", False))
+        source_semantics = str(transition_settings["source_semantics"])
+        prepend_contract = transition_settings["prepend"]
+        append_contract = transition_settings["append"]
+        needs_prepend = bool(prepend_contract["applied"])
+        needs_append = bool(append_contract["applied"])
         if not needs_prepend and not needs_append:
-            return
+            return 0
+        if not isinstance(init_state, dict):
+            raise ValueError(
+                "Applied motion transitions require serialized robot init_state metadata."
+            )
 
         motion_data = self._motion_data
         robot_dof_names = list(metadata.get("dof_names") or self.config.robot.dof_names)
@@ -881,33 +1872,31 @@ class WholeBodyTrackingPolicy(BasePolicy):
             motion["object_quat_w"] = motion_data.object_quat_w.astype(np.float32, copy=True)
             motion["object_size"] = motion_data.object_size.astype(np.float32, copy=True)
 
+        applied_prepend_steps = 0
         if needs_prepend:
-            prepend_duration = float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0)
-            prepend_steps = round(prepend_duration / control_dt)
-            if prepend_steps > 1:
-                _apply_transition_segment_np(
-                    motion,
-                    start_state=_build_default_state(use_motion_end=False),
-                    target_state=_motion_state(0),
-                    num_steps=prepend_steps,
-                    prepend=True,
-                    drop_first=False,
-                    drop_last=True,
-                )
+            prepend_steps = int(prepend_contract["steps"])
+            _apply_transition_segment_np(
+                motion,
+                start_state=_build_default_state(use_motion_end=False),
+                target_state=_motion_state(0),
+                num_steps=prepend_steps,
+                prepend=True,
+                drop_first=False,
+                drop_last=True,
+            )
+            applied_prepend_steps = prepend_steps
 
         if needs_append:
-            append_duration = float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0)
-            append_steps = round(append_duration / control_dt)
-            if append_steps > 1:
-                _apply_transition_segment_np(
-                    motion,
-                    start_state=_motion_state(-1),
-                    target_state=_build_default_state(use_motion_end=True),
-                    num_steps=append_steps,
-                    prepend=False,
-                    drop_first=True,
-                    drop_last=False,
-                )
+            append_steps = int(append_contract["steps"])
+            _apply_transition_segment_np(
+                motion,
+                start_state=_motion_state(-1),
+                target_state=_build_default_state(use_motion_end=True),
+                num_steps=append_steps,
+                prepend=False,
+                drop_first=True,
+                drop_last=False,
+            )
 
         motion_data.joint_pos = motion["joint_pos"]
         motion_data.joint_vel = motion["joint_vel"]
@@ -921,32 +1910,511 @@ class WholeBodyTrackingPolicy(BasePolicy):
             motion_data.object_size = motion["object_size"]
         motion_data.frame_count = motion_data.joint_pos.shape[0]
         logger.info(
-            "Applied training motion transitions to inference motion data for '{}': frame_count={}",
+            "Applied authenticated training motion transitions to inference motion data for '{}': "
+            "source_semantics={} prepend_steps={} append_steps={} frame_count={}",
             ref_name,
+            source_semantics,
+            applied_prepend_steps,
+            int(append_contract["steps"]),
             motion_data.frame_count,
         )
+        return applied_prepend_steps
+
+    @classmethod
+    def _resolve_contact_interval_root(cls, raw_root: str, onnx_path: Path) -> Path | None:
+        candidates = [Path(raw_root).expanduser()]
+        candidates.append(onnx_path.parent / raw_root)
+        repo_root = cls._find_repo_root(Path(__file__).resolve())
+        candidates.extend((repo_root / raw_root, repo_root / "src" / raw_root))
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate.resolve()
+        return None
+
+    def _materialize_contact_button_window(
+        self,
+        *,
+        interval: tuple[int, int],
+        clip_metadata: Mapping[str, object],
+        clip_id: str,
+        provenance_source: str,
+    ) -> tuple[int, int]:
+        """Map one validated raw sidecar interval onto the runtime timeline."""
+
+        cfg = self._motion_cfg or {}
+        raw_start, raw_end = interval
+        start, end = _convert_contact_interval_timebase(
+            interval,
+            metadata=clip_metadata,
+            motion_fps=getattr(self._motion_data, "fps", None),
+        )
+        compensated_in_training = bool(
+            cfg.get("contact_interval_runtime_prepend_compensation", False)
+        )
+        prepend_steps = int(self._motion_transition_prepend_steps)
+        source_semantics = str(
+            (self._effective_motion_transition_settings or {}).get(
+                "source_semantics",
+                "single_clip_static",
+            )
+        )
+        if compensated_in_training and source_semantics == "global_multi_clip_runtime":
+            training_window = (
+                max(0, int(start) - prepend_steps),
+                int(end) - prepend_steps,
+            )
+        else:
+            training_window = (int(start), int(end))
+        window = _map_source_window_to_materialized_timeline(
+            training_window,
+            source_semantics=source_semantics,
+            prepend_steps=prepend_steps,
+        )
+        if compensated_in_training:
+            declared_source_frame_count = getattr(
+                self._motion_data,
+                "source_frame_count",
+                None,
+            )
+            if declared_source_frame_count is None:
+                source_frame_count = int(getattr(self._motion_data, "frame_count", 0))
+                if source_semantics == "global_multi_clip_runtime":
+                    source_frame_count -= prepend_steps
+            else:
+                source_frame_count = int(declared_source_frame_count)
+            if not (0 <= training_window[0] < training_window[1] <= source_frame_count):
+                raise ValueError(
+                    "Runtime-prepend-compensated training contact interval is outside the "
+                    "active inference motion range after source-time conversion: "
+                    f"clip={clip_id!r}, interval={training_window}, "
+                    f"source_frame_count={source_frame_count}."
+                )
+            active_frame_count = int(getattr(self._motion_data, "frame_count", 0))
+            if not (0 <= window[0] < window[1] <= active_frame_count):
+                raise ValueError(
+                    "Runtime-prepend-compensated training contact interval is outside the active "
+                    "inference motion range: "
+                    f"clip={clip_id!r}, interval={window}, frame_count={active_frame_count}."
+                )
+        logger.info(
+            "Using {} contact sidecar for policy buttons: clip={} raw=[{}, {}) "
+            "motion_timebase=[{}, {}) effective=[{}, {}) "
+            "runtime_prepend_compensated_in_training={}.",
+            provenance_source,
+            clip_id,
+            raw_start,
+            raw_end,
+            start,
+            end,
+            window[0],
+            window[1],
+            compensated_in_training,
+        )
+        return window
+
+    def _embedded_contact_button_window(self) -> tuple[int, int] | None:
+        metadata = getattr(self, "_onnx_metadata", {})
+        contract = embedded_contact_sidecar_contract_from_metadata(metadata)
+        if contract is None:
+            return None
+        if self._motion_data is None:
+            raise RuntimeError(
+                "Embedded contact-sidecar provenance requires the selected external motion data."
+            )
+        clip_id = self._motion_data.motion_path.stem
+        if contract["clip_id"] != clip_id:
+            raise RuntimeError(
+                "Embedded contact-sidecar clip does not match the active inference motion: "
+                f"contract={contract['clip_id']!r}, active={clip_id!r}."
+            )
+        if contract["source_motion_sha256"] != self._motion_data.source_sha256:
+            raise RuntimeError(
+                "Embedded contact-sidecar provenance is bound to different motion bytes."
+            )
+        if contract["source_motion_size"] != int(self._motion_data.source_size):
+            raise RuntimeError(
+                "Embedded contact-sidecar provenance is bound to a different motion byte size."
+            )
+        if contract["source_frame_count"] != int(
+            getattr(self._motion_data, "source_frame_count", self._motion_data.frame_count)
+        ):
+            raise RuntimeError(
+                "Embedded contact-sidecar provenance is bound to a different source frame count."
+            )
+        if not math.isclose(
+            float(contract["motion_fps"]),
+            float(self._motion_data.fps),
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
+            raise RuntimeError(
+                "Embedded contact-sidecar provenance is bound to a different motion FPS."
+            )
+        fps_key = contract["contact_interval_fps_key"]
+        clip_metadata = (
+            {}
+            if fps_key is None
+            else {
+                fps_key: (
+                    None
+                    if contract["contact_interval_fps"] is None
+                    else float(contract["contact_interval_fps"])
+                )
+            }
+        )
+        raw_interval = contract["selected_raw_interval"]
+        return self._materialize_contact_button_window(
+            interval=(int(raw_interval[0]), int(raw_interval[1])),
+            clip_metadata=clip_metadata,
+            clip_id=clip_id,
+            provenance_source="digest-bound embedded",
+        )
+
+    def _load_contact_interval_window(self, onnx_path: Path) -> tuple[int, int] | None:
+        """Load the legacy/exported sidecar window independently of button mode."""
+        # Match training: contact-window banks are not configured for
+        # robot-only motions, even when a generic contact-aware observation
+        # preset or sampling flag is present.
+        if self._motion_data is None or not self._motion_data.has_object:
+            return None
+        cfg = self._motion_cfg or {}
+        for flag_name in (
+            "use_adaptive_timesteps_sampler",
+            "uniform_t1_window_sampling_enabled",
+        ):
+            flag_value = cfg.get(flag_name, False)
+            if not isinstance(flag_value, bool):
+                raise ValueError(
+                    f"motion_config.{flag_name} must be boolean, got {flag_value!r}."
+                )
+        runtime_requires_contact_window = bool(
+            bool(getattr(self, "_uses_contact_window_observation", False))
+            or bool(cfg.get("use_adaptive_timesteps_sampler", False))
+            or bool(cfg.get("uniform_t1_window_sampling_enabled", False))
+        )
+        metadata = getattr(self, "_onnx_metadata", {})
+        if isinstance(metadata, Mapping) and "experiment_config" in metadata:
+            metadata_requires_contact_window = policy_requires_contact_window(metadata)
+            if metadata_requires_contact_window != runtime_requires_contact_window:
+                raise RuntimeError(
+                    "Runtime and serialized policy disagree on whether a contact sidecar is required."
+                )
+            requires_contact_window = metadata_requires_contact_window
+        else:
+            requires_contact_window = runtime_requires_contact_window
+        if not requires_contact_window:
+            return None
+        embedded_window = self._embedded_contact_button_window()
+        if embedded_window is not None:
+            # The selected values and their source-file digests are already in
+            # the ONNX payload.  Do not reopen a mutable full bank at runtime.
+            return embedded_window
+        training_provenance = (
+            metadata.get("training_provenance")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        embedded_timeline = embedded_motion_timeline_contract_from_metadata(metadata)
+        if (
+            embedded_timeline is not None
+            and isinstance(training_provenance, Mapping)
+            and isinstance(training_provenance.get("contact_sidecar_manifest_sha256"), str)
+        ):
+            raise RuntimeError(
+                "Digest-provenanced patched policy uses contact-aware observations but is missing "
+                "its embedded active contact-sidecar contract; re-run patch_motion_onnx with the "
+                "verified full contact and motion banks."
+            )
+        configured_root = str(cfg.get("adaptive_sampling_contact_interval_root") or "").strip()
+        environment_root = os.environ.get("HOLOSOMA_CONTACT_INTERVAL_ROOT", "").strip()
+        # Treat an empty environment variable as "no override".  Otherwise a
+        # shell-exported empty value silently erases the serialized training
+        # root and changes contact-aware observation semantics at inference.
+        raw_root = environment_root or configured_root
+        if not raw_root:
+            return None
+        logger.warning(
+            "Using legacy external contact-sidecar compatibility path for clip {}; selected bytes "
+            "are not per-clip digest-bound in this artifact and this rollout is diagnostic.",
+            self._motion_data.motion_path.stem,
+        )
+        contact_root = self._resolve_contact_interval_root(raw_root, onnx_path)
+        if contact_root is None:
+            message = (
+                f"Training contact interval root {raw_root!r} is unavailable; "
+                "using a kinematic fallback would change the student observation contract."
+            )
+            if not _truthy_env("HOLOSOMA_ALLOW_CONTACT_WINDOW_FALLBACK"):
+                raise FileNotFoundError(
+                    message
+                    + " Provide HOLOSOMA_CONTACT_INTERVAL_ROOT or explicitly set "
+                    "HOLOSOMA_ALLOW_CONTACT_WINDOW_FALLBACK=1 for a non-equivalent diagnostic rollout."
+                )
+            logger.warning("{} Explicit fallback override is enabled.", message)
+            return None
+
+        clip_id = self._motion_data.motion_path.stem
+        matching_clip_dirs: list[tuple[Path, dict[str, object]]] = []
+        for clip_dir in sorted(contact_root.iterdir()):
+            if not clip_dir.is_dir():
+                continue
+            exported_clip_id = ""
+            clip_metadata: dict[str, object] = {}
+            metadata_path = clip_dir / "metadata.json"
+            if metadata_path.is_file():
+                try:
+                    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    inferred_clip_id = _resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        {clip_id},
+                    )
+                    if inferred_clip_id == clip_id:
+                        raise RuntimeError(
+                            "Invalid training contact metadata for the active inference clip: "
+                            f"{metadata_path}: {exc}"
+                        ) from exc
+                    continue
+                if not isinstance(payload, dict):
+                    inferred_clip_id = _resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        {clip_id},
+                    )
+                    if inferred_clip_id == clip_id:
+                        raise RuntimeError(
+                            "Training contact metadata for the active inference clip must be a JSON object: "
+                            f"{metadata_path}"
+                        )
+                    continue
+                if isinstance(payload, dict):
+                    clip_metadata = payload
+                    exported_clip_id = str(payload.get("clip_id") or "").strip()
+            if not exported_clip_id:
+                exported_clip_id = _resolve_contact_export_clip_id(clip_dir.name, {clip_id})
+            if exported_clip_id == clip_id:
+                matching_clip_dirs.append((clip_dir, clip_metadata))
+
+        if len(matching_clip_dirs) > 1:
+            raise RuntimeError(
+                "Multiple training contact directories match the active inference clip; "
+                f"clip={clip_id!r}, directories={[str(path) for path, _ in matching_clip_dirs]}."
+            )
+        if matching_clip_dirs:
+            clip_dir, clip_metadata = matching_clip_dirs[0]
+            interval = _load_contact_interval_from_dir(clip_dir)
+            if interval is not None:
+                return self._materialize_contact_button_window(
+                    interval=interval,
+                    clip_metadata=clip_metadata,
+                    clip_id=clip_id,
+                    provenance_source="legacy external",
+                )
+
+        message = (
+            f"No training contact interval matched clip {clip_id!r} under {str(contact_root)!r}; "
+            "using a kinematic fallback would change the student observation contract."
+        )
+        if not _truthy_env("HOLOSOMA_ALLOW_CONTACT_WINDOW_FALLBACK"):
+            raise RuntimeError(
+                message
+                + " Supply the exact sidecar bank or explicitly set "
+                "HOLOSOMA_ALLOW_CONTACT_WINDOW_FALLBACK=1 for a non-equivalent diagnostic rollout."
+            )
+        logger.warning("{} Explicit fallback override is enabled.", message)
+        return None
+
+    def _load_kinematic_button_window(self) -> tuple[int, int]:
+        """Load and independently recompute the digest-bound kinematic window."""
+
+        metadata = getattr(self, "_onnx_metadata", {})
+        contract = embedded_button_window_contract_from_metadata(metadata)
+        if contract is None:
+            raise RuntimeError(
+                "Kinematic-button policies require a digest-bound integer button-window "
+                "contract; legacy/unpatched ONNX artifacts cannot authenticate the source "
+                "motion or pickup/drop transition frames. Re-run patch_motion_onnx."
+            )
+        if (
+            self._motion_data is None
+            or not self._motion_data.has_object
+            or self._motion_data.object_pos_w is None
+        ):
+            raise RuntimeError(
+                "A digest-bound kinematic button-window contract requires an active "
+                "motion with object_pos_w; the pickup/drop transitions cannot be verified."
+            )
+
+        motion_data = self._motion_data
+        settings = self._effective_motion_transition_settings or {}
+        source_semantics = str(settings.get("source_semantics", "single_clip_static"))
+        prepend_steps = int(self._motion_transition_prepend_steps)
+        # Both runtime-hold materialization and single-clip static splicing put
+        # the raw source after the realized prefix.  Their button semantics
+        # differ only when deriving the effective window below.
+        source_offset = max(prepend_steps, 0)
+        source_frame_count = int(
+            getattr(motion_data, "source_frame_count", motion_data.frame_count)
+        )
+        source_end = source_offset + source_frame_count
+        if source_end > int(motion_data.frame_count):
+            raise RuntimeError(
+                "Materialized inference timeline is too short for its declared source motion."
+            )
+        source_rel_z = np.asarray(
+            motion_data.object_pos_w[source_offset:source_end, 2]
+            - motion_data.root_pos_w[source_offset:source_end, 2],
+            dtype=np.float32,
+        )
+        source_window = kinematic_lift_window_from_rel_z_np(source_rel_z)
+        materialized_append_steps = (
+            int(motion_data.frame_count) - source_end
+        )
+        if materialized_append_steps < 0:
+            raise RuntimeError(
+                "Materialized inference timeline has a negative append length."
+            )
+        if source_semantics == "single_clip_static":
+            materialized_rel_z = np.asarray(
+                motion_data.object_pos_w[:, 2] - motion_data.root_pos_w[:, 2],
+                dtype=np.float32,
+            )
+            materialized_window = kinematic_lift_window_from_rel_z_np(
+                materialized_rel_z
+            )
+        else:
+            # Runtime-hold semantics keep the source t1 decision active over
+            # the prefix.  In particular t1==0 remains 0 rather than +prepend.
+            materialized_window = _map_source_window_to_materialized_timeline(
+                source_window,
+                source_semantics=source_semantics,
+                prepend_steps=prepend_steps,
+            )
+
+        clip_id = motion_data.motion_path.stem
+        expected_scalars = {
+            "clip_id": clip_id,
+            "source_motion_sha256": motion_data.source_sha256,
+            "source_motion_size": int(motion_data.source_size),
+            "source_frame_count": source_frame_count,
+        }
+        for key, expected in expected_scalars.items():
+            if contract[key] != expected:
+                raise RuntimeError(
+                    f"Embedded button-window {key} does not match active motion: "
+                    f"contract={contract[key]!r}, active={expected!r}."
+                )
+        if not math.isclose(
+            float(contract["motion_fps"]),
+            float(motion_data.fps),
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
+            raise RuntimeError(
+                "Embedded button-window contract is bound to a different motion FPS."
+            )
+        if contract["motion_transition_contract_sha256"] != settings.get(
+            "contract_sha256"
+        ):
+            raise RuntimeError(
+                "Embedded button-window contract is bound to different motion-transition metadata."
+            )
+        if contract["source_semantics"] != source_semantics:
+            raise RuntimeError(
+                "Embedded button-window source semantics do not match inference metadata."
+            )
+        if int(contract["effective_prepend_steps"]) != prepend_steps:
+            raise RuntimeError(
+                "Embedded button-window runtime prepend does not match the materialized motion."
+            )
+        if int(contract["effective_append_steps"]) != materialized_append_steps:
+            raise RuntimeError(
+                "Embedded button-window static append does not match the materialized motion."
+            )
+        if tuple(int(value) for value in contract["source_window"]) != source_window:
+            raise RuntimeError(
+                "Embedded button-window integers do not match the authenticated source motion."
+            )
+        if tuple(int(value) for value in contract["materialized_window"]) != materialized_window:
+            raise RuntimeError(
+                "Embedded button-window materialized integers do not match runtime prepend mapping."
+            )
+        logger.info(
+            "Using digest-bound kinematic policy-button window: clip={} source=[{}, {}) "
+            "effective=[{}, {}) prepend_steps={}.",
+            clip_id,
+            source_window[0],
+            source_window[1],
+            materialized_window[0],
+            materialized_window[1],
+            prepend_steps,
+        )
+        return materialized_window
+
+    def _load_contact_aware_button_window(
+        self,
+        onnx_path: Path,
+    ) -> tuple[int, int] | None:
+        """Dispatch button labels without coupling them to root carry mode."""
+
+        mode = validated_contact_aware_button_window_mode(self._motion_cfg or {})
+        metadata = getattr(self, "_onnx_metadata", {})
+        embedded_contract = embedded_button_window_contract_from_metadata(metadata)
+        if mode == "contact_interval":
+            if embedded_contract is not None:
+                raise RuntimeError(
+                    "Legacy contact_interval metadata contains a stale kinematic button-window contract."
+                )
+            return self._load_contact_interval_window(onnx_path)
+        return self._load_kinematic_button_window()
 
     def setup_policy(self, model_path):
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        self._perception_contract_sha256 = None
+        self.onnx_policy_session, metadata = self._load_onnx_session_and_metadata(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
+        self._reset_per_model_motion_state_for_setup()
 
-        # Extract KP/KD from ONNX metadata (same as base class)
-        onnx_model = onnx.load(model_path)
-        metadata = {}
-        for prop in onnx_model.metadata_props:
-            metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
+        embedded_timeline_contract = embedded_motion_timeline_contract_from_metadata(
+            metadata
+        )
+        self._embedded_motion_frame_count = (
+            None
+            if embedded_timeline_contract is None
+            else int(embedded_timeline_contract["embedded_frame_count"])
+        )
+        self._effective_motion_transition_settings = (
+            _validated_runtime_motion_transition_settings(
+                metadata,
+                apply_training_motion_transitions=(
+                    self.config.task.apply_training_motion_transitions
+                ),
+            )
+        )
         self._onnx_obs_dim = self._get_onnx_obs_dim()
-        self._maybe_force_sparse_depth_distill_obs_config()
-        self._maybe_force_legacy_object_history_obs_config()
+        has_policy_contract = validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={inp.name: inp.shape for inp in self.onnx_policy_session.get_inputs()},
+            output_shapes={out.name: out.shape for out in self.onnx_policy_session.get_outputs()},
+            input_types={inp.name: inp.type for inp in self.onnx_policy_session.get_inputs()},
+            output_types={out.name: out.type for out in self.onnx_policy_session.get_outputs()},
+            observation=self.config.observation,
+            runtime_dof_names=self.dof_names,
+            runtime_default_dof_angles=self.default_dof_angles,
+            runtime_motor_effort_limits=self.robot_config.motor_effort_limit,
+            runtime_joint2motor=self.robot_config.joint2motor,
+        )
+        self._perception_contract_sha256 = perception_observation_contract_sha256_from_metadata(metadata)
+        self._has_policy_contract = bool(has_policy_contract)
+        if not has_policy_contract:
+            self._maybe_force_sparse_depth_distill_obs_config()
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
         self.pinocchio_robot = PinocchioRobot(self.config.robot, metadata["robot_urdf"])
 
-        self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
-        self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        self.onnx_kp = self._joint_values_to_motor_order(metadata["kp"], "KP") if "kp" in metadata else None
+        self.onnx_kd = self._joint_values_to_motor_order(metadata["kd"], "KD") if "kd" in metadata else None
 
         # Keep WBT rollout aligned with training-time action scaling semantics.
         self._set_policy_action_scales_from_metadata(metadata)
@@ -956,14 +2424,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
-        if (
-            self._uses_videomimic
-            or self._uses_object_mocap_distill
-            or self._uses_object_generalist
-            or self._uses_legacy_object_obs
-            or self._uses_sparse_root_command
-        ):
+        required_motion_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"}
+        if self._policy_requires_motion_data_for_setup():
             self._load_motion_data_from_metadata(metadata, Path(model_path))
+        self._validate_runtime_motion_timebase(metadata)
 
         if "obs" in self.onnx_input_names:
             self._obs_input_name = "obs"
@@ -973,54 +2437,88 @@ class WholeBodyTrackingPolicy(BasePolicy):
             raise ValueError(f"Unsupported ONNX inputs: {self.onnx_input_names}")
 
         self._time_step_input_name = "time_step" if "time_step" in self.onnx_input_names else None
-        self._perception_obs_input_name = "perception_obs" if "perception_obs" in self.onnx_input_names else None
+        self._perception_obs_input_name = actor_perception_input_name_from_metadata(metadata)
 
         if "actions" in self.onnx_output_names:
             self._action_output_name = "actions"
         elif "action" in self.onnx_output_names:
             self._action_output_name = "action"
         else:
-            self._action_output_name = self.onnx_output_names[0]
+            raise ValueError(f"Unsupported ONNX outputs: {self.onnx_output_names}")
 
-        self._motion_output_names = set(self.onnx_output_names)
-        required_motion_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"}
-        if self._uses_motion_command and not required_motion_outputs.issubset(self._motion_output_names):
+        has_embedded_motion_outputs = required_motion_outputs.issubset(self._motion_output_names)
+        source_motion_outputs_from_data = self._should_source_motion_outputs_from_motion_data()
+        if self._uses_motion_command and not (
+            source_motion_outputs_from_data or has_embedded_motion_outputs
+        ):
             raise ValueError(
-                "Motion outputs missing from ONNX; expected joint_pos, joint_vel, ref_quat_xyzw. "
-                f"Available: {self.onnx_output_names}"
+                "Action-only ONNX policies with motion-command observations require the exact selected "
+                "motion data at runtime; alternatively, a legacy combined graph must expose joint_pos, "
+                "joint_vel, and ref_quat_xyzw. "
+                f"Available ONNX outputs: {self.onnx_output_names}"
             )
 
         self._onnx_output_fetch = [self._action_output_name]
-        if self._uses_motion_command:
+        if self._uses_motion_command and not source_motion_outputs_from_data:
             self._onnx_output_fetch += ["joint_pos", "joint_vel", "ref_quat_xyzw"]
             if "ref_pos_xyz" in self._motion_output_names:
                 self._onnx_output_fetch.append("ref_pos_xyz")
 
         def policy_act(input_feed):
-            output = self.onnx_policy_session.run(self._onnx_output_fetch, input_feed)
-            return dict(zip(self._onnx_output_fetch, output))
+            prepared_feed = self._prepare_policy_input_feed(input_feed)
+            output = self.onnx_policy_session.run(self._onnx_output_fetch, prepared_feed)
+            return {
+                name: self._require_finite_array(value, label=f"ONNX output {name!r}")
+                for name, value in zip(self._onnx_output_fetch, output, strict=True)
+            }
 
         self.policy = policy_act
 
         if self._uses_motion_command:
-            time_step = np.zeros((1, 1), dtype=np.float32)
-            obs = self._build_zero_actor_obs()
-            input_feed = {self._obs_input_name: obs}
-            if self._time_step_input_name:
-                input_feed[self._time_step_input_name] = time_step
-            if self._perception_obs_input_name:
-                perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)
-                if perception_dim is None:
-                    raise ValueError("Unable to infer perception_obs input dimension from ONNX.")
-                input_feed[self._perception_obs_input_name] = np.zeros((1, perception_dim), dtype=np.float32)
-            outputs = self.policy(input_feed)
-            joint_pos = outputs["joint_pos"]
-            joint_vel = outputs["joint_vel"]
-            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
-            self.ref_quat_xyzw_t = outputs["ref_quat_xyzw"]
-            self.ref_pos_xyz_t = outputs.get("ref_pos_xyz")
+            if self._should_source_motion_outputs_from_motion_data():
+                outputs = self._get_motion_outputs_from_motion_data(0)
+                if outputs is None:
+                    raise ValueError("Training-aligned motion data is unavailable for motion outputs.")
+            else:
+                time_step = np.zeros((1, 1), dtype=np.float32)
+                obs = self._build_zero_actor_obs()
+                input_feed = {self._obs_input_name: obs}
+                if self._time_step_input_name:
+                    input_feed[self._time_step_input_name] = time_step
+                if self._perception_obs_input_name:
+                    perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)
+                    if perception_dim is None:
+                        raise ValueError("Unable to infer perception_obs input dimension from ONNX.")
+                    input_feed[self._perception_obs_input_name] = np.zeros((1, perception_dim), dtype=np.float32)
+                outputs = self.policy(input_feed)
+            joint_pos = self._require_finite_array(
+                outputs["joint_pos"],
+                label="initial motion joint position output",
+            )
+            joint_vel = self._require_finite_array(
+                outputs["joint_vel"],
+                label="initial motion joint velocity output",
+            )
+            self.motion_command_t = self._require_finite_array(
+                np.concatenate([joint_pos, joint_vel], axis=1),
+                label="initial motion command output",
+            )
+            self.ref_quat_xyzw_t = self._require_finite_array(
+                outputs["ref_quat_xyzw"],
+                label="initial reference quaternion output",
+            )
+            ref_pos_xyz = outputs.get("ref_pos_xyz")
+            self.ref_pos_xyz_t = (
+                None
+                if ref_pos_xyz is None
+                else self._require_finite_array(
+                    ref_pos_xyz,
+                    label="initial reference position output",
+                )
+            )
             self.motion_command_0 = self.motion_command_t.copy()
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self._last_motion_output_timestep = 0
         elif (
             self._uses_videomimic
             or self._uses_object_mocap_distill
@@ -1036,6 +2534,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz)
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
             self.ref_pos_xyz_t = self._motion_data.ref_pos_w[:1]
+            self._last_motion_output_timestep = 0
 
     def _get_onnx_input_dim(self, input_name: str | None) -> int | None:
         if input_name is None:
@@ -1097,36 +2596,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "actor_obs_root": 1,
                 "actor_obs_proprio_no_linvel": 5,
             },
-        ))
-        self._init_obs_config()
-
-    def _maybe_force_legacy_object_history_obs_config(self) -> None:
-        if not self._uses_legacy_object_obs or self._onnx_obs_dim is None:
-            return
-
-        actor_terms = list(self.config.observation.obs_dict.get("actor_obs", []))
-        frame_dim = sum(int(self.config.observation.obs_dims[term]) for term in actor_terms)
-        if frame_dim <= 0 or self._onnx_obs_dim % frame_dim != 0:
-            return
-
-        expected_history = int(self._onnx_obs_dim // frame_dim)
-        current_history = int(self.config.observation.history_length_dict.get("actor_obs", 1))
-        if expected_history <= 1 or current_history == expected_history:
-            return
-
-        logger.warning(
-            "Overriding legacy object observation history from {} to {} to match ONNX obs dim {}.",
-            current_history,
-            expected_history,
-            self._onnx_obs_dim,
-        )
-        history_lengths = dict(self.config.observation.history_length_dict)
-        history_lengths["actor_obs"] = expected_history
-        object.__setattr__(self.config, "observation", ObservationConfig(
-            obs_dict=dict(self.config.observation.obs_dict),
-            obs_dims=dict(self.config.observation.obs_dims),
-            obs_scales=dict(self.config.observation.obs_scales),
-            history_length_dict=history_lengths,
+            clip_observations=self.observation_clip,
         ))
         self._init_obs_config()
 
@@ -1136,69 +2606,203 @@ class WholeBodyTrackingPolicy(BasePolicy):
             obs_dim = int(sum(int(template.shape[1]) for template in self.obs_buf_dict.values()))
         return np.zeros((1, int(obs_dim)), dtype=np.float32)
 
-    def _sync_motion_outputs_from_onnx(self, motion_index: int) -> None:
-        """Update motion observation targets before constructing actor observations."""
-        if not self._uses_motion_command or self._time_step_input_name is None:
-            return
-        if not {"joint_pos", "joint_vel", "ref_quat_xyzw"}.issubset(self._motion_output_names):
-            return
+    def _build_zero_perception_obs(self, input_name: str | None = None) -> np.ndarray:
+        input_name = input_name or getattr(
+            self,
+            "_perception_obs_input_name",
+            getattr(self, "_perception_input_name", None),
+        )
+        input_dim = self._get_onnx_input_dim(input_name)
+        if input_dim is None:
+            raise ValueError(f"Unable to infer {input_name!r} input dimension from ONNX.")
+        return np.zeros((1, input_dim), dtype=np.float32)
 
-        fetch_names = ["joint_pos", "joint_vel", "ref_quat_xyzw"]
-        if "ref_pos_xyz" in self._motion_output_names:
+    def _query_motion_outputs_at(self, motion_timestep: int) -> dict[str, np.ndarray] | None:
+        """Return the motion targets that training exposes at a given clock step."""
+        if self._should_source_motion_outputs_from_motion_data():
+            return self._get_motion_outputs_from_motion_data(motion_timestep)
+
+        if (
+            self._obs_input_name is None
+            or "joint_pos" not in self.onnx_output_names
+            or "joint_vel" not in self.onnx_output_names
+        ):
+            return None
+
+        input_feed = {self._obs_input_name: self._build_zero_actor_obs()}
+        if self._time_step_input_name:
+            input_feed[self._time_step_input_name] = np.array([[int(motion_timestep)]], dtype=np.float32)
+        perception_input_name = getattr(
+            self,
+            "_perception_obs_input_name",
+            getattr(self, "_perception_input_name", None),
+        )
+        if perception_input_name:
+            input_feed[perception_input_name] = self._build_zero_perception_obs(perception_input_name)
+
+        fetch_names = ["joint_pos", "joint_vel"]
+        if "ref_quat_xyzw" in self.onnx_output_names:
+            fetch_names.append("ref_quat_xyzw")
+        if "ref_pos_xyz" in self.onnx_output_names:
             fetch_names.append("ref_pos_xyz")
+        outputs = self.onnx_policy_session.run(fetch_names, input_feed)
+        return dict(zip(fetch_names, outputs))
 
-        input_feed = {
-            self._obs_input_name: self._build_zero_actor_obs(),
-            self._time_step_input_name: np.array([[int(motion_index)]], dtype=np.float32),
-        }
-        if self._perception_obs_input_name:
-            perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)
-            if perception_dim is None:
-                raise ValueError("Unable to infer perception_obs input dimension from ONNX.")
-            input_feed[self._perception_obs_input_name] = np.zeros((1, perception_dim), dtype=np.float32)
+    def _refresh_motion_outputs_for_current_timestep(self) -> None:
+        if not self._uses_motion_command:
+            return
+        if not self._should_source_motion_outputs_from_motion_data() and self._time_step_input_name is None:
+            return
 
-        outputs = dict(zip(fetch_names, self.onnx_policy_session.run(fetch_names, input_feed)))
-        self.motion_command_t = np.concatenate([outputs["joint_pos"], outputs["joint_vel"]], axis=1)
-        self.ref_quat_xyzw_t = outputs["ref_quat_xyzw"]
-        self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+        motion_timestep = self._get_motion_index()
+        if getattr(self, "_last_motion_output_timestep", None) == motion_timestep and self.motion_command_t is not None:
+            return
+
+        outputs = self._query_motion_outputs_at(motion_timestep)
+        if outputs is None or outputs.get("joint_pos") is None or outputs.get("joint_vel") is None:
+            return
+        self.motion_command_t = np.concatenate(
+            [
+                np.asarray(outputs["joint_pos"], dtype=np.float32),
+                np.asarray(outputs["joint_vel"], dtype=np.float32),
+            ],
+            axis=1,
+        )
+        if outputs.get("ref_quat_xyzw") is not None:
+            self.ref_quat_xyzw_t = np.asarray(outputs["ref_quat_xyzw"], dtype=np.float32)
+        if outputs.get("ref_pos_xyz") is not None:
+            self.ref_pos_xyz_t = np.asarray(outputs["ref_pos_xyz"], dtype=np.float32)
+        self._last_motion_output_timestep = int(motion_timestep)
+
+    def _sync_motion_outputs_from_onnx(self, motion_index: int) -> None:
+        """Compatibility entry point; source targets from the active training contract."""
+        self._last_motion_output_timestep = None
+        old_motion_timestep = self.motion_timestep
+        try:
+            # Callers pass the already clamped active motion index.
+            self.motion_timestep = int(motion_index) - int(getattr(self, "_motion_index_offset", 0))
+            self._refresh_motion_outputs_for_current_timestep()
+        finally:
+            self.motion_timestep = old_motion_timestep
 
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
         state.update(
             {
-                "motion_command_0": self.motion_command_0.copy(),
-                "ref_quat_xyzw_0": self.ref_quat_xyzw_0.copy(),
+                "has_policy_contract": bool(getattr(self, "_has_policy_contract", False)),
+                "onnx_obs_dim": self._onnx_obs_dim,
+                "obs_input_name": self._obs_input_name,
+                "time_step_input_name": self._time_step_input_name,
+                "perception_obs_input_name": self._perception_obs_input_name,
+                "action_output_name": self._action_output_name,
+                "onnx_output_fetch": list(self._onnx_output_fetch),
+                "motion_output_names": set(self._motion_output_names),
+                "embedded_motion_frame_count": getattr(
+                    self,
+                    "_embedded_motion_frame_count",
+                    None,
+                ),
+                "pinocchio_robot": self.pinocchio_robot,
+                "motion_data": self._motion_data,
+                "motion_cfg": None if self._motion_cfg is None else dict(self._motion_cfg),
+                "motion_body_names": tuple(self._motion_body_names),
+                "motion_transition_prepend_steps": int(self._motion_transition_prepend_steps),
+                "effective_motion_transition_settings": (
+                    None
+                    if getattr(self, "_effective_motion_transition_settings", None) is None
+                    else dict(self._effective_motion_transition_settings)
+                ),
+                "contact_aware_carry_window": self._contact_aware_carry_window,
+                "contact_aware_contact_window": getattr(
+                    self,
+                    "_contact_aware_contact_window",
+                    None,
+                ),
+                "contact_aware_button_window": self._contact_aware_button_window,
+                "training_freeze_zero_prob": float(self._training_freeze_zero_prob),
+                "training_freeze_zero_extra_holds": int(self._training_freeze_zero_extra_holds),
+                "motion_alignment_enabled": bool(self._motion_alignment_enabled),
+                "motion_command_0": None if self.motion_command_0 is None else self.motion_command_0.copy(),
+                "ref_quat_xyzw_0": None if self.ref_quat_xyzw_0 is None else self.ref_quat_xyzw_0.copy(),
+                "ref_pos_xyz_0": None if self.ref_pos_xyz_t is None else self.ref_pos_xyz_t.copy(),
             }
         )
         return state
 
+    def _validate_policy_state_collection(self, states: list[dict]) -> None:
+        super()._validate_policy_state_collection(states)
+        if len(states) > 1 and not all(state["has_policy_contract"] for state in states):
+            raise ValueError(
+                "WBT multi-policy switching requires complete serialized contracts for every ONNX model; "
+                "legacy models can mutate shared observation state and cannot be mixed safely."
+            )
+
     def _restore_policy_state(self, state):
         super()._restore_policy_state(state)
-        self.motion_command_0 = state["motion_command_0"].copy()
-        self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
+        self._has_policy_contract = state["has_policy_contract"]
+        self._onnx_obs_dim = state["onnx_obs_dim"]
+        self._obs_input_name = state["obs_input_name"]
+        self._time_step_input_name = state["time_step_input_name"]
+        self._perception_obs_input_name = state["perception_obs_input_name"]
+        self._action_output_name = state["action_output_name"]
+        self._onnx_output_fetch = list(state["onnx_output_fetch"])
+        self._motion_output_names = set(state["motion_output_names"])
+        self._embedded_motion_frame_count = state["embedded_motion_frame_count"]
+        self.pinocchio_robot = state["pinocchio_robot"]
+        self._motion_data = state["motion_data"]
+        self._motion_cfg = None if state["motion_cfg"] is None else dict(state["motion_cfg"])
+        self._motion_body_names = tuple(state["motion_body_names"])
+        self._motion_transition_prepend_steps = state["motion_transition_prepend_steps"]
+        self._effective_motion_transition_settings = state[
+            "effective_motion_transition_settings"
+        ]
+        self._contact_aware_carry_window = state["contact_aware_carry_window"]
+        self._contact_aware_contact_window = state[
+            "contact_aware_contact_window"
+        ]
+        self._contact_aware_button_window = state["contact_aware_button_window"]
+        self._training_freeze_zero_prob = state["training_freeze_zero_prob"]
+        self._training_freeze_zero_extra_holds = state["training_freeze_zero_extra_holds"]
+        self._motion_alignment_enabled = state["motion_alignment_enabled"]
+        self._reset_observation_history_state()
+        self.motion_command_0 = (
+            None if state["motion_command_0"] is None else state["motion_command_0"].copy()
+        )
+        self.ref_quat_xyzw_0 = (
+            None if state["ref_quat_xyzw_0"] is None else state["ref_quat_xyzw_0"].copy()
+        )
+        self.ref_pos_xyz_t = None if state["ref_pos_xyz_0"] is None else state["ref_pos_xyz_0"].copy()
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
+        self._last_motion_output_timestep = 0
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
         self._sim_time_control_schedule_index = 0
         self._last_policy_control_target_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
+        self._training_freeze_zero_remaining_holds = 0
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
         self._auto_start_motion_clip_hold_start_time = None
         self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
+        self._motion_end_reset_episode_generation = None
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
-        self.motion_command_t = self.motion_command_0.copy()
-        self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._reset_observation_history_state()
+        self.motion_command_t = None if self.motion_command_0 is None else self.motion_command_0.copy()
+        self.ref_quat_xyzw_t = None if self.ref_quat_xyzw_0 is None else self.ref_quat_xyzw_0.copy()
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
+        self._last_motion_output_timestep = 0
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
         self._sim_time_control_schedule_index = 0
@@ -1206,12 +2810,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
+        self._training_freeze_zero_remaining_holds = 0
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
         self._auto_start_motion_clip_hold_start_time = None
         self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
+        self._motion_end_reset_episode_generation = None
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -1226,12 +2835,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return dof_pos
 
     def _get_motion_index(self) -> int:
-        if self._motion_data is None:
-            return 0
-        idx = int(self.motion_timestep) + int(self._motion_index_offset)
+        idx = int(self.motion_timestep) + int(getattr(self, "_motion_index_offset", 0))
         if idx < 0:
             return 0
-        return min(idx, self._motion_data.frame_count - 1)
+        frame_count = self._active_motion_frame_count()
+        # Legacy ONNX motion-command policies may carry their trajectory
+        # internally without authenticated frame-count provenance. Preserve
+        # their historical unbounded time_step and let the graph clamp it.
+        if frame_count is None:
+            return idx
+        return min(idx, frame_count - 1)
 
     def _get_file_perception_obs(self, expected_dim: int) -> np.ndarray | None:
         if self._perception_obs_file_path is None:
@@ -1239,7 +2852,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._perception_obs_file_values is None:
             path = self._perception_obs_file_path
             if path.suffix.lower() == ".npz":
-                with np.load(path) as data:
+                with np.load(path, allow_pickle=False) as data:
                     if self._perception_obs_file_key not in data.files:
                         raise KeyError(
                             f"{path} does not contain perception obs key "
@@ -1247,7 +2860,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                         )
                     values = np.asarray(data[self._perception_obs_file_key], dtype=np.float32)
             else:
-                values = np.asarray(np.load(path), dtype=np.float32)
+                values = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32)
             values = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
             if values.shape[1] != int(expected_dim):
                 raise ValueError(
@@ -1280,7 +2893,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._policy_action_file_values is None:
             path = self._policy_action_file_path
             if path.suffix.lower() == ".npz":
-                with np.load(path) as data:
+                with np.load(path, allow_pickle=False) as data:
                     if self._policy_action_file_key not in data.files:
                         raise KeyError(
                             f"{path} does not contain action key {self._policy_action_file_key!r}; "
@@ -1288,7 +2901,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                         )
                     values = np.asarray(data[self._policy_action_file_key], dtype=np.float32)
             else:
-                values = np.asarray(np.load(path), dtype=np.float32)
+                values = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32)
             values = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
             if values.shape[1] != int(self.num_dofs):
                 raise ValueError(f"Policy action file dim mismatch: got {values.shape[1]}, expected {self.num_dofs}")
@@ -1515,13 +3128,89 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _normalize_angle(angle: float) -> float:
         return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
-    def _get_latest_sim_state(self) -> dict | None:
-        if self._sim_state_sub is None:
-            return self._latest_sim_state
-        state = self._sim_state_sub.get_state()
-        if state is not None:
-            self._latest_sim_state = state
+    @staticmethod
+    def _sim_state_payload(snapshot) -> Mapping | None:
+        if snapshot is None:
+            return None
+        payload = getattr(snapshot, "payload", snapshot)
+        return payload if isinstance(payload, Mapping) else None
+
+    def _pin_control_tick_state(self, robot_state_data) -> None:
+        super()._pin_control_tick_state(robot_state_data)
+        snapshot = getattr(self, "_control_tick_sim_state_snapshot", None)
+        if snapshot is None and self._sim_state_sub is not None:
+            # A non-ZMQ-lowcmd fallback still polls exactly once per control
+            # tick. Every observation helper below reads this pinned mapping.
+            snapshot = self._sim_state_sub.get_state()
+            self._control_tick_sim_state_snapshot = snapshot
+        payload = self._sim_state_payload(snapshot)
+        if payload is not None:
+            self._latest_sim_state = payload
+
+    def _get_latest_sim_state(self) -> Mapping | None:
+        if bool(getattr(self, "_control_tick_state_pinned", False)):
+            return self._sim_state_payload(
+                getattr(self, "_control_tick_sim_state_snapshot", None)
+            )
+
+        get_snapshot = getattr(
+            getattr(self, "interface", None),
+            "get_latest_sim_state_snapshot",
+            None,
+        )
+        if callable(get_snapshot):
+            payload = self._sim_state_payload(get_snapshot())
+            if payload is not None:
+                self._latest_sim_state = payload
+            return payload
+        if self._sim_state_sub is not None:
+            state = self._sim_state_sub.get_state()
+            if state is not None:
+                self._latest_sim_state = state
         return self._latest_sim_state
+
+    def _get_control_tick_sim_time_ms(self) -> float | None:
+        snapshot = getattr(self, "_control_tick_sim_state_snapshot", None)
+        sim_time_ms = getattr(snapshot, "sim_time_ms", None)
+        if sim_time_ms is None:
+            payload = self._sim_state_payload(snapshot)
+            if payload is not None:
+                sim_time_ms = payload.get("sim_time_ms")
+        if sim_time_ms is None:
+            return None
+        sim_time_ms = float(sim_time_ms)
+        if not np.isfinite(sim_time_ms) or sim_time_ms < 0.0:
+            raise ValueError(
+                f"Pinned simulator sim_time_ms must be finite and non-negative, got {sim_time_ms!r}."
+            )
+        return sim_time_ms
+
+    def _get_control_tick_episode_generation(self) -> int | None:
+        snapshot = getattr(self, "_control_tick_sim_state_snapshot", None)
+        episode_generation = getattr(snapshot, "episode_generation", None)
+        if episode_generation is None:
+            payload = self._sim_state_payload(snapshot)
+            if payload is not None:
+                episode_generation = payload.get("episode_generation")
+        if episode_generation is None:
+            return None
+        if (
+            isinstance(episode_generation, bool)
+            or not isinstance(episode_generation, (int, np.integer))
+            or int(episode_generation) < 0
+            or int(episode_generation) > (1 << 63) - 1
+        ):
+            raise ValueError(
+                "Pinned simulator episode_generation must be a non-negative integer within "
+                f"the transport range, got {episode_generation!r}."
+            )
+        return int(episode_generation)
+
+    def _get_control_clock_ms(self) -> int:
+        pinned_sim_time_ms = self._get_control_tick_sim_time_ms()
+        if pinned_sim_time_ms is not None:
+            return int(round(pinned_sim_time_ms))
+        return int(self.clock_sub.get_clock())
 
     def _has_valid_robot_state(self, robot_state_data) -> bool:
         if self.config.task.use_sim_state and self._get_latest_sim_state() is None:
@@ -1537,8 +3226,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return None
         root_state_np = np.asarray(root_state, dtype=np.float32).reshape(1, -1)
         if root_state_np.shape[1] < 13:
-            return None
-        return root_state_np[:, :13]
+            raise ValueError(
+                f"Simulator robot_root_state must contain at least 13 values, got {root_state_np.shape[1]}."
+            )
+        return self._require_finite_array(
+            root_state_np[:, :13],
+            label="simulator robot_root_state",
+        )
 
     def _get_sim_ref_state(self) -> np.ndarray | None:
         state = self._get_latest_sim_state()
@@ -1549,15 +3243,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return None
         ref_state_np = np.asarray(ref_state, dtype=np.float32).reshape(1, -1)
         if ref_state_np.shape[1] < 13:
-            return None
-        return ref_state_np[:, :13]
+            raise ValueError(
+                f"Simulator robot_ref_state must contain at least 13 values, got {ref_state_np.shape[1]}."
+            )
+        return self._require_finite_array(
+            ref_state_np[:, :13],
+            label="simulator robot_ref_state",
+        )
 
     def _get_sim_actor_state(self, actor_name: str) -> np.ndarray | None:
         state = self._get_latest_sim_state()
         if not state:
             return None
         actors = state.get("actors")
-        if not isinstance(actors, dict) or not actors:
+        if not isinstance(actors, Mapping) or not actors:
             return None
         actor_state = actors.get(actor_name)
         if actor_state is None and len(actors) == 1:
@@ -1566,8 +3265,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return None
         actor_state_np = np.asarray(actor_state, dtype=np.float32).reshape(1, -1)
         if actor_state_np.shape[1] < 13:
-            return None
-        return actor_state_np[:, :13]
+            raise ValueError(
+                f"Simulator actor {actor_name!r} state must contain at least 13 values, "
+                f"got {actor_state_np.shape[1]}."
+            )
+        return self._require_finite_array(
+            actor_state_np[:, :13],
+            label=f"simulator actor {actor_name!r} state",
+        )
 
     def _augment_robot_state_with_sim_state(self, robot_state_data: np.ndarray | None) -> np.ndarray | None:
         if robot_state_data is None:
@@ -1591,6 +3296,34 @@ class WholeBodyTrackingPolicy(BasePolicy):
         rel_pos_b = quat_apply(quat_inverse(robot_ref_quat_wxyz), rel_pos_w)
         rel_quat_b = subtract_frame_transforms(robot_ref_quat_wxyz, target_quat_wxyz)
         return rel_pos_b.astype(np.float32, copy=False), rel_quat_b.astype(np.float32, copy=False)
+
+    def _get_base_lin_vel_obs(self, robot_state_data: np.ndarray) -> np.ndarray:
+        """Return base linear velocity in the body frame used during training."""
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            return quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 7:10]).astype(
+                np.float32,
+                copy=False,
+            )
+        return robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3].astype(
+            np.float32,
+            copy=False,
+        )
+
+    def _get_base_ang_vel_obs(self, robot_state_data: np.ndarray) -> np.ndarray:
+        """Return base angular velocity in the body frame used during training."""
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            return quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13]).astype(
+                np.float32,
+                copy=False,
+            )
+        return robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6].astype(
+            np.float32,
+            copy=False,
+        )
 
     def _get_motion_ref_ori_b(self, robot_state_data: np.ndarray) -> np.ndarray:
         motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)
@@ -1661,7 +3394,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             )
             return effective_command
 
-        sub = self._manual_sparse_root_command_sub
+        sub = getattr(self, "_manual_sparse_root_command_sub", None)
         if sub is None:
             self._record_sparse_root_command(
                 motion_command,
@@ -1761,17 +3494,36 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return self._contact_aware_carry_window
 
         cfg = self._motion_cfg or {}
-        mode = str(cfg.get("contact_aware_carry_window_mode", "rel_z")).strip().lower().replace("-", "_")
+        mode, alpha, smoothing_steps = _validated_contact_aware_carry_window_config(cfg)
         consecutive_steps = 5
         total_steps = int(self._motion_data.frame_count)
         if total_steps <= 0:
             self._contact_aware_carry_window = (0, 0)
             return self._contact_aware_carry_window
 
+        source_semantics = str(
+            (getattr(self, "_effective_motion_transition_settings", None) or {}).get(
+                "source_semantics",
+                "single_clip_static",
+            )
+        )
+        prepend_steps = int(getattr(self, "_motion_transition_prepend_steps", 0) or 0)
+        source_offset = (
+            prepend_steps
+            if source_semantics == "global_multi_clip_runtime" and prepend_steps > 0
+            else 0
+        )
+        source_total_steps = total_steps - source_offset
+        if source_total_steps <= 0:
+            raise ValueError(
+                "Materialized runtime prepend leaves no source motion frames for the "
+                "contact-aware carry-window contract."
+            )
+        source_object_pos_w = self._motion_data.object_pos_w[source_offset:]
+        source_root_pos_w = self._motion_data.root_pos_w[source_offset:]
+
         if mode == "peak_height":
-            alpha = max(0.0, min(float(cfg.get("contact_aware_peak_height_alpha", 0.91)), 1.0))
-            smoothing_steps = int(cfg.get("contact_aware_peak_height_smoothing_steps", 5))
-            height = _smooth_1d_edge_padded(self._motion_data.object_pos_w[:, 2], smoothing_steps)
+            height = _smooth_1d_edge_padded(source_object_pos_w[:, 2], smoothing_steps)
             threshold = float(np.min(height) + max(float(np.max(height) - np.min(height)), 0.0) * alpha)
             high_mask = height >= threshold
             carry_start = _first_sustained_true_index(high_mask, consecutive_steps)
@@ -1782,12 +3534,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             carry_end = _first_sustained_true_index_from(
                 ~high_mask,
                 consecutive_steps,
-                start_idx=min(peak_step + 1, total_steps),
+                start_idx=min(peak_step + 1, source_total_steps),
             )
             if carry_end is None:
-                carry_end = total_steps
+                carry_end = source_total_steps
+
         else:
-            rel_z = self._motion_data.object_pos_w[:, 2] - self._motion_data.root_pos_w[:, 2]
+            rel_z = source_object_pos_w[:, 2] - source_root_pos_w[:, 2]
             z_min = float(np.min(rel_z))
             z_range = max(float(np.max(rel_z) - z_min), 0.0)
             threshold = z_min + max(0.10, z_range * 0.35)
@@ -1800,13 +3553,36 @@ class WholeBodyTrackingPolicy(BasePolicy):
             carry_end = _first_sustained_true_index_from(
                 lowered_mask,
                 consecutive_steps,
-                start_idx=min(int(carry_start) + 1, total_steps),
+                start_idx=min(int(carry_start) + 1, source_total_steps),
             )
             if carry_end is None:
-                carry_end = total_steps
+                carry_end = source_total_steps
 
-        carry_start = max(0, min(int(carry_start), total_steps))
-        carry_end = max(carry_start, min(int(carry_end), total_steps))
+        carry_start = max(0, min(int(carry_start), source_total_steps))
+        carry_end = max(carry_start, min(int(carry_end), source_total_steps))
+        carry_start, carry_end = _map_source_window_to_materialized_timeline(
+            (carry_start, carry_end),
+            source_semantics=source_semantics,
+            prepend_steps=source_offset,
+        )
+
+        # Training's rel-z contact-aware root command uses the exported t2
+        # interval to stop before release. The sidecar window has already been
+        # mapped onto the materialized clock, so cap only after the kinematic
+        # source window receives the same mapping.
+        contact_window = getattr(
+            self,
+            "_contact_aware_contact_window",
+            getattr(self, "_contact_aware_button_window", None),
+        )
+        if mode == "rel_z" and contact_window is not None:
+            _, contact_t2 = contact_window
+            release_start = max(
+                0,
+                min(int(contact_t2) - _CONTACT_STAGE_RELEASE_LEAD_STEPS, total_steps),
+            )
+            carry_end = min(carry_end, release_start)
+        carry_end = max(carry_start, carry_end)
         self._contact_aware_carry_window = (carry_start, carry_end)
         logger.info("Contact-aware sparse root command active window: [{}, {}) mode={}", carry_start, carry_end, mode)
         return self._contact_aware_carry_window
@@ -1833,24 +3609,51 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return zero_command
 
-    def _get_external_drop_button_override(self) -> np.ndarray | None:
-        sub = self._manual_sparse_root_command_sub
+    def _get_external_button_override(self, button_name: str) -> np.ndarray | None:
+        """Return one strict binary external button override, if published.
+
+        The sparse-root publisher is also the authenticated manual-button
+        transport for split rollouts.  Valid scalar values are thresholded at
+        0.5; malformed, non-scalar, or non-finite payloads are ignored so they
+        cannot silently inject a different command bit.
+        """
+
+        if button_name not in {"pickup", "drop"}:
+            raise ValueError(f"Unsupported external policy button: {button_name!r}")
+        sub = getattr(self, "_manual_sparse_root_command_sub", None)
         if sub is None:
             return None
         payload = sub.get_payload()
-        if not isinstance(payload, dict) or "drop_button" not in payload:
+        payload_key = f"{button_name}_button"
+        if not isinstance(payload, dict) or payload_key not in payload:
             return None
-        raw_value = payload.get("drop_button")
+        raw_value = payload.get(payload_key)
         try:
-            drop_value = float(np.asarray(raw_value, dtype=np.float32).reshape(-1)[0])
+            values = np.asarray(raw_value, dtype=np.float32).reshape(-1)
+            if values.size != 1:
+                raise ValueError(f"expected one scalar, got {values.size}")
+            button_value = float(values[0])
+            if not np.isfinite(button_value):
+                raise ValueError("value must be finite")
         except (TypeError, ValueError, IndexError):
-            logger.warning("Ignoring malformed external drop button value: {}", raw_value)
+            logger.warning(
+                "Ignoring malformed external {} button value: {}",
+                button_name,
+                raw_value,
+            )
             return None
-        drop_value = 1.0 if drop_value >= 0.5 else 0.0
-        if self._manual_drop_button_log_value != drop_value:
-            logger.info("External drop button override: {}", int(drop_value))
-            self._manual_drop_button_log_value = drop_value
-        return np.array([[drop_value]], dtype=np.float32)
+        button_value = 1.0 if button_value >= 0.5 else 0.0
+        log_attr = f"_manual_{button_name}_button_log_value"
+        if getattr(self, log_attr, None) != button_value:
+            logger.info("External {} button override: {}", button_name, int(button_value))
+            setattr(self, log_attr, button_value)
+        return np.array([[button_value]], dtype=np.float32)
+
+    def _get_external_pickup_button_override(self) -> np.ndarray | None:
+        return self._get_external_button_override("pickup")
+
+    def _get_external_drop_button_override(self) -> np.ndarray | None:
+        return self._get_external_button_override("drop")
 
     def _get_drop_button(self) -> np.ndarray:
         external_drop_button = self._get_external_drop_button_override()
@@ -1858,12 +3661,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return external_drop_button
         if self._motion_data is None or not self._motion_data.has_object:
             return np.zeros((1, 1), dtype=np.float32)
-        _, carry_end = self._get_contact_aware_carry_window()
+        _, carry_end = self._get_contact_aware_button_window()
         return np.array([[1.0 if self._get_motion_index() >= carry_end else 0.0]], dtype=np.float32)
 
+    def _get_pickup_button(self) -> np.ndarray:
+        external_pickup_button = self._get_external_pickup_button_override()
+        if external_pickup_button is not None:
+            return external_pickup_button
+        if self._motion_data is None or not self._motion_data.has_object:
+            return np.zeros((1, 1), dtype=np.float32)
+        carry_start, _ = self._get_contact_aware_button_window()
+        return np.array([[1.0 if self._get_motion_index() < carry_start else 0.0]], dtype=np.float32)
+
+    def _get_contact_aware_button_window(self) -> tuple[int, int]:
+        if self._contact_aware_button_window is not None:
+            return self._contact_aware_button_window
+        return self._get_contact_aware_carry_window()
+
     def _get_depth_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
-        base_lin_vel = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
-        base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
         sparse_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
         contact_aware_sparse_command = (
             self._get_sparse_target_root_trajectory_command_contact_aware(robot_state_data, sparse_command)
@@ -1873,9 +3688,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return {
             "sparse_target_root_trajectory_command": sparse_command,
             "sparse_target_root_trajectory_command_contact_aware": contact_aware_sparse_command,
+            "pickup_button": self._get_pickup_button(),
             "drop_button": self._get_drop_button(),
-            "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
-            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "base_lin_vel": self._get_base_lin_vel_obs(robot_state_data),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
                 np.float32,
                 copy=False,
@@ -1913,16 +3729,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         obj_current_rot6d = matrix_from_quat(obj_current_quat_b)[..., :2].reshape(1, -1)
         obj_current_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
 
-        sim_root_state = self._get_sim_root_state()
-        if sim_root_state is not None:
-            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
-            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
-        else:
-            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
-
         return {
             "sparse_target_root_trajectory_command": self._get_sparse_target_root_trajectory_command(robot_state_data),
-            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
                 np.float32,
                 copy=False,
@@ -1954,16 +3763,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             motion_object_quat_wxyz = self._apply_motion_alignment_quat(motion_object_quat_wxyz)
 
         sim_object_state = self._get_sim_actor_state(self.config.task.sim_object_name)
-        if sim_object_state is not None:
-            current_object_pos_w = sim_object_state[:, :3]
-            current_object_quat_wxyz = xyzw_to_wxyz(sim_object_state[:, 3:7])
-            current_object_lin_vel_w = sim_object_state[:, 7:10]
-            current_object_ang_vel_w = sim_object_state[:, 10:13]
-        else:
-            current_object_pos_w = self._motion_data.object_pos_w[idx : idx + 1]
-            current_object_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1]
-            current_object_lin_vel_w = np.zeros((1, 3), dtype=np.float32)
-            current_object_ang_vel_w = np.zeros((1, 3), dtype=np.float32)
+        if sim_object_state is None:
+            raise RuntimeError(
+                "Object-policy observations require a valid current object state from the simulator bridge. "
+                "Substituting the motion target would silently collapse obj_pos_b/obj_ori_b tracking error."
+            )
+        current_object_pos_w = sim_object_state[:, :3]
+        current_object_quat_wxyz = xyzw_to_wxyz(sim_object_state[:, 3:7])
+        current_object_lin_vel_w = sim_object_state[:, 7:10]
+        current_object_ang_vel_w = sim_object_state[:, 10:13]
 
         obj_target_pos_b, obj_target_quat_b = self._pose_in_robot_ref_frame(
             robot_ref_pos_w,
@@ -1982,28 +3790,30 @@ class WholeBodyTrackingPolicy(BasePolicy):
         obj_rot6d = matrix_from_quat(obj_quat_b)[..., :2].reshape(1, -1)
         obj_lin_vel_b = quat_apply(
             quat_inverse(robot_ref_quat_wxyz),
-            current_object_lin_vel_w - robot_ref_pos_w,
+            current_object_lin_vel_w,
         )
         obj_ang_vel_b = quat_rotate_inverse(robot_ref_quat_wxyz, current_object_ang_vel_w)
         object_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
 
-        sim_root_state = self._get_sim_root_state()
-        if sim_root_state is not None:
-            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
-            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
-        else:
-            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
-
         return {
             "motion_command": self.motion_command_t,
             "motion_ref_ori_b": self._get_motion_ref_ori_b(robot_state_data),
-            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
             "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
             "actions": self.last_policy_action,
             "obj_target_pose_size_b": np.concatenate(
                 [obj_target_pos_b, obj_target_rot6d, object_size], axis=1
             ).astype(np.float32, copy=False),
+            # Current object-training checkpoints serialize these target
+            # components as three independently sorted terms.  They have the
+            # same aggregate width as ``obj_target_pose_size_b`` but a
+            # different flattened layout, so all four representations remain
+            # explicit and the selected metadata-backed preset decides which
+            # keys enter the policy input.
+            "obj_size": object_size,
+            "obj_target_ori_b": obj_target_rot6d.astype(np.float32, copy=False),
+            "obj_target_pos_b": obj_target_pos_b.astype(np.float32, copy=False),
             "obj_pos_b": obj_pos_b.astype(np.float32, copy=False),
             "obj_ori_b": obj_rot6d.astype(np.float32, copy=False),
             "obj_lin_vel_b": obj_lin_vel_b.astype(np.float32, copy=False),
@@ -2024,7 +3834,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         idx = self._get_motion_index()
 
         base_quat = robot_state_data[:, 3:7]
-        base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        base_ang_vel = self._get_base_ang_vel_obs(robot_state_data)
         dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
         dof_vel = robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs]
 
@@ -2069,6 +3879,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def get_current_obs_buffer_dict(self, robot_state_data):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
+        self._refresh_motion_outputs_for_current_timestep()
         if self._uses_videomimic:
             return self._get_videomimic_obs_buffer_dict(robot_state_data)
         if self._uses_object_mocap_distill:
@@ -2089,7 +3900,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         current_obs_buffer_dict["motion_ref_ori_b"] = self._get_motion_ref_ori_b(robot_state_data)
 
         # base_ang_vel
-        current_obs_buffer_dict["base_ang_vel"] = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        current_obs_buffer_dict["base_ang_vel"] = self._get_base_ang_vel_obs(robot_state_data)
 
         # dof_pos
         current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
@@ -2119,6 +3930,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def rl_inference(self, robot_state_data):
         self._maybe_start_pending_auto_motion_clip(robot_state_data)
+        self._maybe_complete_motion_end_reset()
 
         # prepare obs, run policy inference
         if not self.motion_clip_progressing:
@@ -2140,6 +3952,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._skip_next_lowcmd_publish = False
 
         motion_index = self._get_motion_index()
+        consumed_motion_index = motion_index
         self._sync_motion_outputs_from_onnx(motion_index)
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {self._obs_input_name: obs["actor_obs"]}
@@ -2152,15 +3965,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
             perception_obs = self._get_file_perception_obs(perception_dim)
             if perception_obs is None:
                 perception_target_sim_time_ms = None
+                perception_target_episode_generation = (
+                    self._get_control_tick_episode_generation()
+                )
                 if os.environ.get("HOLOSOMA_POLICY_ALIGN_PERCEPTION_TO_SIM_STATE", "1").strip().lower() in {
                     "1",
                     "true",
                     "yes",
                     "on",
                 }:
-                    get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
-                    if callable(get_sim_time_ms):
-                        perception_target_sim_time_ms = get_sim_time_ms()
+                    perception_target_sim_time_ms = self._get_control_tick_sim_time_ms()
+                    if perception_target_sim_time_ms is not None:
                         try:
                             perception_target_sim_time_ms += float(
                                 os.environ.get("HOLOSOMA_POLICY_PERCEPTION_TARGET_OFFSET_MS", "0") or "0"
@@ -2170,29 +3985,49 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 perception_obs = self._get_split_perception_obs(
                     perception_dim,
                     target_sim_time_ms=perception_target_sim_time_ms,
+                    target_episode_generation=perception_target_episode_generation,
                 )
             input_feed[self._perception_obs_input_name] = perception_obs
+        self._consume_root_reference_at_clip_start()
         outputs = self.policy(input_feed)
-        policy_action = outputs[self._action_output_name]
+        policy_action = self._require_finite_array(
+            outputs[self._action_output_name],
+            label=f"ONNX output {self._action_output_name!r}",
+        )
         action_override = self._get_file_policy_action()
         if action_override is not None:
-            policy_action = action_override
+            policy_action = self._require_finite_array(
+                action_override,
+                label="policy action file override",
+            )
 
-        if self._uses_motion_command:
+        if self._uses_motion_command and not self._should_source_motion_outputs_from_motion_data():
             joint_pos = outputs.get("joint_pos")
             joint_vel = outputs.get("joint_vel")
             if joint_pos is None or joint_vel is None:
                 raise ValueError("Motion outputs missing during inference.")
-            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
-            self.ref_quat_xyzw_t = outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t)
-            self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+            self.motion_command_t = self._require_finite_array(
+                np.concatenate([joint_pos, joint_vel], axis=1),
+                label="ONNX motion command output",
+            )
+            self.ref_quat_xyzw_t = self._require_finite_array(
+                outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t),
+                label="ONNX reference quaternion output",
+            )
+            ref_pos_xyz = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+            self.ref_pos_xyz_t = (
+                None
+                if ref_pos_xyz is None
+                else self._require_finite_array(
+                    ref_pos_xyz,
+                    label="ONNX reference position output",
+                )
+            )
 
-        # clip policy action
-        policy_action = np.clip(policy_action, -100, 100)
-        # store last policy action
-        self.last_policy_action = policy_action.copy()
-        # scale policy action
-        self.scaled_policy_action = policy_action * self.policy_action_scales
+        policy_action = self._update_policy_action_state(
+            policy_action,
+            label="policy action selected for control",
+        )
         if self._use_motion_command_as_q_target and self._uses_motion_command:
             target_joint_pos = np.asarray(self.motion_command_t[:, : self.num_dofs], dtype=np.float32)
             self.scaled_policy_action = target_joint_pos - self.default_dof_angles
@@ -2206,15 +4041,18 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if not self._logged_motion_data_q_target:
                 logger.info("Using motion .npz joint_pos directly as MuJoCo q_target for diagnostic rollout.")
                 self._logged_motion_data_q_target = True
+        self.scaled_policy_action = self._require_finite_array(
+            self.scaled_policy_action,
+            label="final scaled policy action",
+        )
         self._maybe_debug_policy_io(robot_state_data, obs["actor_obs"], perception_obs, policy_action)
         self._publish_policy_overlay()
 
-        # update motion timestep
-        if self.motion_clip_progressing:
-            if not self.use_sim_time:
-                self.motion_timestep += 1
-            self._maybe_restart_sim_at_motion_end()
-        return self.scaled_policy_action
+        # Preserve the action produced for the consumed final frame even when
+        # the restart path clears internal action history immediately after it.
+        control_action = self.scaled_policy_action.copy()
+        self._advance_motion_after_policy_step(consumed_motion_index)
+        return control_action
 
     @staticmethod
     def _policy_debug_stats(values: np.ndarray, *, max_values: int = 8) -> dict:
@@ -2353,18 +4191,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "count": int(self._policy_debug_count),
             "motion_timestep": int(self.motion_timestep),
             "motion_index": int(self._get_motion_index()),
-            "clock_ms": int(self.clock_sub.get_clock()) if self.use_sim_time else None,
+            "clock_ms": self._get_control_clock_ms() if self.use_sim_time else None,
             "control_target_clock_ms": (
                 int(self._last_policy_control_target_clock_ms)
                 if self._last_policy_control_target_clock_ms is not None
                 else None
             ),
-            "sim_time_ms": (
-                float(self.interface.get_sim_time_ms())
-                if callable(getattr(self.interface, "get_sim_time_ms", None))
-                and self.interface.get_sim_time_ms() is not None
-                else None
-            ),
+            "sim_time_ms": self._get_control_tick_sim_time_ms(),
             "control_schedule_index": int(self._sim_time_control_schedule_index),
             "motion_clip_progressing": bool(self.motion_clip_progressing),
             "actor_obs": self._policy_debug_stats(actor_obs),
@@ -2418,33 +4251,91 @@ class WholeBodyTrackingPolicy(BasePolicy):
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
         self._policy_debug_count += 1
 
-    def _maybe_restart_sim_at_motion_end(self) -> None:
+    def _advance_motion_after_policy_step(self, consumed_motion_index: int) -> None:
+        if not self.motion_clip_progressing:
+            return
+        if not self.use_sim_time:
+            self.motion_timestep += 1
+        self._maybe_restart_sim_at_motion_end(
+            consumed_motion_index=consumed_motion_index,
+        )
+
+    def _hold_at_motion_end(self) -> None:
+        frame_count = self._active_motion_frame_count()
+        if frame_count is None:
+            return
+        last_index = max(frame_count - 1, 0)
+        offset = int(getattr(self, "_motion_index_offset", 0))
+        self.motion_timestep = max(last_index - offset, 0)
+
+    def _maybe_complete_motion_end_reset(self) -> None:
+        if not self._motion_end_reset_requested:
+            return
+        requested_generation = self._motion_end_reset_episode_generation
+        if requested_generation is None:
+            return
+        current_generation = self._get_control_tick_episode_generation()
+        if current_generation is None or current_generation == requested_generation:
+            return
+        if current_generation < requested_generation:
+            raise RuntimeError(
+                "Simulator episode_generation regressed while awaiting motion-end reset: "
+                f"requested_from={requested_generation}, current={current_generation}."
+            )
+        self.logger.info(
+            "Observed simulator reset acknowledgement: episode_generation {} -> {}; restarting clip.",
+            requested_generation,
+            current_generation,
+        )
+        self._handle_start_motion_clip()
+
+    def _maybe_restart_sim_at_motion_end(self, *, consumed_motion_index: int) -> None:
         if not bool(getattr(self.config.task, "restart_sim_on_motion_end", False)):
             return
-        if self._motion_data is None or self._motion_data.frame_count <= 0:
+        frame_count = self._active_motion_frame_count()
+        if frame_count is None:
             return
         if self._motion_end_reset_requested:
+            self._hold_at_motion_end()
             return
-        if int(self.motion_timestep) < self._motion_data.frame_count - 1:
+        if int(consumed_motion_index) < frame_count - 1:
             return
 
         if self._disable_motion_end_sim_reset:
-            self.motion_timestep = min(int(self.motion_timestep), max(self._motion_data.frame_count - 1, 0))
+            self._hold_at_motion_end()
             self._motion_end_reset_requested = True
+            self._motion_end_reset_episode_generation = None
             self.logger.info("Motion clip reached the end; automatic simulator reset is disabled.")
             return
 
         self._motion_end_reset_requested = True
+        self._hold_at_motion_end()
+        episode_generation = self._get_control_tick_episode_generation()
+        self._motion_end_reset_episode_generation = episode_generation
         sim_control_pub = getattr(self.interface, "_sim_control_pub", None)
-        if sim_control_pub is not None and hasattr(sim_control_pub, "request_reset"):
-            sim_control_pub.request_reset("motion_end")
-            self.logger.info("Motion clip reached the end; requested simulator reset and restarting clip.")
-        else:
-            self.logger.warning("Motion clip reached the end, but simulator reset channel is unavailable.")
-        self.last_policy_action.fill(0.0)
-        self.scaled_policy_action.fill(0.0)
-        self._handle_start_motion_clip()
-        self._motion_end_reset_requested = False
+        if episode_generation is None:
+            self.logger.error(
+                "Motion clip reached the end without a pinned simulator episode_generation; "
+                "holding the final frame instead of replaying against unreset physics."
+            )
+            return
+        if sim_control_pub is None or not hasattr(sim_control_pub, "request_reset"):
+            self.logger.error(
+                "Motion clip reached the end, but the simulator reset channel is unavailable; "
+                "holding the final frame instead of replaying against unreset physics."
+            )
+            return
+        reset_sent = sim_control_pub.request_reset("motion_end")
+        if reset_sent is not True:
+            self.logger.error(
+                "Motion-end simulator reset could not be published; holding the final frame "
+                "instead of replaying against unreset physics."
+            )
+            return
+        self.logger.info(
+            "Motion clip reached the end; requested simulator reset and awaiting an "
+            "episode_generation acknowledgement before restarting the clip."
+        )
 
     def _get_manual_command(self, robot_state_data):
         # TODO: instead of adding kp/kd_override in def _set_motor_command,
@@ -2489,6 +4380,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         pose_ready = dof_err is None or dof_err <= pose_tolerance
         timed_out = max_wait_sec > 0.0 and elapsed >= max_wait_sec
         if waited_long_enough and (pose_ready or timed_out or max_wait_sec <= 0.0):
+            prime_steps = self._get_autostart_policy_history_prime_steps()
+            priming_required = (
+                self._dryrun_autostart_policy_history
+                and self._warm_autostart_obs_history
+                and prime_steps > 0
+            )
+            if priming_required and not self._prime_auto_start_policy_history(robot_state_data):
+                return
             self._auto_start_motion_clip_pending = False
             self._auto_start_motion_clip_hold_start_time = None
             self.logger.info(
@@ -2530,23 +4429,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if not self.use_sim_time:
             return False
 
-        current_clock = int(self.clock_sub.get_clock())
+        current_clock = self._get_control_clock_ms()
         if self._sim_time_control_schedule_ms:
-            get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
-            if callable(get_sim_time_ms):
-                try:
-                    sim_time_ms = get_sim_time_ms()
-                    if sim_time_ms is not None:
-                        current_clock = int(round(float(sim_time_ms)))
-                except (TypeError, ValueError):
-                    pass
             index = min(self._sim_time_control_schedule_index, len(self._sim_time_control_schedule_ms) - 1)
             target_clock = int(self._sim_time_control_schedule_ms[index])
             if current_clock < target_clock:
                 return True
             motion_timestep = int(self._sim_time_control_schedule_index)
-            if self._disable_motion_end_sim_reset and self._motion_data is not None:
-                motion_timestep = min(motion_timestep, max(self._motion_data.frame_count - 1, 0))
+            frame_count = self._active_motion_frame_count()
+            if self._disable_motion_end_sim_reset and frame_count is not None:
+                motion_timestep = min(motion_timestep, max(frame_count - 1, 0))
             self.motion_timestep = motion_timestep
             self._last_policy_control_target_clock_ms = target_clock
             self._last_policy_control_clock_ms = current_clock
@@ -2580,13 +4472,30 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
         if self._motion_alignment_enabled:
-            robot_state_data = self.interface.get_low_state()
+            robot_state_data = self._get_control_tick_robot_state()
             if robot_state_data is not None:
                 self._maybe_update_motion_alignment(self._augment_robot_state_with_sim_state(robot_state_data))
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
-        current_clock = self.clock_sub.get_clock()
+        current_clock = self._get_control_clock_ms()
+        if self._training_freeze_zero_remaining_holds > 0:
+            self._training_freeze_zero_remaining_holds -= 1
+            if not self._logged_training_freeze_zero_alignment:
+                self.logger.info(
+                    "Applying training-like timestep-0 hold: prob={:.3f}, deterministic_holds={}.",
+                    self._training_freeze_zero_prob,
+                    self._training_freeze_zero_extra_holds,
+                )
+                self._logged_training_freeze_zero_alignment = True
+            if self._training_freeze_zero_remaining_holds == 0:
+                self.motion_timestep = 1
+                self.motion_start_timestep = current_clock - int(round(self.timestep_interval_ms))
+            else:
+                self.motion_timestep = 0
+                self.motion_start_timestep = current_clock
+            self._last_clock_reading = current_clock
+            return
         if self.motion_start_timestep is None:
             # Motion just started; anchor to the first received clock tick.
             self.motion_start_timestep = current_clock
@@ -2594,7 +4503,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if bool(getattr(self.config.task, "restart_motion_on_clock_reset", False)):
                 self.logger.warning("Clock sync returned earlier timestamp; restarting motion clip from frame 0.")
                 self._handle_start_motion_clip()
-                current_clock = self.clock_sub.get_clock()
+                current_clock = self._get_control_clock_ms()
             else:
                 # Simulator clock jumped backwards (e.g., reset). Re-anchor start time while preserving progress.
                 offset_ms = round(self.motion_timestep * self.timestep_interval_ms)
@@ -2621,8 +4530,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
         previous_motion_timestep = self.motion_timestep
         self.motion_timestep = int(elapsed_ms // self.timestep_interval_ms)
-        if self._disable_motion_end_sim_reset and self._motion_data is not None:
-            self.motion_timestep = min(self.motion_timestep, max(self._motion_data.frame_count - 1, 0))
+        frame_count = self._active_motion_frame_count()
+        if self._disable_motion_end_sim_reset and frame_count is not None:
+            self.motion_timestep = min(self.motion_timestep, max(frame_count - 1, 0))
         if self.motion_timestep != previous_motion_timestep and self.motion_timestep % 50 == 0:
             self.logger.info(
                 "Motion timestep advanced from {previous_motion_timestep} to {motion_timestep}",
@@ -2635,6 +4545,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
+        self._reset_observation_history_state()
+        self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
         self.logger.info("Actions set to stiff startup command")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
@@ -2644,38 +4557,75 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # Reset motion start time
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
+        self._last_motion_output_timestep = 0
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
         self._sim_time_control_schedule_index = 0
         self._last_policy_control_target_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
         self._motion_end_reset_requested = False
+        self._motion_end_reset_episode_generation = None
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
         self.clock_sub.reset_origin()
+        preserve_root_reference_state = False
+        if getattr(self, "_preserve_obs_history_on_next_motion_start", False):
+            self._preserve_obs_history_on_next_motion_start = False
+            preserve_root_reference_state = getattr(
+                self,
+                "_preserve_root_reference_state_on_next_motion_start",
+                False,
+            )
+        else:
+            self._reset_observation_history_state()
+        self._preserve_root_reference_state_on_next_motion_start = False
+        self._auto_start_history_snapshot = None
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
+        self._last_motion_output_timestep = None
+        if self.motion_command_0 is not None:
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._refresh_motion_outputs_for_current_timestep()
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
         self._sim_time_control_schedule_index = 0
         self._last_policy_control_target_clock_ms = None
-        self._logged_root_reference_clip_start = False
+        self._training_freeze_zero_remaining_holds = getattr(self, "_training_freeze_zero_extra_holds", 0)
+        self._logged_training_freeze_zero_alignment = False
+        if not preserve_root_reference_state:
+            self._logged_root_reference_clip_start = False
+            self._remaining_root_reference_clip_start_obs = (
+                1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
+            )
+        self._logged_first_policy_step_debug = False
         self._auto_start_motion_clip_hold_start_time = None
         self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
+        self._motion_end_reset_episode_generation = None
+        motion_start_robot_state = (
+            self._get_control_tick_robot_state()
+            if self._motion_alignment_enabled
+            or getattr(self, "_prefill_obs_history_on_motion_start", False)
+            else None
+        )
         if self._motion_alignment_enabled:
-            robot_state_data = self.interface.get_low_state()
+            robot_state_data = motion_start_robot_state
             if robot_state_data is not None:
                 self._maybe_update_motion_alignment(self._augment_robot_state_with_sim_state(robot_state_data))
-        if self._prefill_obs_history_on_motion_start:
-            robot_state_data = self.interface.get_low_state()
+        if getattr(self, "_prefill_obs_history_on_motion_start", False):
+            robot_state_data = motion_start_robot_state
             if robot_state_data is not None and self._has_valid_robot_state(robot_state_data):
                 motion_index = self._get_motion_index()
                 self._sync_motion_outputs_from_onnx(motion_index)
@@ -2718,7 +4668,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _capture_robot_yaw_offset(self):
         """Capture robot yaw when policy starts to use as reference offset."""
-        robot_state_data = self._augment_robot_state_with_sim_state(self.interface.get_low_state())
+        robot_state_data = self._augment_robot_state_with_sim_state(
+            self._get_control_tick_robot_state()
+        )
         if robot_state_data is None:
             self.robot_yaw_offset = 0.0
             self.logger.warning("Unable to capture robot yaw offset - missing robot state.")

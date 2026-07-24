@@ -50,6 +50,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEFAULT_CHECKPOINT="${DEFAULT_CHECKPOINT:-${WANDB_RUN_URL:-}}"
 
@@ -249,7 +250,8 @@ extract_checkpoint_terrain_defaults() {
 import sys
 import tempfile
 from pathlib import Path
-import torch
+
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 def parse_ref(reference: str) -> tuple[str, str]:
     remainder = reference[len("wandb://"):]
@@ -272,8 +274,10 @@ def load_payload(reference: str):
             path = Path(downloaded.name)
             if not path.is_absolute():
                 path = (Path.cwd() / path).resolve()
-            return torch.load(path, map_location="cpu")
-    return torch.load(reference, map_location="cpu")
+            payload, _checkpoint_sha256 = load_verified_torch_checkpoint(path, map_location="cpu")
+            return payload
+    payload, _checkpoint_sha256 = load_verified_torch_checkpoint(reference, map_location="cpu")
+    return payload
 
 payload = load_payload(sys.argv[1])
 cfg = payload.get("experiment_config")

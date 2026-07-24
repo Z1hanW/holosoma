@@ -6,7 +6,7 @@ from typing import Any, Tuple
 
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.simulator.shared.terrain import Terrain
-from holosoma.utils import draw, warp_utils
+from holosoma.utils import warp_utils
 from holosoma.utils.rotations import quat_apply_yaw
 from holosoma.utils.safe_torch_import import torch
 
@@ -189,7 +189,12 @@ class TerrainLocomotion(TerrainTermBase):
     def _get_feet_heights(self, env_ids=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get feet heights from the terrain."""
         idx = env_ids if env_ids is not None else slice(None)
-        foot_positions = self.env.simulator._rigid_body_pos[idx, self.env.feet_height_indices, :].clone()
+        # Select environments and feet in two steps.  Supplying both tensors
+        # in one advanced-indexing expression pairs/broadcasts them instead of
+        # taking their Cartesian product; a full reset therefore failed as
+        # soon as ``num_envs != num_feet`` (for example 128 envs and 2 feet).
+        selected_env_bodies = self.env.simulator._rigid_body_pos[idx]
+        foot_positions = selected_env_bodies[:, self.env.feet_height_indices, :].clone()
         ray_starts_world = foot_positions + self._offset_pos[None, None, ...]
         ray_directions_world = self._ray_directions_feet[idx]
         ray_hits_world = warp_utils.ray_cast(ray_starts_world, ray_directions_world, self.warp_mesh)
@@ -274,6 +279,11 @@ class TerrainLocomotion(TerrainTermBase):
         return ray_hits[:, 2]
 
     def draw_debug_viz(self):
+        # Drawing backends depend on the globally selected simulator.  Keep
+        # that dependency at the visualization boundary so terrain math can
+        # be imported and tested before simulator initialization.
+        from holosoma.utils import draw  # noqa: PLC0415
+
         env_id = 0
         for j in range(self._num_base_height_points):
             position = self._ray_hits_world_base[env_id, j].detach().cpu().numpy()

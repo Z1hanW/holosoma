@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="scaledown_any_barrel_25">
+  <link name="baseLink">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.1" />
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002" />
+    </inertial>
+    <visual name="visual_000">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../../../../../../../data/ds_as_data/prism_debug30_convexhull_allmesh/objects_convex_hull/object_mesh_yup_e7481f4304/object_mesh_yup_convex_hull.obj" scale="0.799265981 0.799265981 0.799265981" />
+      </geometry>
+    </visual>
+    <collision name="collision_000">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../../../../../../../data/ds_as_data/prism_debug30_convexhull_allmesh/objects_convex_hull/object_mesh_yup_e7481f4304/object_mesh_yup_convex_hull.obj" scale="0.799265981 0.799265981 0.799265981" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

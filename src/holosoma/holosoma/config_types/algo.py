@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any, List, Union
+from typing import Annotated, Any, List, Union
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+
+# A Flow policy executes one neural-network forward per Euler step.  This cap
+# is already far beyond useful deployment resolution while keeping a malformed
+# configuration from turning one action evaluation into an effectively
+# unbounded loop.
+MAX_FLOW_INTEGRATION_STEPS = 4096
+
+# Flow targets square the sampled Gaussian displacement in a float32 MSE.  At
+# 1e18, even an approximately 18-sigma sample remains below float32's maximum;
+# larger values have no practical policy meaning and can create Inf/NaN before
+# the optimizer gets a chance to fail closed.
+MAX_FLOW_NOISE_STD = 1.0e18
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,9 @@ class LayerConfig:
     perception_pretrained_path: str | None = None
     """Optional local checkpoint path for external perception encoders."""
 
+    perception_pretrained_sha256: str | None = None
+    """Authenticated SHA-256 for an external perception checkpoint."""
+
     perception_freeze_backbone: bool = True
     """Freeze external perception backbones and train only projection layers when supported."""
 
@@ -129,16 +146,28 @@ class LayerConfig:
     extra_input_to_hidden: bool = False
     """Whether to add an extra input projection to the first hidden layer."""
 
-    flow_integration_steps: int = 4
+    flow_integration_steps: Annotated[
+        int,
+        Field(strict=True, ge=1, le=MAX_FLOW_INTEGRATION_STEPS),
+    ] = 4
     """Number of Euler integration steps used by flow actor inference."""
 
-    flow_train_noise_std: float = 1.0
+    flow_train_noise_std: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=MAX_FLOW_NOISE_STD, allow_inf_nan=False),
+    ] = 1.0
     """Standard deviation of the base Gaussian used for flow-matching targets."""
 
-    flow_time_epsilon: float = 1e-4
+    flow_time_epsilon: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=0.49, allow_inf_nan=False),
+    ] = 1e-4
     """Minimum distance from 0/1 when sampling flow-matching time values."""
 
-    flow_inference_noise_std: float = 0.0
+    flow_inference_noise_std: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=MAX_FLOW_NOISE_STD, allow_inf_nan=False),
+    ] = 0.0
     """Initial noise std for flow actor inference; 0 keeps deployment deterministic."""
 
 
@@ -163,6 +192,9 @@ class ModuleConfig:
 
     min_mean_noise_std: float | None = None
     """Minimum mean noise standard deviation."""
+
+    max_noise_std: float | None = None
+    """Optional upper bound for each policy action noise standard deviation."""
 
 
 @dataclass(frozen=True)
@@ -281,6 +313,24 @@ class DistillationConfig:
     dagger_ignore_episode_initial_steps: int = 0
     """Ignore BC samples from the first N episode steps (useful when reset states are outside teacher distribution)."""
 
+    dagger_replay_enabled: Annotated[bool, Field(strict=True)] = False
+    """Enable bounded rank-local deterministic replay for pure-BC DAgger only."""
+
+    dagger_replay_capacity: Annotated[int, Field(strict=True, ge=1)] = 512
+    """Maximum number of valid teacher-labelled rows retained on each rank."""
+
+    dagger_replay_batch_size: Annotated[int, Field(strict=True, ge=1)] = 512
+    """Rank-local replay rows sampled (with replacement) for each actor update."""
+
+    dagger_replay_fraction: Annotated[
+        float,
+        Field(strict=True, gt=0.0, lt=1.0, allow_inf_nan=False),
+    ] = 0.5
+    """Replay share in ``(1-fraction) * current_BC + fraction * replay_BC``."""
+
+    dagger_replay_seed: Annotated[int, Field(strict=True, ge=0)] = 0
+    """Base seed for the independent rank-local replay sampler/reservoir RNG."""
+
     dagger_match_std: bool = False
     """Match policy std against teacher std in BC loss (legacy behavior)."""
 
@@ -288,10 +338,28 @@ class DistillationConfig:
     """Fail fast on teacher architecture/obs mismatch instead of fallback loading."""
 
     fixed_bc_eval_num_samples: int = 4096
-    """Number of fixed teacher-labeled samples to cache for deterministic BC evaluation (0 disables)."""
+    """DAgger-only fixed teacher-labeled evaluation budget (0 disables)."""
 
     fixed_bc_eval_log_interval: int = 1
     """Log fixed-set BC evaluation metrics every N learning iterations."""
+
+    fixed_bc_guard_enabled: bool = False
+    """Fail closed when the frozen-set student mean-action MSE regresses beyond its reference bound."""
+
+    fixed_bc_guard_reference_end_epoch: int = 600
+    """Inclusive final iteration used to establish the fixed-BC reference minimum."""
+
+    fixed_bc_guard_max_reference_ratio: float = 2.0
+    """Maximum allowed multiple of the best reference-period fixed-BC mean-action MSE."""
+
+    fixed_bc_guard_absolute_max_mu_mse: float = 0.160
+    """Absolute fixed-BC mean-action MSE ceiling; the effective bound is the tighter ceiling."""
+
+    fixed_bc_guard_start_epoch: int = -1
+    """First iteration eligible to count a post-reference regression (-1 is invalid when enabled)."""
+
+    fixed_bc_guard_consecutive_evals: int = 3
+    """Number of consecutive over-bound fixed-BC evaluations that trip the fail-closed guard."""
 
 
 
@@ -369,6 +437,18 @@ class PPOConfig:
 
     save_interval: int = 1000
     """Interval for saving model checkpoints."""
+
+    reset_rollout_at_checkpoint: bool = False
+    """Force an all-environment reset after non-final checkpoints.
+
+    The default keeps ordinary checkpoint publication observational: the live
+    rollout continues without truncating episodes.  Enable this only when a
+    compact checkpoint must define the same canonical new-episode boundary for
+    uninterrupted and resumed training.  With the default disabled, a full
+    resume restores model/optimizer/curriculum/RNG state but begins a new
+    rollout stream and is therefore a recovery continuation, not an identical
+    trajectory continuation.
+    """
 
     load_optimizer: bool = True
     """Whether to load optimizer state."""
@@ -473,6 +553,15 @@ class FastSACConfig:
 
     use_tanh: bool = True
     """whether to use tanh for the action"""
+
+    action_boundary_mode: str = "joint_limit_affine_v2"
+    """Mapping from the actor's tanh output to environment actions.
+
+    ``joint_limit_affine_v2`` uses the live joint-position action term's
+    per-joint scale and an affine bias so tanh ``[-1, 1]`` maps exactly to the
+    configured joint limits. ``legacy_max_range_scalar_v1`` exists only to
+    reproduce checkpoints written before this contract was versioned.
+    """
 
     log_std_max: float = 0.0
     """the maximum value of the log std"""

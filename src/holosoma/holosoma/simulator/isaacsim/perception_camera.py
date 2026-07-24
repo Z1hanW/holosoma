@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -37,6 +37,7 @@ class IsaacSimDepthCamera:
         height: int,
         vfov_deg: float,
         device: str,
+        pose_provider: Callable[[torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> None:
         self._env = env
         self._cfg = config
@@ -44,6 +45,7 @@ class IsaacSimDepthCamera:
         self._height = int(height)
         self._vfov_deg = float(vfov_deg)
         self._device = device
+        self._pose_provider = pose_provider
 
         self._env_id = int(getattr(config, "camera_env_id", 0))
         self._body_name = getattr(config, "camera_body_name", None)
@@ -69,7 +71,8 @@ class IsaacSimDepthCamera:
             raise RuntimeError(
                 f"camera_env_id out of range: {self._env_id} (num_envs={self._env.num_envs})"
             )
-        self._resolve_body_index()
+        if self._pose_provider is None:
+            self._resolve_body_index()
 
         import omni.usd
         import omni.replicator.core as rep
@@ -173,51 +176,81 @@ class IsaacSimDepthCamera:
             return
 
         env_id = self._env_id
-        if self._body_index is not None:
+        if self._pose_provider is not None:
+            env_ids = torch.tensor([env_id], device=self._device, dtype=torch.long)
+            camera_pos, camera_quat = self._pose_provider(env_ids)
+            if camera_pos.shape != (1, 3) or camera_quat.shape != (1, 4):
+                raise RuntimeError(
+                    "Isaac rendered camera pose_provider must return shapes (1, 3) and (1, 4)."
+                )
+            if not bool(torch.isfinite(camera_pos).all().item()) or not bool(
+                torch.isfinite(camera_quat).all().item()
+            ):
+                raise RuntimeError("Isaac rendered camera pose_provider returned non-finite values.")
+            quat_norm = torch.linalg.vector_norm(camera_quat, dim=-1)
+            if bool((torch.abs(quat_norm - 1.0) > 1.0e-4).any().item()):
+                raise RuntimeError("Isaac rendered camera pose_provider returned a non-unit quaternion.")
+            # The manager supplies a far-warp optical frame (+X right, +Y
+            # down, +Z forward), while UsdGeom.Camera uses OpenGL axes (+X
+            # right, +Y up, -Z forward).  Post-multiply Rx(pi) to express the
+            # same physical view as a USD camera transform.
+            optical_from_usd = torch.tensor(
+                [[1.0, 0.0, 0.0, 0.0]],
+                device=camera_quat.device,
+                dtype=camera_quat.dtype,
+            )
+            camera_quat = quat_mul(camera_quat, optical_from_usd, w_last=True)
+            camera_pos = camera_pos[0]
+            camera_quat = camera_quat[0]
+        elif self._body_index is not None:
             body_pos = self._env.simulator._rigid_body_pos[env_id, self._body_index]
             body_quat = self._env.simulator._rigid_body_rot[env_id, self._body_index]
         else:
             body_pos = self._env.simulator.robot_root_states[env_id, :3]
             body_quat = self._env.simulator.base_quat[env_id]
+        if self._pose_provider is None:
+            body_pos = body_pos + quat_apply(
+                body_quat.unsqueeze(0),
+                self._body_offset_pos.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
+            body_quat = quat_mul(
+                body_quat.unsqueeze(0),
+                self._body_offset_quat.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
 
-        body_pos = body_pos + quat_apply(body_quat.unsqueeze(0), self._body_offset_pos.unsqueeze(0), w_last=True).squeeze(
-            0
-        )
-        body_quat = quat_mul(body_quat.unsqueeze(0), self._body_offset_quat.unsqueeze(0), w_last=True).squeeze(0)
+            offset_world = quat_apply(
+                body_quat.unsqueeze(0),
+                self._sensor_offset.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
+            camera_pos = body_pos + offset_world
 
-        offset_world = quat_apply(body_quat.unsqueeze(0), self._sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
-        camera_pos = body_pos + offset_world
-
-        pitch_rad = torch.deg2rad(torch.tensor(self._cfg.camera_pitch_deg, device=self._device))
-        pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=self._device),
-            pitch_rad,
-            torch.tensor(0.0, device=self._device),
-        )
-        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
-        camera_quat = quat_mul(
-            camera_quat,
-            self._camera_frame_quat.unsqueeze(0),
-            w_last=True,
-        ).squeeze(0)
+            pitch_rad = torch.deg2rad(torch.tensor(self._cfg.camera_pitch_deg, device=self._device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self._device),
+                pitch_rad,
+                torch.tensor(0.0, device=self._device),
+            )
+            camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
+            camera_quat = quat_mul(
+                camera_quat,
+                self._camera_frame_quat.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
         camera_quat_wxyz = camera_quat[[3, 0, 1, 2]].unsqueeze(0)
 
         self._view.set_world_poses(
             camera_pos.unsqueeze(0),
             camera_quat_wxyz,
-            torch.tensor([env_id], device=self._device, dtype=torch.int32),
+            torch.tensor([0], device=self._device, dtype=torch.int32),
         )
         if self._rgb_view is not None and self._rgb_view is not self._view:
             self._rgb_view.set_world_poses(
                 camera_pos.unsqueeze(0),
                 camera_quat_wxyz,
-                torch.tensor([env_id], device=self._device, dtype=torch.int32),
-            )
-        if self._rgb_view is not None and self._rgb_view is not self._view:
-            self._rgb_view.set_world_poses(
-                camera_pos.unsqueeze(0),
-                camera_quat_wxyz,
-                torch.tensor([env_id], device=self._device, dtype=torch.int32),
+                torch.tensor([0], device=self._device, dtype=torch.int32),
             )
 
     @staticmethod
@@ -341,6 +374,7 @@ class IsaacSimDepthSensorCamera:
         height: int,
         vfov_deg: float,
         device: str,
+        pose_provider: Callable[[torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> None:
         self._env = env
         self._cfg = config
@@ -348,6 +382,7 @@ class IsaacSimDepthSensorCamera:
         self._height = int(height)
         self._vfov_deg = float(vfov_deg)
         self._device = device
+        self._pose_provider = pose_provider
 
         self._env_id = int(getattr(config, "camera_env_id", 0))
         self._body_name = getattr(config, "camera_body_name", None)
@@ -372,11 +407,18 @@ class IsaacSimDepthSensorCamera:
         self._warned_invalid_rgb = False
 
     def setup(self) -> None:
+        if self._pose_provider is not None:
+            raise RuntimeError(
+                "A manager optical pose cannot be applied directly to a SingleViewDepthSensor "
+                "asset root because the selected depth camera may have a non-identity child-local "
+                "transform. Configure the sensor asset pose explicitly instead."
+            )
         if self._env_id < 0 or self._env_id >= self._env.num_envs:
             raise RuntimeError(
                 f"camera_env_id out of range: {self._env_id} (num_envs={self._env.num_envs})"
             )
-        self._resolve_body_index()
+        if self._pose_provider is None:
+            self._resolve_body_index()
 
         import omni.replicator.core as rep
         import omni.usd
@@ -636,37 +678,66 @@ class IsaacSimDepthSensorCamera:
             return
 
         env_id = self._env_id
-        if self._body_index is not None:
+        if self._pose_provider is not None:
+            env_ids = torch.tensor([env_id], device=self._device, dtype=torch.long)
+            camera_pos, camera_quat = self._pose_provider(env_ids)
+            if camera_pos.shape != (1, 3) or camera_quat.shape != (1, 4):
+                raise RuntimeError(
+                    "Isaac rendered camera pose_provider must return shapes (1, 3) and (1, 4)."
+                )
+            if not bool(torch.isfinite(camera_pos).all().item()) or not bool(
+                torch.isfinite(camera_quat).all().item()
+            ):
+                raise RuntimeError("Isaac rendered camera pose_provider returned non-finite values.")
+            camera_pos = camera_pos[0]
+            camera_quat = camera_quat[0]
+        elif self._body_index is not None:
             body_pos = self._env.simulator._rigid_body_pos[env_id, self._body_index]
             body_quat = self._env.simulator._rigid_body_rot[env_id, self._body_index]
         else:
             body_pos = self._env.simulator.robot_root_states[env_id, :3]
             body_quat = self._env.simulator.base_quat[env_id]
+        if self._pose_provider is None:
+            body_pos = body_pos + quat_apply(
+                body_quat.unsqueeze(0),
+                self._body_offset_pos.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
+            body_quat = quat_mul(
+                body_quat.unsqueeze(0),
+                self._body_offset_quat.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
 
-        body_pos = body_pos + quat_apply(body_quat.unsqueeze(0), self._body_offset_pos.unsqueeze(0), w_last=True).squeeze(
-            0
-        )
-        body_quat = quat_mul(body_quat.unsqueeze(0), self._body_offset_quat.unsqueeze(0), w_last=True).squeeze(0)
+            offset_world = quat_apply(
+                body_quat.unsqueeze(0),
+                self._sensor_offset.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
+            camera_pos = body_pos + offset_world
 
-        offset_world = quat_apply(body_quat.unsqueeze(0), self._sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
-        camera_pos = body_pos + offset_world
-
-        pitch_rad = torch.deg2rad(torch.tensor(self._cfg.camera_pitch_deg, device=self._device))
-        pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=self._device),
-            pitch_rad,
-            torch.tensor(0.0, device=self._device),
-        )
-        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
-        camera_quat = quat_mul(
-            camera_quat,
-            self._camera_frame_quat.unsqueeze(0),
-            w_last=True,
-        ).squeeze(0)
+            pitch_rad = torch.deg2rad(torch.tensor(self._cfg.camera_pitch_deg, device=self._device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self._device),
+                pitch_rad,
+                torch.tensor(0.0, device=self._device),
+            )
+            camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
+            camera_quat = quat_mul(
+                camera_quat,
+                self._camera_frame_quat.unsqueeze(0),
+                w_last=True,
+            ).squeeze(0)
         camera_quat_wxyz = camera_quat[[3, 0, 1, 2]].unsqueeze(0)
 
         self._view.set_world_poses(
             camera_pos.unsqueeze(0),
             camera_quat_wxyz,
-            torch.tensor([env_id], device=self._device, dtype=torch.int32),
+            torch.tensor([0], device=self._device, dtype=torch.int32),
         )
+        if self._rgb_view is not None and self._rgb_view is not self._view:
+            self._rgb_view.set_world_poses(
+                camera_pos.unsqueeze(0),
+                camera_quat_wxyz,
+                torch.tensor([0], device=self._device, dtype=torch.int32),
+            )

@@ -213,6 +213,20 @@ def _load_object_overlay_mesh(
     return mesh
 
 
+def _require_object_overlay_mesh(entry: "ClipEntry"):
+    object_mesh = _load_object_overlay_mesh(
+        clip_id=entry.clip_id,
+        object_name=str(entry.metadata.get("object_name", "")),
+        object_urdf_path=str(entry.metadata.get("object_urdf_path", "")),
+    )
+    if object_mesh is None:
+        raise RuntimeError(
+            "Failed to load real object mesh for "
+            f"clip={entry.clip_id!r}; object_urdf_path={entry.metadata.get('object_urdf_path')!r}"
+        )
+    return object_mesh
+
+
 @dataclass(frozen=True)
 class ClipEntry:
     label: str
@@ -922,7 +936,13 @@ class DebugRolloutViewer:
         if self.robot_viser is None:
             return
 
-        motion_bank_path = _resolve_motion_bank_path(entry)
+        # Prefer the explicit input-motion directory.  Immutable training
+        # banks live under a content-addressed ``by-source/<digest>`` path,
+        # while older rollout metadata may still point at the former flat
+        # ``_single_slot_motion_bank`` layout.
+        motion_bank_path = _resolve_original_motion_path(entry, self.original_motion_dir)
+        if motion_bank_path is None:
+            motion_bank_path = _resolve_motion_bank_path(entry)
         if motion_bank_path is None:
             self.robot_motion = RobotMotion(
                 path=None,
@@ -1201,17 +1221,12 @@ class DebugRolloutViewer:
         )
         self.static_handles.append(product_frame)
 
-        object_mesh = _load_object_overlay_mesh(
-            clip_id=entry.clip_id,
-            object_name=str(entry.metadata.get("object_name", "")),
-            object_urdf_path=str(entry.metadata.get("object_urdf_path", "")),
-        )
-        if object_mesh is not None:
-            mesh = object_mesh.copy()
-            mesh.visual.vertex_colors = np.tile(np.asarray([175, 185, 200, 210], dtype=np.uint8), (len(mesh.vertices), 1))
-            handle = self.server.scene.add_mesh_trimesh("/product/object_mesh", mesh, position=_PRODUCT_OFFSET)
-            self.static_handles.append(handle)
-            self.mesh_handles.append(handle)
+        object_mesh = _require_object_overlay_mesh(entry)
+        mesh = object_mesh.copy()
+        mesh.visual.vertex_colors = np.tile(np.asarray([175, 185, 200, 210], dtype=np.uint8), (len(mesh.vertices), 1))
+        handle = self.server.scene.add_mesh_trimesh("/product/object_mesh", mesh, position=_PRODUCT_OFFSET)
+        self.static_handles.append(handle)
+        self.mesh_handles.append(handle)
 
         box_handle = self.server.scene.add_box(
             "/product/primitive_box",
@@ -1249,18 +1264,13 @@ class DebugRolloutViewer:
         rollout_frame = self.server.scene.add_frame("/rollout", show_axes=True, axes_length=0.35, axes_radius=0.01)
         self.rollout_handles.append(rollout_frame)
 
-        object_mesh = _load_object_overlay_mesh(
-            clip_id=entry.clip_id,
-            object_name=str(entry.metadata.get("object_name", "")),
-            object_urdf_path=str(entry.metadata.get("object_urdf_path", "")),
-        )
-        if object_mesh is not None:
-            mesh = object_mesh.copy()
-            mesh.visual.vertex_colors = np.tile(np.asarray([175, 185, 200, 180], dtype=np.uint8), (len(mesh.vertices), 1))
-            handle = self.server.scene.add_mesh_trimesh("/rollout/current_object_mesh", mesh)
-            self.current_object_handles.append(handle)
-            self.rollout_handles.append(handle)
-            self.mesh_handles.append(handle)
+        object_mesh = _require_object_overlay_mesh(entry)
+        mesh = object_mesh.copy()
+        mesh.visual.vertex_colors = np.tile(np.asarray([175, 185, 200, 180], dtype=np.uint8), (len(mesh.vertices), 1))
+        handle = self.server.scene.add_mesh_trimesh("/rollout/current_object_mesh", mesh)
+        self.current_object_handles.append(handle)
+        self.rollout_handles.append(handle)
+        self.mesh_handles.append(handle)
 
         box_handle = self.server.scene.add_box(
             "/rollout/current_primitive_box",
@@ -1315,25 +1325,20 @@ class DebugRolloutViewer:
         )
         self.original_handles.append(original_frame)
 
-        object_mesh = _load_object_overlay_mesh(
-            clip_id=entry.clip_id,
-            object_name=str(entry.metadata.get("object_name", "")),
-            object_urdf_path=str(entry.metadata.get("object_urdf_path", "")),
+        object_mesh = _require_object_overlay_mesh(entry)
+        mesh = object_mesh.copy()
+        mesh.visual.vertex_colors = np.tile(
+            np.asarray([255, 175, 45, 145], dtype=np.uint8),
+            (len(mesh.vertices), 1),
         )
-        if object_mesh is not None:
-            mesh = object_mesh.copy()
-            mesh.visual.vertex_colors = np.tile(
-                np.asarray([255, 175, 45, 145], dtype=np.uint8),
-                (len(mesh.vertices), 1),
-            )
-            handle = self.server.scene.add_mesh_trimesh(
-                "/original_motion/current_object_mesh",
-                mesh,
-                visible=False,
-            )
-            self.original_handles.append(handle)
-            self.original_object_handles.append(handle)
-            self.mesh_handles.append(handle)
+        handle = self.server.scene.add_mesh_trimesh(
+            "/original_motion/current_object_mesh",
+            mesh,
+            visible=False,
+        )
+        self.original_handles.append(handle)
+        self.original_object_handles.append(handle)
+        self.mesh_handles.append(handle)
 
         box_handle = self.server.scene.add_box(
             "/original_motion/current_primitive_box",

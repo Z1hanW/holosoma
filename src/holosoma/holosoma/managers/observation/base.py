@@ -3,12 +3,36 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from holosoma.utils.safe_torch_import import torch
 
 if TYPE_CHECKING:
     from holosoma.config_types.observation import ObsTermCfg
+
+
+_ObservationCallable = TypeVar("_ObservationCallable", bound=Callable[..., torch.Tensor])
+_REUSABLE_BASE_TERM_ATTRIBUTE = "__holosoma_reusable_observation_base_term__"
+
+
+def reusable_observation_base_term(func: _ObservationCallable) -> _ObservationCallable:
+    """Mark a function as safe for exact, same-``compute`` base-result reuse.
+
+    The function must be deterministic for the current environment state, must
+    not consume RNG, and must not mutate either the environment or returned
+    tensor.  The observation manager additionally requires empty term params
+    and an explicit manager-level opt-in before it uses this declaration.
+    Stateful :class:`ObservationTermBase` instances are never reusable.
+    """
+
+    setattr(func, _REUSABLE_BASE_TERM_ATTRIBUTE, True)
+    return func
+
+
+def is_reusable_observation_base_term(func: Callable[..., torch.Tensor]) -> bool:
+    """Return whether ``func`` carries the explicit exact-reuse declaration."""
+
+    return getattr(func, _REUSABLE_BASE_TERM_ATTRIBUTE, False) is True
 
 
 class ObservationTermBase(ABC):

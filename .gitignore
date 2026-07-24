@@ -8,12 +8,14 @@
 # Allow Python and shell scripts anywhere
 !**/*.py
 !**/*.sh
+!/log_eval_video
 !**/*.urdf
 !**/*.xml
 !**/*.obj
 
 # Keep these
 !.gitignore
+!AGENTS.md
 !README*
 !skills/**/SKILL.md
 !skills/**/agents/openai.yaml

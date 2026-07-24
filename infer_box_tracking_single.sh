@@ -48,6 +48,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -223,7 +224,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import torch
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 
 def _parse_wandb_reference(reference: str) -> tuple[str, str]:
@@ -263,8 +264,10 @@ def load_payload(checkpoint_ref: str):
             ckpt_path = Path(downloaded.name)
             if not ckpt_path.is_absolute():
                 ckpt_path = (Path.cwd() / ckpt_path).resolve()
-            return torch.load(ckpt_path, map_location="cpu")
-    return torch.load(checkpoint_ref, map_location="cpu")
+            payload, _checkpoint_sha256 = load_verified_torch_checkpoint(ckpt_path, map_location="cpu")
+            return payload
+    payload, _checkpoint_sha256 = load_verified_torch_checkpoint(checkpoint_ref, map_location="cpu")
+    return payload
 
 
 payload = load_payload(sys.argv[1])
@@ -470,7 +473,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import torch
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 
 def parse_bool(v: str) -> bool:
@@ -514,9 +517,10 @@ def load_payload(checkpoint_ref: str):
             ckpt_path = Path(downloaded.name)
             if not ckpt_path.is_absolute():
                 ckpt_path = (Path.cwd() / ckpt_path).resolve()
-            payload = torch.load(ckpt_path, map_location="cpu")
+            payload, _checkpoint_sha256 = load_verified_torch_checkpoint(ckpt_path, map_location="cpu")
             return payload
-    return torch.load(checkpoint_ref, map_location="cpu")
+    payload, _checkpoint_sha256 = load_verified_torch_checkpoint(checkpoint_ref, map_location="cpu")
+    return payload
 
 
 checkpoint_ref = sys.argv[1]

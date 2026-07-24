@@ -79,6 +79,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 is_checkpoint_arg() {
@@ -378,7 +379,7 @@ for path_entry in sys.path:
 sys.path = sanitized_sys_path
 
 try:
-    import torch
+    from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
     from holosoma.utils.eval_utils import load_checkpoint
 except Exception:
     print(json.dumps({}))
@@ -440,7 +441,7 @@ def resolve_saved_path(raw_path: str | None) -> str | None:
 try:
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
-        blob = torch.load(checkpoint_path, map_location="cpu")
+        blob, _checkpoint_sha256 = load_verified_torch_checkpoint(checkpoint_path, map_location="cpu")
 except Exception:
     print(json.dumps({}))
     sys.exit(0)

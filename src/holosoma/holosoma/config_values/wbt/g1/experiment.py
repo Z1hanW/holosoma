@@ -439,6 +439,15 @@ g1_29dof_wbt_w_object_generalist = replace(
     termination=termination.g1_29dof_wbt_termination_generalist,
 )
 
+g1_29dof_wbt_w_object_generalist_teacher_linvel = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_generalist_teacher_linvel",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_teacher_linvel,
+)
+
 g1_29dof_wbt_w_object_generalist_legacy_obs = replace(
     g1_29dof_wbt_w_object_generalist,
     training=replace(
@@ -501,6 +510,17 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
             g1_29dof_wbt_w_object_generalist.algo.config,
             module_dict=_w_object_distill_sparse_root_cmd_module_dict,
         ),
+    ),
+)
+
+g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel",
+    ),
+    observation=(
+        observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel
     ),
 )
 
@@ -640,8 +660,10 @@ __all__ = [
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_extend",
     "g1_29dof_wbt_w_object_generalist",
+    "g1_29dof_wbt_w_object_generalist_teacher_linvel",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug",

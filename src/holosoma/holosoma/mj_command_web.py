@@ -658,9 +658,19 @@ class CommandState:
             if env_mode not in {"raw_motion", "raw_motion_grounded", "training_default_pose"}:
                 env_mode = "raw_motion"
             motion_init_mode = "training_default_pose" if self.reset_to_default_pose else env_mode
-        self.control_pub.request_reset(reason, motion_init_mode=motion_init_mode)
+        reset_sent = self.control_pub.request_reset(
+            reason,
+            motion_init_mode=motion_init_mode,
+        )
         response = self.snapshot()
-        response.update({"ok": True, "reason": str(reason), "motion_init_mode": motion_init_mode})
+        response.update(
+            {
+                "ok": bool(reset_sent),
+                "sent": bool(reset_sent),
+                "reason": str(reason),
+                "motion_init_mode": motion_init_mode,
+            }
+        )
         return response
 
     def request_policy(self, action: str) -> bool:
@@ -881,7 +891,11 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
             payload = {}
         reason = str(payload.get("reason") or "web_command_reset")
         reset_to_default_pose = payload.get("reset_to_default_pose")
-        return web.json_response(command_state.request_reset(reason, reset_to_default_pose=reset_to_default_pose))
+        response = command_state.request_reset(
+            reason,
+            reset_to_default_pose=reset_to_default_pose,
+        )
+        return web.json_response(response, status=200 if response.get("ok") else 503)
 
     async def policy(request: web.Request) -> web.Response:
         try:

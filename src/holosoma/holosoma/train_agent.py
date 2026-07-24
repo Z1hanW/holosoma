@@ -1,14 +1,33 @@
 from __future__ import annotations
 
-import dataclasses
-import logging
 import os
+
+# This module has transitive top-level imports of torch.  Configure cuBLAS
+# before any of them can initialize a CUDA handle; seeding() runs only after
+# simulator/distributed startup and is too late to establish this contract.
+_cublas_workspace_config = os.environ.setdefault(
+    "CUBLAS_WORKSPACE_CONFIG",
+    ":4096:8",
+)
+if _cublas_workspace_config not in {":4096:8", ":16:8"}:
+    raise RuntimeError(
+        "CUBLAS_WORKSPACE_CONFIG must be :4096:8 or :16:8 before importing train_agent; "
+        f"got {_cublas_workspace_config!r}."
+    )
+del _cublas_workspace_config
+
+import dataclasses
+import json
+import logging
+import re
+import stat
+import subprocess
 import sys
 import traceback
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Callable, TypedDict, cast
 
 import numpy as np
 import tyro
@@ -22,14 +41,48 @@ from holosoma.config_values.experiment import AnnotatedExperimentConfig
 from holosoma.observation import apply_observation_overrides
 from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
+from holosoma.utils.atomic_output import emit_atomic_stdout_record
+from holosoma.utils.common import rank_training_seed
+from holosoma.utils.defm_runtime import set_defm_materialization_mode
 from holosoma.utils.eval_utils import (
     init_sim_imports,
     load_checkpoint,
 )
+from holosoma.utils.experiment_paths import (
+    get_experiment_dir,
+    get_process_experiment_dir,
+    get_timestamp,
+    set_experiment_dir_override,
+)
 from holosoma.utils.helpers import get_class
+from holosoma.utils.policy_init_preflight import (
+    required_policy_init_terminal_target_from_env,
+)
 from holosoma.utils.rotations import quat_apply, quat_from_euler_xyz, quat_rotate_inverse
+from holosoma.utils.runtime_asset_manifest import (
+    RUNTIME_ASSET_MANIFEST_FILENAME,
+    finalize_runtime_asset_provenance,
+    persist_runtime_asset_manifest,
+)
 from holosoma.utils.sim_utils import close_simulation_app
+from holosoma.utils.training_provenance import (
+    ALLOW_LEGACY_UNVERIFIED_TEACHER_LOAD_ENV,
+    allow_legacy_unverified_teacher_load,
+    canonical_training_provenance_json,
+    checkpoint_lineage_enabled,
+    disabled_contact_sidecar_manifest_sha256,
+    training_provenance_from_env,
+    validate_hierarchical_small_collectives_contract,
+)
 from holosoma.utils.tyro_utils import TYRO_CONIFG
+
+
+def _effective_runtime_config(config: ExperimentConfig) -> ExperimentConfig:
+    """Apply every config rewrite that changes simulator/model runtime inputs."""
+
+    config = apply_observation_overrides(config)
+    config = apply_perception_overrides(config)
+    return config
 
 
 class TrainingContext:
@@ -38,8 +91,26 @@ class TrainingContext:
     def __init__(self, config: ExperimentConfig):
         self.config = config
         self.simulation_app: Any | None = None
+        self._policy_init_preflight_complete = False
 
     def __enter__(self):
+        self.config = _effective_runtime_config(self.config)
+        _validate_hierarchical_small_collectives_launch_contract()
+        _current_rank_training_seed(self.config.training.seed)
+        # A caller may hold this context after the launch-time preflights.
+        # Re-hash immediately before importing/starting the simulator.
+        finalized_provenance = finalize_runtime_asset_provenance(self.config)
+        _validate_prestarted_runtime_provenance(finalized_provenance)
+        _preflight_checkpoint_lineage_before_sim(self.config)
+        _preflight_data_assets_before_sim()
+        # ``TrainingContext`` is a public simulator-starting entrypoint, not
+        # merely a wrapper around ``main``. Resolve and validate an actor
+        # initializer here so an invalid/missing required terminal source can
+        # never survive until Isaac is imported. The returned config replaces
+        # a W&B URI with its verified local file, making later calls
+        # idempotent without downloading the artifact again.
+        self.config = _preflight_policy_init_before_sim(self.config)
+        self._policy_init_preflight_complete = True
         # Initialize simulation app
         self.simulation_app = init_sim_imports(self.config)
         return self
@@ -66,6 +137,71 @@ class MultGPUConfig(TypedDict):
     world_size: int
 
 
+def _rank_training_seed(base_seed: int, *, world_size: int, global_rank: int) -> int:
+    """Compatibility alias for the shared rank-seed contract."""
+
+    return rank_training_seed(
+        base_seed,
+        world_size=world_size,
+        global_rank=global_rank,
+    )
+
+
+def _current_rank_training_seed(base_seed: int) -> int:
+    """Validate launcher topology and return this process's rank-local seed."""
+
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        global_rank = int(os.environ.get("RANK", "0"))
+    except ValueError as exc:
+        raise ValueError(
+            "WORLD_SIZE and RANK must be base-10 integers before simulator startup: "
+            f"WORLD_SIZE={os.environ.get('WORLD_SIZE', '1')!r}, "
+            f"RANK={os.environ.get('RANK', '0')!r}."
+        ) from exc
+    return _rank_training_seed(
+        base_seed,
+        world_size=world_size,
+        global_rank=global_rank,
+    )
+
+
+def _validate_prestarted_runtime_provenance(provenance: dict[str, Any] | None) -> None:
+    """Prove interpreter/cuBLAS settings match the launch-time provenance."""
+
+    if provenance is None:
+        return
+    try:
+        execution_runtime = provenance["environment"]["execution_runtime"]
+        declared_hash_seed = execution_runtime["PYTHONHASHSEED"]
+        declared_cublas = execution_runtime["CUBLAS_WORKSPACE_CONFIG"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            "Scientific training provenance is missing pre-start PYTHONHASHSEED/"
+            "CUBLAS_WORKSPACE_CONFIG identity."
+        ) from exc
+
+    raw_hash_seed = os.environ.get("PYTHONHASHSEED", "").strip()
+    if not raw_hash_seed.isdecimal() or not 0 <= int(raw_hash_seed, 10) <= 4294967295:
+        raise RuntimeError(
+            "Scientific training requires PYTHONHASHSEED to be exported as an integer in "
+            "[0, 4294967295] before Python starts."
+        )
+    actual_hash_seed = str(int(raw_hash_seed, 10))
+    actual_cublas = os.environ.get("CUBLAS_WORKSPACE_CONFIG", "").strip()
+    if actual_cublas not in {":4096:8", ":16:8"}:
+        raise RuntimeError(
+            "Scientific training requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8 "
+            "before CUDA starts."
+        )
+    if declared_hash_seed != actual_hash_seed or declared_cublas != actual_cublas:
+        raise RuntimeError(
+            "Launch-time runtime provenance does not match this training process: "
+            f"PYTHONHASHSEED declared={declared_hash_seed!r} actual={actual_hash_seed!r}; "
+            f"CUBLAS_WORKSPACE_CONFIG declared={declared_cublas!r} actual={actual_cublas!r}."
+        )
+
+
 def _distributed_barrier(dist_module: Any, distributed_conf: MultGPUConfig | None) -> None:
     if distributed_conf is None or not dist_module.is_initialized():
         return
@@ -73,6 +209,232 @@ def _distributed_barrier(dist_module: Any, distributed_conf: MultGPUConfig | Non
         dist_module.barrier(device_ids=[int(distributed_conf["local_rank"])])
     except TypeError:
         dist_module.barrier()
+
+
+_LAUNCH_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_SNAPSHOT_RE = re.compile(r"^src-[0-9a-f]{64}$")
+
+
+def _emit_batch_worker_preflight_ready(
+    *,
+    dist_module: Any,
+    distributed_conf: MultGPUConfig | None,
+) -> bool:
+    """Publish one launch-bound marker after the real worker is fully ready.
+
+    This boundary is intentionally later than the lightweight pre-simulator
+    provenance rendezvous.  Callers invoke it only after environment creation,
+    algorithm setup/model synchronization and any full-resume or policy-init
+    load.  The main training process group barrier proves every worker reached
+    the same boundary before any marker is emitted.
+    """
+
+    launch_token = os.environ.get("HOLOSOMA_LAUNCH_TOKEN", "").strip()
+    launch_epoch = os.environ.get("HOLOSOMA_LAUNCH_EPOCH", "").strip()
+    if not launch_token and not launch_epoch:
+        return False
+    source_snapshot = os.environ.get("HOLOSOMA_SOURCE_SNAPSHOT_ID", "").strip()
+    if not _LAUNCH_TOKEN_RE.fullmatch(launch_token):
+        raise RuntimeError("HOLOSOMA_LAUNCH_TOKEN must be exactly 64 lowercase hexadecimal characters.")
+    if not launch_epoch.isdecimal() or int(launch_epoch, 10) <= 0:
+        raise RuntimeError("HOLOSOMA_LAUNCH_EPOCH must be a positive decimal Unix timestamp.")
+    if not _SOURCE_SNAPSHOT_RE.fullmatch(source_snapshot):
+        raise RuntimeError("Launch-bound worker readiness requires a valid HOLOSOMA_SOURCE_SNAPSHOT_ID.")
+
+    global_rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    original_local_rank_raw = os.environ.get("HOLOSOMA_ORIGINAL_LOCAL_RANK", "").strip()
+    local_rank = int(original_local_rank_raw or os.environ.get("LOCAL_RANK", "0"))
+    original_local_world_raw = os.environ.get("HOLOSOMA_ORIGINAL_LOCAL_WORLD_SIZE", "").strip()
+    local_world_size = int(original_local_world_raw or os.environ.get("LOCAL_WORLD_SIZE", str(world_size)))
+    nproc_raw = os.environ.get("NPROC", "").strip()
+    nnodes_raw = os.environ.get("NNODES", "").strip()
+    node_rank_raw = os.environ.get("NODE_RANK", "").strip()
+    if not nproc_raw.isdecimal() or int(nproc_raw, 10) <= 0:
+        raise RuntimeError("Launch-bound worker readiness requires a positive decimal NPROC.")
+    if not nnodes_raw.isdecimal() or int(nnodes_raw, 10) <= 0:
+        raise RuntimeError("Launch-bound worker readiness requires a positive decimal NNODES.")
+    if not node_rank_raw.isdecimal():
+        raise RuntimeError("Launch-bound worker readiness requires a non-negative decimal NODE_RANK.")
+    nproc = int(nproc_raw, 10)
+    nnodes = int(nnodes_raw, 10)
+    node_rank = int(node_rank_raw, 10)
+    if world_size < 1 or not 0 <= global_rank < world_size:
+        raise RuntimeError(
+            f"Invalid launch rank identity: global_rank={global_rank} world_size={world_size}."
+        )
+    if local_world_size < 1 or not 0 <= local_rank < local_world_size:
+        raise RuntimeError(
+            f"Invalid launch-local rank identity: local_rank={local_rank} local_world_size={local_world_size}."
+        )
+    if (
+        world_size != nproc * nnodes
+        or local_world_size != nproc
+        or not 0 <= node_rank < nnodes
+        or global_rank != node_rank * nproc + local_rank
+    ):
+        raise RuntimeError(
+            "Launch-bound worker topology is inconsistent: "
+            f"global_rank={global_rank}, local_rank={local_rank}, world_size={world_size}, "
+            f"local_world_size={local_world_size}, NPROC={nproc}, NNODES={nnodes}, "
+            f"NODE_RANK={node_rank}."
+        )
+    if distributed_conf is not None:
+        if int(distributed_conf["global_rank"]) != global_rank or int(distributed_conf["world_size"]) != world_size:
+            raise RuntimeError(
+                "Main process-group identity differs from torchrun environment at worker-ready boundary: "
+                f"distributed_conf={distributed_conf} RANK={global_rank} WORLD_SIZE={world_size}."
+            )
+        if not dist_module.is_initialized():
+            raise RuntimeError(
+                "Main training process group is not initialized at the launch-bound worker-ready boundary."
+            )
+    elif world_size != 1:
+        raise RuntimeError(
+            "A multi-worker launch cannot publish readiness without a distributed configuration/process group."
+        )
+
+    _distributed_barrier(dist_module, distributed_conf)
+    emit_atomic_stdout_record(
+        "[INFO] final_worker_preflight_verified "
+        f"global_rank={global_rank} local_rank={local_rank} world_size={world_size} "
+        f"source_snapshot={source_snapshot} launch_token={launch_token} launch_epoch={launch_epoch}"
+    )
+    return True
+
+
+def _synchronize_experiment_identity(
+    *,
+    dist_module: Any,
+    distributed_conf: MultGPUConfig | None,
+    device: str,
+    logger_config: Any,
+    training_config: Any,
+    task_name: str,
+) -> tuple[str, Path]:
+    """Create one fail-closed timestamp/log directory for every training rank."""
+
+    if distributed_conf is None:
+        timestamp = get_timestamp()
+        experiment_dir = get_experiment_dir(
+            logger_config,
+            training_config,
+            timestamp,
+            task_name=task_name,
+        )
+    else:
+        if not dist_module.is_initialized():
+            raise RuntimeError("Distributed experiment identity requires an initialized default process group.")
+        actual_rank = int(dist_module.get_rank())
+        actual_world_size = int(dist_module.get_world_size())
+        if actual_rank != int(distributed_conf["global_rank"]):
+            raise RuntimeError(
+                "Distributed rank changed after process-group initialization: "
+                f"config={distributed_conf['global_rank']}, process_group={actual_rank}."
+            )
+        if actual_world_size != int(distributed_conf["world_size"]):
+            raise RuntimeError(
+                "Distributed world size changed after process-group initialization: "
+                f"config={distributed_conf['world_size']}, process_group={actual_world_size}."
+            )
+
+        identity: list[tuple[str, str] | None] = [None]
+        if actual_rank == 0:
+            rank_zero_timestamp = get_timestamp()
+            rank_zero_dir = get_experiment_dir(
+                logger_config,
+                training_config,
+                rank_zero_timestamp,
+                task_name=task_name,
+            ).expanduser().resolve(strict=False)
+            identity[0] = (rank_zero_timestamp, str(rank_zero_dir))
+
+        backend = str(dist_module.get_backend()).strip().lower()
+        import torch
+
+        control_group = None
+        use_gloo_control = backend == "nccl" and _bool_env(
+            "HOLOSOMA_GLOO_SMALL_COLLECTIVES",
+            default=False,
+        )
+        if use_gloo_control:
+            # ``broadcast_object_list`` serializes through a small CPU tensor.
+            # Sending that control-plane payload through NCCL needlessly couples
+            # run-directory setup to every CUDA context while Isaac is still
+            # starting.  The scientific launcher already requests Gloo for
+            # small/control collectives, so honor that contract at the first
+            # collective as well (before PPO has created its long-lived groups).
+            dist_timeout_sec = int(os.getenv("TORCH_DIST_TIMEOUT_SEC", "600"))
+            if dist_timeout_sec <= 0:
+                raise ValueError(
+                    f"TORCH_DIST_TIMEOUT_SEC must be positive, got {dist_timeout_sec}."
+                )
+            control_group = dist_module.new_group(
+                backend="gloo",
+                timeout=timedelta(seconds=dist_timeout_sec),
+            )
+            broadcast_device = torch.device("cpu")
+            print(
+                "[INFO] experiment_identity_collective backend=gloo "
+                "reason=HOLOSOMA_GLOO_SMALL_COLLECTIVES",
+                flush=True,
+            )
+        elif backend == "nccl":
+            broadcast_device = torch.device(device)
+            if broadcast_device.type != "cuda":
+                raise RuntimeError(
+                    "NCCL experiment-identity broadcast requires this rank's CUDA device, "
+                    f"got {device!r}."
+                )
+        elif backend == "gloo":
+            broadcast_device = torch.device("cpu")
+        else:
+            raise RuntimeError(
+                "Experiment-identity broadcast supports the configured training backends "
+                f"'nccl' and 'gloo', got {backend!r}."
+            )
+        try:
+            if control_group is None:
+                dist_module.broadcast_object_list(identity, src=0, device=broadcast_device)
+            else:
+                dist_module.broadcast_object_list(
+                    identity,
+                    src=0,
+                    group=control_group,
+                    device=broadcast_device,
+                )
+        finally:
+            if control_group is not None:
+                dist_module.destroy_process_group(control_group)
+        received_identity = identity[0]
+        if (
+            not isinstance(received_identity, tuple)
+            or len(received_identity) != 2
+            or not all(isinstance(value, str) for value in received_identity)
+        ):
+            raise RuntimeError(f"Rank 0 broadcast an invalid experiment identity: {received_identity!r}.")
+        timestamp, received_dir = received_identity
+        experiment_dir = Path(received_dir)
+
+    experiment_dir = set_experiment_dir_override(
+        logger_config,
+        training_config,
+        timestamp=timestamp,
+        experiment_dir=experiment_dir,
+        task_name=task_name,
+    )
+    resolved_from_process = get_process_experiment_dir(
+        logger_config,
+        training_config,
+        task_name=task_name,
+        require_override=True,
+    )
+    if resolved_from_process != experiment_dir:
+        raise RuntimeError(
+            "Installed experiment identity did not round-trip through the process environment: "
+            f"installed={experiment_dir}, resolved={resolved_from_process}."
+        )
+    return timestamp, experiment_dir
 
 
 def _collect_object_bank_wandb_metadata() -> dict[str, int | str]:
@@ -139,6 +501,844 @@ def _collect_env_count_wandb_metadata(
         metadata["launcher/cuda_visible_devices"] = cuda_visible_devices
 
     return metadata
+
+
+def _collect_training_provenance_wandb_metadata() -> dict[str, Any]:
+    provenance = training_provenance_from_env()
+    if provenance is None:
+        return {}
+    return {f"provenance/{key}": value for key, value in provenance.items()}
+
+
+def _publish_wandb_startup_metadata(
+    wandb_module: Any,
+    *,
+    config_metadata: dict[str, Any],
+    summary_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Publish run metadata without consuming a training-history step.
+
+    W&B advances its internal history cursor when ``wandb.log`` commits a row,
+    even when that call explicitly uses ``step=0``.  Startup metadata belongs
+    in the immutable run config and summary, not in the iteration-indexed
+    history.  Keeping this helper free of ``wandb.log`` preserves iteration 0
+    for the first PPO metrics row.
+    """
+
+    if config_metadata:
+        wandb_module.config.update(config_metadata, allow_val_change=True)
+    if summary_metadata is None:
+        summary_metadata = config_metadata
+    for key, value in summary_metadata.items():
+        wandb_module.run.summary[key] = value
+
+
+def _wandb_init_failure_is_fatal(resume_mode: str | bool | None) -> bool:
+    """A requested must-resume run must never silently continue without its lineage."""
+
+    return isinstance(resume_mode, str) and resume_mode.strip().lower() == "must"
+
+
+def _finish_wandb_run(wandb_module: Any, *, exit_code: int) -> None:
+    """Finish the active run with its authoritative process outcome.
+
+    Calling ``wandb.finish()`` without an exit code marks even a guard-triggered
+    ``sys.exit(1)`` as a normally finished run.  Require every caller to state
+    the outcome explicitly so the remote lifecycle cannot contradict the
+    launcher/torchrun exit status.
+    """
+
+    if type(exit_code) is not int or exit_code < 0:
+        raise ValueError(f"W&B exit_code must be a non-negative integer, got {exit_code!r}.")
+    wandb_module.finish(exit_code=exit_code)
+
+
+class WandbStartupOutcome(TypedDict):
+    """Serializable rank-zero W&B startup result broadcast to every worker."""
+
+    ok: bool
+    run_path: str | None
+    error_type: str | None
+    error_message: str | None
+    force_fatal: bool
+
+
+_WANDB_RUN_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _validate_required_wandb_logger_mode(
+    *,
+    require_run: bool,
+    wandb_enabled: bool,
+    wandb_mode: str | None,
+) -> None:
+    """Reject logger settings that cannot satisfy a required cloud run."""
+
+    if not require_run:
+        return
+    if not wandb_enabled:
+        raise RuntimeError(
+            "HOLOSOMA_REQUIRE_WANDB_RUN=1 requires logger.type='wandb'; "
+            "the disabled logger cannot satisfy the scientific launch contract."
+        )
+    if wandb_mode != "online":
+        raise RuntimeError(
+            "HOLOSOMA_REQUIRE_WANDB_RUN=1 requires logger.mode='online'; "
+            f"got {wandb_mode!r}."
+        )
+
+
+def _strict_active_wandb_run_path(
+    wandb_module: Any,
+    *,
+    expected_entity: Any = None,
+    expected_project: Any = None,
+    expected_run_id: Any = None,
+) -> str:
+    """Return an active W&B path bound to every explicitly requested segment."""
+
+    run = getattr(wandb_module, "run", None)
+    if run is None:
+        raise RuntimeError("wandb.init returned without creating an active run.")
+    expected_segments = {
+        "entity": expected_entity,
+        "project": expected_project,
+        "id": expected_run_id,
+    }
+    segments: list[str] = []
+    for field_name in ("entity", "project", "id"):
+        value = getattr(run, field_name, None)
+        if not isinstance(value, str) or not _WANDB_RUN_PATH_SEGMENT_RE.fullmatch(value):
+            raise RuntimeError(
+                "The active W&B run has an invalid URL-path identity segment: "
+                f"{field_name}={value!r}."
+            )
+        expected = expected_segments[field_name]
+        if expected is not None:
+            if not isinstance(expected, str) or not _WANDB_RUN_PATH_SEGMENT_RE.fullmatch(expected):
+                raise RuntimeError(
+                    "The requested W&B run has an invalid URL-path identity segment: "
+                    f"{field_name}={expected!r}."
+                )
+            if value != expected:
+                raise RuntimeError(
+                    "The active W&B run identity does not match the requested launch identity: "
+                    f"{field_name} requested={expected!r} active={value!r}."
+                )
+        segments.append(value)
+    return "/".join(segments)
+
+
+def _wandb_startup_error_outcome(
+    wandb_module: Any,
+    exc: BaseException,
+) -> WandbStartupOutcome:
+    """Convert a rank-zero failure to bounded data without raising pre-collective."""
+
+    cleanup_error: BaseException | None = None
+    if getattr(wandb_module, "run", None) is not None:
+        try:
+            _finish_wandb_run(wandb_module, exit_code=1)
+        except BaseException as finish_exc:  # keep peers on the collective path
+            cleanup_error = finish_exc
+    message = " ".join(str(exc).split()) or type(exc).__name__
+    if cleanup_error is not None:
+        cleanup_message = " ".join(str(cleanup_error).split()) or type(cleanup_error).__name__
+        message = f"{message}; partial-run cleanup failed: {type(cleanup_error).__name__}: {cleanup_message}"
+    return {
+        "ok": False,
+        "run_path": None,
+        "error_type": type(exc).__name__,
+        "error_message": message[:4096],
+        "force_fatal": not isinstance(exc, Exception),
+    }
+
+
+def _run_rank_zero_wandb_startup(
+    wandb_module: Any,
+    *,
+    wandb_enabled: bool,
+    wandb_mode: str | None,
+    require_run: bool,
+    wandb_kwargs: dict[str, Any] | None,
+    publish_startup: Callable[[], None] | None,
+) -> WandbStartupOutcome:
+    """Run the complete rank-zero W&B startup transaction without escaping errors."""
+
+    try:
+        _validate_required_wandb_logger_mode(
+            require_run=require_run,
+            wandb_enabled=wandb_enabled,
+            wandb_mode=wandb_mode,
+        )
+        if not wandb_enabled:
+            return {
+                "ok": True,
+                "run_path": None,
+                "error_type": None,
+                "error_message": None,
+                "force_fatal": False,
+            }
+        if wandb_kwargs is None or publish_startup is None:
+            raise RuntimeError("Internal W&B startup contract is missing rank-zero inputs.")
+        wandb_module.init(**wandb_kwargs)
+        run_path = _strict_active_wandb_run_path(
+            wandb_module,
+            expected_entity=wandb_kwargs.get("entity"),
+            expected_project=wandb_kwargs.get("project"),
+            expected_run_id=wandb_kwargs.get("id"),
+        )
+        publish_startup()
+        return {
+            "ok": True,
+            "run_path": run_path,
+            "error_type": None,
+            "error_message": None,
+            "force_fatal": False,
+        }
+    except BaseException as exc:
+        return _wandb_startup_error_outcome(wandb_module, exc)
+
+
+def _validate_wandb_startup_outcome(value: Any) -> WandbStartupOutcome:
+    """Validate the object-collective payload before any rank acts on it."""
+
+    required_keys = {"ok", "run_path", "error_type", "error_message", "force_fatal"}
+    if not isinstance(value, dict) or set(value) != required_keys:
+        raise RuntimeError(f"Malformed rank-zero W&B startup outcome: {value!r}.")
+    ok = value["ok"]
+    run_path = value["run_path"]
+    error_type = value["error_type"]
+    error_message = value["error_message"]
+    force_fatal = value["force_fatal"]
+    if not isinstance(ok, bool) or not isinstance(force_fatal, bool):
+        raise RuntimeError(f"Malformed rank-zero W&B startup outcome flags: {value!r}.")
+    if run_path is not None and (
+        not isinstance(run_path, str)
+        or len(run_path.split("/")) != 3
+        or any(not _WANDB_RUN_PATH_SEGMENT_RE.fullmatch(part) for part in run_path.split("/"))
+    ):
+        raise RuntimeError(f"Malformed rank-zero W&B run path: {run_path!r}.")
+    if ok:
+        if error_type is not None or error_message is not None or force_fatal:
+            raise RuntimeError(f"Successful W&B startup outcome contains error state: {value!r}.")
+    elif (
+        run_path is not None
+        or not isinstance(error_type, str)
+        or not error_type
+        or not isinstance(error_message, str)
+        or not error_message
+    ):
+        raise RuntimeError(f"Failed W&B startup outcome is incomplete: {value!r}.")
+    return cast("WandbStartupOutcome", value)
+
+
+def _synchronize_wandb_startup_outcome(
+    *,
+    dist_module: Any,
+    distributed_conf: MultGPUConfig | None,
+    device: str,
+    rank_zero_outcome: WandbStartupOutcome | None,
+    local_require_run: bool,
+    local_resume_must: bool,
+) -> WandbStartupOutcome:
+    """Broadcast startup plus policy and reject any divergent rank decision."""
+
+    if distributed_conf is None:
+        if not isinstance(local_require_run, bool) or not isinstance(local_resume_must, bool):
+            raise TypeError("Local W&B startup policy flags must be booleans.")
+        return _validate_wandb_startup_outcome(rank_zero_outcome)
+    if not dist_module.is_initialized():
+        raise RuntimeError("Distributed W&B startup synchronization requires an initialized process group.")
+    rank = int(distributed_conf["global_rank"])
+    if int(dist_module.get_rank()) != rank:
+        raise RuntimeError("Distributed rank changed before W&B startup synchronization.")
+    payload: list[dict[str, Any] | None] = [
+        {
+            "outcome": rank_zero_outcome,
+            "require_run": local_require_run,
+            "resume_must": local_resume_must,
+        }
+        if rank == 0
+        else None
+    ]
+    backend = str(dist_module.get_backend()).strip().lower()
+
+    import torch
+
+    control_group = None
+    if backend == "nccl" and _bool_env("HOLOSOMA_GLOO_SMALL_COLLECTIVES", default=False):
+        dist_timeout_sec = int(os.getenv("TORCH_DIST_TIMEOUT_SEC", "600"))
+        if dist_timeout_sec <= 0:
+            raise ValueError(f"TORCH_DIST_TIMEOUT_SEC must be positive, got {dist_timeout_sec}.")
+        control_group = dist_module.new_group(
+            backend="gloo",
+            timeout=timedelta(seconds=dist_timeout_sec),
+        )
+        broadcast_device = torch.device("cpu")
+    elif backend == "nccl":
+        broadcast_device = torch.device(device)
+        if broadcast_device.type != "cuda":
+            raise RuntimeError(
+                "NCCL W&B startup broadcast requires this rank's CUDA device, "
+                f"got {device!r}."
+            )
+    elif backend == "gloo":
+        broadcast_device = torch.device("cpu")
+    else:
+        raise RuntimeError(
+            "W&B startup outcome broadcast supports process-group backends 'nccl' and 'gloo', "
+            f"got {backend!r}."
+        )
+    policy_mismatch = True
+    try:
+        if control_group is None:
+            dist_module.broadcast_object_list(payload, src=0, device=broadcast_device)
+        else:
+            dist_module.broadcast_object_list(
+                payload,
+                src=0,
+                group=control_group,
+                device=broadcast_device,
+            )
+        envelope = payload[0]
+        envelope_policy_valid = (
+            isinstance(envelope, dict)
+            and set(envelope) == {"outcome", "require_run", "resume_must"}
+            and isinstance(envelope["require_run"], bool)
+            and isinstance(envelope["resume_must"], bool)
+        )
+        local_policy_valid = isinstance(local_require_run, bool) and isinstance(local_resume_must, bool)
+        local_policy_mismatch = (
+            not envelope_policy_valid
+            or not local_policy_valid
+            or envelope["require_run"] != local_require_run
+            or envelope["resume_must"] != local_resume_must
+        )
+        mismatch_tensor = torch.tensor(
+            [1 if local_policy_mismatch else 0],
+            dtype=torch.int32,
+            device=broadcast_device,
+        )
+        all_reduce_kwargs: dict[str, Any] = {"op": dist_module.ReduceOp.MAX}
+        if control_group is not None:
+            all_reduce_kwargs["group"] = control_group
+        dist_module.all_reduce(mismatch_tensor, **all_reduce_kwargs)
+        policy_mismatch = bool(mismatch_tensor.item())
+    finally:
+        if control_group is not None:
+            dist_module.destroy_process_group(control_group)
+    if policy_mismatch:
+        raise RuntimeError(
+            "Distributed W&B startup policy differs across ranks or rank zero published "
+            "a malformed policy envelope; refusing a divergent fatal/continue decision."
+        )
+    envelope = cast("dict[str, Any]", payload[0])
+    return _validate_wandb_startup_outcome(envelope["outcome"])
+
+
+def _resolve_wandb_startup_outcome(
+    outcome: WandbStartupOutcome,
+    *,
+    require_run: bool,
+    resume_mode: str | bool | None,
+) -> str | None:
+    """Return the shared run path or raise identically after synchronization."""
+
+    outcome = _validate_wandb_startup_outcome(outcome)
+    if outcome["ok"]:
+        if require_run and outcome["run_path"] is None:
+            raise RuntimeError(
+                "HOLOSOMA_REQUIRE_WANDB_RUN=1 was set, but rank zero did not publish an active W&B run path."
+            )
+        return outcome["run_path"]
+    fatal = require_run or _wandb_init_failure_is_fatal(resume_mode) or outcome["force_fatal"]
+    if fatal:
+        raise RuntimeError(
+            "Rank-zero W&B startup failed; all ranks are aborting after the shared outcome collective: "
+            f"{outcome['error_type']}: {outcome['error_message']}"
+        )
+    return None
+
+
+def _per_rank_env_count(total_num_envs: int, world_size: int) -> int:
+    """Return an exact per-rank environment count or fail before truncation."""
+
+    total_num_envs = int(total_num_envs)
+    world_size = int(world_size)
+    if world_size < 1:
+        raise ValueError(f"world_size must be positive, got {world_size}.")
+    if total_num_envs < world_size:
+        raise ValueError(
+            f"training.num_envs ({total_num_envs}) is too small for world size {world_size}. "
+            "Increase num_envs or reduce the distributed world size."
+        )
+    if total_num_envs % world_size != 0:
+        raise ValueError(
+            f"training.num_envs ({total_num_envs}) must be divisible by world size {world_size}; "
+            "floor division would silently run fewer environments than requested."
+        )
+    return total_num_envs // world_size
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {raw!r}.")
+
+
+def _validate_hierarchical_small_collectives_launch_contract() -> None:
+    """Fail before simulator startup on an incomplete hierarchy contract."""
+
+    validate_hierarchical_small_collectives_contract(
+        {
+            "HOLOSOMA_GLOO_SMALL_COLLECTIVES": _bool_env(
+                "HOLOSOMA_GLOO_SMALL_COLLECTIVES"
+            ),
+            "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE": _bool_env(
+                "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE"
+            ),
+            "HOLOSOMA_HIERARCHICAL_SMALL_COLLECTIVES": _bool_env(
+                "HOLOSOMA_HIERARCHICAL_SMALL_COLLECTIVES"
+            ),
+        }
+    )
+
+
+def _canonicalize_fresh_curriculum_resume_env() -> bool:
+    """Resolve the public launcher alias to the PPO runtime environment key."""
+
+    canonical_name = "HOLOSOMA_ALLOW_FRESH_CURRICULUM_RESUME"
+    launcher_name = "ALLOW_FRESH_CURRICULUM_RESUME"
+    canonical_present = canonical_name in os.environ
+    launcher_present = launcher_name in os.environ
+    canonical_value = _bool_env(canonical_name) if canonical_present else None
+    launcher_value = _bool_env(launcher_name) if launcher_present else None
+    if canonical_value is not None and launcher_value is not None and canonical_value != launcher_value:
+        raise ValueError(
+            f"{canonical_name} and {launcher_name} disagree; refusing a resume whose preflight "
+            "and PPO load would use different curriculum semantics."
+        )
+    allowed = bool(
+        canonical_value
+        if canonical_value is not None
+        else launcher_value
+        if launcher_value is not None
+        else False
+    )
+    os.environ[canonical_name] = "1" if allowed else "0"
+    return allowed
+
+
+def _preflight_data_assets_before_sim() -> dict[str, Any] | None:
+    """Revalidate launcher-hashed motion/object/contact bytes per node.
+
+    The helper process owns the expensive hashing and a node-scoped locked
+    cache.  Repeated calls in this worker, and calls from sibling local ranks,
+    still recheck every cached inode/mtime/size identity but do not reread the
+    full contact tree unless an input identity changed.
+    """
+
+    provenance = training_provenance_from_env()
+    if provenance is None:
+        return None
+
+    motion_raw = os.environ.get("MOTION_DIR", "").strip()
+    if not motion_raw:
+        raise RuntimeError(
+            "Scientific training provenance requires exported MOTION_DIR for pre-simulator revalidation."
+        )
+    object_spec_raw = os.environ.get("OBJECT_SPEC_PATH", "").strip()
+    object_urdf_raw = os.environ.get("OBJECT_URDF", "").strip()
+    object_raw = object_spec_raw or object_urdf_raw
+    if not object_raw:
+        raise RuntimeError(
+            "Scientific training provenance requires exported OBJECT_SPEC_PATH or OBJECT_URDF "
+            "for pre-simulator revalidation."
+        )
+    if object_spec_raw and object_urdf_raw:
+        spec_path = Path(object_spec_raw).expanduser().resolve(strict=False)
+        urdf_path = Path(object_urdf_raw).expanduser().resolve(strict=False)
+        if spec_path != urdf_path:
+            raise RuntimeError(
+                "OBJECT_SPEC_PATH and OBJECT_URDF select different scientific object inputs: "
+                f"{spec_path} != {urdf_path}."
+            )
+
+    contact_root: Path | None = None
+    contact_enabled = (
+        provenance["contact_sidecar_manifest_sha256"]
+        != disabled_contact_sidecar_manifest_sha256()
+    )
+    if contact_enabled:
+        contact_raw = os.environ.get("CONTACT_EXPORT_ROOT", "").strip()
+        if not contact_raw:
+            contact_raw = os.environ.get("AS_CONTACT_EXPORT_ROOT", "").strip()
+        if not contact_raw:
+            raise RuntimeError(
+                "Training provenance declares contact sidecars, but neither CONTACT_EXPORT_ROOT "
+                "nor AS_CONTACT_EXPORT_ROOT is exported for pre-simulator revalidation."
+            )
+        contact_root = Path(contact_raw)
+
+    shard_manifest_raw = os.environ.get(
+        "HOLOSOMA_MOTION_SHARD_MANIFEST",
+        "",
+    ).strip()
+    if shard_manifest_raw:
+        shard_manifest = Path(shard_manifest_raw)
+    else:
+        shard_root_raw = os.environ.get("HOLOSOMA_RANK_LOCAL_MOTION_ROOT", "").strip()
+        shard_manifest = Path(shard_root_raw) / "manifest.json" if shard_root_raw else None
+
+    script_path = (
+        Path(__file__).resolve().parents[3] / "scripts" / "compute_training_provenance.py"
+    )
+    if not script_path.is_file():
+        raise FileNotFoundError(
+            "Scientific data provenance revalidation helper is missing from the source snapshot: "
+            f"{script_path}"
+        )
+    source_root = Path(
+        os.environ.get("HOLOSOMA_SOURCE_ROOT", str(script_path.parent.parent))
+    ).expanduser()
+    command = [
+        sys.executable,
+        str(script_path),
+        "--revalidate-data-assets",
+        "--motion-dir",
+        motion_raw,
+        "--object-map",
+        object_raw,
+        "--source-root",
+        str(source_root),
+    ]
+    if contact_root is not None:
+        command.extend(["--contact-root", str(contact_root)])
+    if shard_manifest is not None:
+        command.extend(["--motion-shard-manifest", str(shard_manifest)])
+    cache_root_raw = os.environ.get("HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT", "").strip()
+    if cache_root_raw:
+        command.extend(["--cache-root", cache_root_raw])
+
+    completed = subprocess.run(
+        command,
+        input=canonical_training_provenance_json(provenance),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.returncode != 0:
+        detail = (
+            completed.stderr.strip()
+            or completed.stdout.strip()
+            or "unknown training data provenance revalidation failure"
+        )
+        raise RuntimeError(detail)
+    return provenance
+
+
+def _preflight_cross_rank_provenance_before_sim() -> dict[str, Any] | None:
+    """Verify immutable training-input digests across torchrun ranks."""
+
+    provenance = training_provenance_from_env()
+    if provenance is None:
+        return None
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    main_port = int(os.environ.get("MASTER_PORT", "29500"))
+    default_provenance_port = main_port + 1 if main_port < 65535 else main_port - 1
+    provenance_port = int(os.environ.get("HOLOSOMA_PROVENANCE_MASTER_PORT", str(default_provenance_port)))
+    if not 1 <= provenance_port <= 65535:
+        raise ValueError(f"HOLOSOMA_PROVENANCE_MASTER_PORT must be in [1, 65535], got {provenance_port}.")
+    command = [
+        sys.executable,
+        "-m",
+        "holosoma.utils.provenance_preflight",
+        "--world-size",
+        str(world_size),
+        "--master-port",
+        str(provenance_port),
+    ]
+    completed = subprocess.run(
+        command,
+        input=canonical_training_provenance_json(provenance),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        marker_prefix = "[INFO] cross_rank_training_provenance_verified "
+        for output_line in completed.stdout.splitlines():
+            if output_line.startswith(marker_prefix):
+                # The helper process writes into a private capture pipe.  The
+                # controller observes this parent process's shared stdout, so
+                # preserve the one-write launch-record contract at this second
+                # and operationally relevant boundary as well.
+                emit_atomic_stdout_record(output_line)
+            elif output_line:
+                print(output_line, flush=True)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown provenance preflight failure"
+        raise RuntimeError(detail)
+    return provenance
+
+
+def _training_consumes_teacher(tyro_config: ExperimentConfig) -> bool:
+    """Mirror the PPO setup condition that actually constructs a teacher."""
+
+    algo = getattr(tyro_config, "algo", None)
+    algo_config = getattr(algo, "config", None)
+    distill = getattr(algo_config, "distill", None)
+    if distill is None:
+        return False
+    mode = str(getattr(distill, "mode", "mse")).strip().lower()
+    if mode == "dagger":
+        bc_loss_coef = (
+            float(distill.bc_loss_coef)
+            if distill.bc_loss_coef is not None
+            else float(distill.loss_coef)
+        )
+        ppo_start_epoch = int(getattr(distill, "ppo_start_epoch", -1))
+        dagger_end_epoch = int(getattr(distill, "dagger_end_epoch", -1))
+        schedule_enabled = (
+            ppo_start_epoch >= 0 and dagger_end_epoch > ppo_start_epoch
+        )
+        return (
+            bc_loss_coef > 0.0
+            or int(getattr(distill, "switch_to_rl_after", -1)) > 0
+            or schedule_enabled
+        )
+    return bool(distill.enabled)
+
+
+def _preflight_checkpoint_lineage_before_sim(tyro_config: ExperimentConfig) -> None:
+    """Bind provenance checkpoint lineage to the effective training CLI mode."""
+
+    provenance = training_provenance_from_env()
+    if _training_consumes_teacher(tyro_config):
+        legacy_unverified_teacher_load = allow_legacy_unverified_teacher_load()
+        if provenance is None:
+            if not legacy_unverified_teacher_load:
+                raise ValueError(
+                    "Scientific teacher loading requires finalized current training provenance "
+                    "before simulator startup. Set "
+                    f"{ALLOW_LEGACY_UNVERIFIED_TEACHER_LOAD_ENV}=1 only for an explicitly "
+                    "non-scientific legacy teacher load."
+                )
+            print(
+                "[WARN] legacy_unverified_teacher_load_allowed "
+                f"override={ALLOW_LEGACY_UNVERIFIED_TEACHER_LOAD_ENV}=1: teacher checkpoint "
+                "identity is not authenticated by current training provenance.",
+                flush=True,
+            )
+        else:
+            if provenance.get("teacher_enabled") is not True:
+                raise ValueError(
+                    "Training consumes a teacher but current training provenance disables it."
+                )
+            if bool(getattr(tyro_config.algo.config.distill, "use_multi_teacher", False)):
+                raise ValueError(
+                    "Scientific multi-teacher loading requires one authenticated digest per teacher; "
+                    "the current provenance schema contains only teacher_sha256."
+                )
+    elif provenance is not None and provenance.get("teacher_enabled") is True:
+        raise ValueError(
+            "Current training provenance enables a teacher, but the effective training objective "
+            "does not consume one."
+        )
+    if provenance is None:
+        return
+    configured = {
+        "policy_init": tyro_config.training.policy_init_checkpoint is not None,
+        "training_resume": tyro_config.training.checkpoint is not None,
+    }
+    if all(configured.values()):
+        raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
+    for role, configured_enabled in configured.items():
+        provenance_enabled = checkpoint_lineage_enabled(provenance, role)
+        if provenance_enabled != configured_enabled:
+            cli_option = (
+                "--training.policy-init-checkpoint"
+                if role == "policy_init"
+                else "--training.checkpoint"
+            )
+            raise ValueError(
+                f"Training provenance {role}_enabled={provenance_enabled} does not match "
+                f"{cli_option} presence={configured_enabled}."
+            )
+
+
+def _preflight_training_resume_before_sim(tyro_config: ExperimentConfig) -> ExperimentConfig:
+    """Validate a curriculum-correct training-resume contract before simulation."""
+
+    checkpoint = tyro_config.training.checkpoint
+    if checkpoint is None:
+        return tyro_config
+    checkpoint_path: Path
+    if str(checkpoint).startswith("wandb://"):
+        rank = int(os.environ.get("RANK", "0"))
+        cache_root = Path(
+            os.environ.get(
+                "HOLOSOMA_RESUME_PREFLIGHT_CACHE",
+                str(Path.home() / ".cache" / "holosoma" / "resume_preflight"),
+            )
+        )
+        checkpoint_path = load_checkpoint(str(checkpoint), str(cache_root / f"rank_{rank}"))
+    else:
+        checkpoint_path = Path(str(checkpoint)).expanduser()
+    checkpoint_path = Path(checkpoint_path).resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Training-resume checkpoint is not a readable local file: {checkpoint_path}")
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    per_rank_num_envs = _per_rank_env_count(tyro_config.training.num_envs, world_size)
+    effective_config = apply_observation_overrides(tyro_config)
+    effective_config = apply_perception_overrides(effective_config)
+    effective_config = dataclasses.replace(
+        effective_config,
+        training=dataclasses.replace(
+            effective_config.training,
+            num_envs=per_rank_num_envs,
+            checkpoint=str(checkpoint_path),
+        ),
+    )
+
+    command = [
+        sys.executable,
+        "-m",
+        "holosoma.utils.resume_preflight",
+        "--checkpoint",
+        str(checkpoint_path),
+        "--world-size",
+        str(world_size),
+    ]
+    if _canonicalize_fresh_curriculum_resume_env():
+        command.append("--allow-fresh-curriculum")
+    current_provenance = training_provenance_from_env()
+    if current_provenance is not None:
+        command.extend(
+            ["--current-provenance-json", canonical_training_provenance_json(current_provenance)]
+        )
+    completed = subprocess.run(
+        command,
+        input=json.dumps(effective_config.to_serializable_dict()),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown resume preflight failure"
+        raise RuntimeError(detail)
+
+    return dataclasses.replace(
+        tyro_config,
+        training=dataclasses.replace(tyro_config.training, checkpoint=str(checkpoint_path)),
+    )
+
+
+def _preflight_policy_init_before_sim(tyro_config: ExperimentConfig) -> ExperimentConfig:
+    """Validate the actor semantic contract of a policy initializer before simulation."""
+
+    checkpoint = tyro_config.training.policy_init_checkpoint
+    required_terminal_target = required_policy_init_terminal_target_from_env()
+    if checkpoint is None:
+        if required_terminal_target is not None:
+            raise ValueError(
+                "A required policy-init terminal target was configured, but "
+                "--training.policy-init-checkpoint is empty."
+            )
+        return tyro_config
+    if tyro_config.training.checkpoint is not None:
+        raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
+
+    checkpoint_path: Path
+    if str(checkpoint).startswith("wandb://"):
+        rank = int(os.environ.get("RANK", "0"))
+        cache_root = Path(
+            os.environ.get(
+                "HOLOSOMA_POLICY_INIT_PREFLIGHT_CACHE",
+                str(Path.home() / ".cache" / "holosoma" / "policy_init_preflight"),
+            )
+        )
+        checkpoint_path = load_checkpoint(str(checkpoint), str(cache_root / f"rank_{rank}"))
+    else:
+        checkpoint_path = Path(str(checkpoint)).expanduser()
+    # Preserve the lexical final component so the subprocess' O_NOFOLLOW open
+    # can reject a symlink rather than resolving it before authentication.
+    checkpoint_path = Path(os.path.abspath(os.fspath(checkpoint_path)))
+    try:
+        checkpoint_stat = os.lstat(checkpoint_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Policy-init checkpoint is not a readable local file: {checkpoint_path}"
+        ) from exc
+    if not stat.S_ISREG(checkpoint_stat.st_mode) or stat.S_ISLNK(checkpoint_stat.st_mode):
+        raise ValueError(
+            f"Policy-init checkpoint must be a non-symlink regular file: {checkpoint_path}"
+        )
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    per_rank_num_envs = _per_rank_env_count(
+        tyro_config.training.num_envs,
+        world_size,
+    )
+    effective_config = apply_observation_overrides(tyro_config)
+    effective_config = apply_perception_overrides(effective_config)
+    effective_config = dataclasses.replace(
+        effective_config,
+        training=dataclasses.replace(
+            effective_config.training,
+            num_envs=per_rank_num_envs,
+            policy_init_checkpoint=str(checkpoint_path),
+        ),
+    )
+
+    command = [
+        sys.executable,
+        "-m",
+        "holosoma.utils.policy_init_preflight",
+        "--checkpoint",
+        str(checkpoint_path),
+    ]
+    current_provenance = training_provenance_from_env()
+    if current_provenance is not None:
+        command.extend(
+            ["--current-provenance-json", canonical_training_provenance_json(current_provenance)]
+        )
+    if required_terminal_target is not None:
+        command.extend(
+            ["--require-terminal-target", str(required_terminal_target)]
+        )
+    completed = subprocess.run(
+        command,
+        input=json.dumps(effective_config.to_serializable_dict()),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown policy-init preflight failure"
+        raise RuntimeError(detail)
+
+    return dataclasses.replace(
+        tyro_config,
+        training=dataclasses.replace(
+            tyro_config.training,
+            policy_init_checkpoint=str(checkpoint_path),
+        ),
+    )
 
 
 def configure_multi_gpu() -> MultGPUConfig | None:
@@ -242,18 +1442,20 @@ def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Pa
     logger.remove()
     is_main_process = distributed_conf is None or distributed_conf["global_rank"] == 0
 
-    # logging to file (from all ranks)
-    if log_dir is not None:
-        fname = f"train_rank_{distributed_conf['global_rank']:02d}.log" if distributed_conf is not None else "train.log"
-        log_path = log_dir / fname
-        logger.add(str(log_path), level="DEBUG")
-
-    # Get log level from LOGURU_LEVEL environment variable or use INFO as default in rank0
+    # Install the console sink before touching the filesystem.  If a bad log
+    # root cannot be created, the outer training exception handler must still
+    # have a live sink and emit the actual PermissionError on every rank.
     if is_main_process:
         console_log_level = os.environ.get("LOGURU_LEVEL", "INFO").upper()
     else:
         console_log_level = "ERROR"
     logger.add(sys.stdout, level=console_log_level, colorize=True)
+
+    # logging to file (from all ranks)
+    if log_dir is not None:
+        fname = f"train_rank_{distributed_conf['global_rank']:02d}.log" if distributed_conf is not None else "train.log"
+        log_path = log_dir / fname
+        logger.add(str(log_path), level="DEBUG")
     logging.basicConfig(level=logging.DEBUG if is_main_process else logging.ERROR)
     logging.getLogger().addHandler(LoguruLoggingBridge())
 
@@ -413,6 +1615,21 @@ def _run_debug_mode_by_perception(
     _run_debug_motion_preview(env, max_steps=max_steps)
 
 
+def _configure_defm_materialization_mode(config: ExperimentConfig) -> str:
+    """Bind lazy DeFM construction to the checkpoint operation that follows."""
+
+    has_resume = config.training.checkpoint is not None
+    has_policy_init = config.training.policy_init_checkpoint is not None
+    if has_resume and has_policy_init:
+        raise ValueError(
+            "--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive."
+        )
+    mode = "full_resume" if has_resume else "policy_init" if has_policy_init else "fresh"
+    # The serialized training config is authoritative. Do not permit an
+    # ambient shell variable to silently choose a different initialization.
+    return set_defm_materialization_mode(mode)
+
+
 def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
     """Train an agent with optional context for sim app management.
 
@@ -423,14 +1640,61 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         If None, creates and manages sim app automatically.
     """
 
+    # Direct API callers must hash and initialize exactly the same effective
+    # config as the CLI entrypoint.  These rewrites are pure/idempotent and
+    # must happen before every provenance or simulator boundary.
+    tyro_config = _effective_runtime_config(tyro_config)
+    _validate_hierarchical_small_collectives_launch_contract()
+    if training_context is not None:
+        if training_context.simulation_app is None:
+            raise RuntimeError("TrainingContext must be entered before it is passed to train().")
+        if not training_context._policy_init_preflight_complete:
+            raise RuntimeError(
+                "TrainingContext did not complete policy-init preflight before simulator startup."
+            )
+        context_config = _effective_runtime_config(training_context.config)
+        if context_config != tyro_config:
+            raise ValueError(
+                "train() config differs from the effective config used to initialize TrainingContext."
+            )
+        tyro_config = context_config
+
+    # Validate the complete distributed seed range before a direct API caller
+    # can start Isaac or mutate any process RNG. ``main`` and TrainingContext
+    # perform the same fail-closed check at their own simulator boundaries.
+    _current_rank_training_seed(tyro_config.training.seed)
+    _configure_defm_materialization_mode(tyro_config)
+
+    # Narrow the hash-to-open window after checkpoint/cross-rank preflights and
+    # before Isaac/Gym modules can open any mutable asset path.
+    finalized_provenance = finalize_runtime_asset_provenance(tyro_config)
+    _validate_prestarted_runtime_provenance(finalized_provenance)
+    _preflight_checkpoint_lineage_before_sim(tyro_config)
+    _preflight_data_assets_before_sim()
+
     if training_context is not None:
         # Use the context's pre-initialized sim app
         simulation_app = training_context.simulation_app
         auto_close = False  # Context will handle closing
     else:
+        # ``train(config)`` is also a public simulator-starting entrypoint.
+        # ``main`` already performs this preflight, but it installs the local
+        # verified checkpoint path into the returned immutable config, so this
+        # second fail-closed boundary cannot download a W&B artifact twice.
+        tyro_config = _preflight_policy_init_before_sim(tyro_config)
         # Default behavior - create and manage sim app ourselves
         simulation_app = init_sim_imports(tyro_config)
         auto_close = True
+
+    # These services are initialized inside the guarded block, but failures
+    # can occur at any point after either one becomes active.  Keep explicit
+    # outer state so ``finally`` can perform idempotent teardown on both the
+    # success and exception paths.
+    dist = None
+    wandb = None
+    is_distributed = False
+    is_main_process = True
+    wandb_enabled = False
 
     try:
         # have to import torch after isaacgym
@@ -454,20 +1718,19 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         logger_cfg = tyro_config.logger
         wandb_enabled = logger_cfg.type == "wandb"
 
-        # Compute experiment directory from logger and training config
-        from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
-
-        timestamp = get_timestamp()
-        experiment_dir = get_experiment_dir(logger_cfg, tyro_config.training, timestamp, task_name="locomotion")
+        # Rank zero owns the run identity.  All ranks and the environment/simulator
+        # reuse the exact timestamp and path published here.
+        timestamp, experiment_dir = _synchronize_experiment_identity(
+            dist_module=dist,
+            distributed_conf=distributed_conf,
+            device=device,
+            logger_config=logger_cfg,
+            training_config=tyro_config.training,
+            task_name="locomotion",
+        )
 
         # Configure logging with experiment directory
         configure_logging(distributed_conf=distributed_conf, log_dir=experiment_dir)
-
-        # Random seed
-        seed = tyro_config.training.seed
-        if distributed_conf is not None:
-            seed += distributed_conf["global_rank"]
-        seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
 
         wandb_run_path: str | None = None
 
@@ -476,19 +1739,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         world_size = int(distributed_conf["world_size"]) if distributed_conf is not None else 1
         if distributed_conf is not None:
             original_num_envs = requested_total_num_envs
-            num_envs = original_num_envs // distributed_conf["world_size"]
-            if num_envs < 1:
-                raise ValueError(
-                    f"training.num_envs ({original_num_envs}) is too small for world size "
-                    f"{distributed_conf['world_size']}. Increase num_envs or reduce --nproc_per_node."
-                )
-            if original_num_envs % distributed_conf["world_size"] != 0 and is_main_process:
-                logger.warning(
-                    "training.num_envs={} is not divisible by world_size={}; using floor division ({} envs per rank).",
-                    original_num_envs,
-                    distributed_conf["world_size"],
-                    num_envs,
-                )
+            num_envs = _per_rank_env_count(original_num_envs, distributed_conf["world_size"])
             tyro_config = dataclasses.replace(
                 tyro_config, training=dataclasses.replace(tyro_config.training, num_envs=num_envs)
             )
@@ -504,98 +1755,175 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             )
             logger.info("Debug mode: forcing headless=True to avoid viewer-only issues.")
 
-        tyro_config = apply_observation_overrides(tyro_config)
-        tyro_config = apply_perception_overrides(tyro_config)
-
         experiment_save_dir = experiment_dir
         experiment_save_dir.mkdir(exist_ok=True, parents=True)
 
         config_path: Path | None = None
+        runtime_asset_manifest_path: Path | None = None
+
+        # Rank zero owns W&B, but no rank acts on its startup result until the
+        # complete init/metadata/file-registration outcome reaches every peer.
+        wandb_required = _bool_env("HOLOSOMA_REQUIRE_WANDB_RUN", default=False)
+        wandb_mode = getattr(logger_cfg, "mode", None) if wandb_enabled else None
+        wandb_resume_mode = getattr(logger_cfg, "resume", None) if wandb_enabled else None
+        rank_zero_wandb_outcome: WandbStartupOutcome | None = None
         if is_main_process:
-            logger.info(f"Saving config file to {experiment_save_dir}")
-            config_path = experiment_save_dir / CONFIG_NAME
-            tyro_config.save_config(str(config_path))
-
-        # Initialize wandb on rank0 before expensive sim/env setup so the run
-        # appears immediately in the UI. Keep ranks in sync with a barrier.
-        if wandb_enabled and is_main_process:
-            from holosoma.config_types.logger import WandbLoggerConfig
-
-            assert isinstance(logger_cfg, WandbLoggerConfig), (
-                "Logger config must be WandbLoggerConfig when type is wandb"
-            )
-            wandb_cfg = logger_cfg
-            default_project = tyro_config.training.project or wandb_cfg.project or "default_project"
-            default_run_name = (
-                f"{timestamp}_{tyro_config.training.name or 'run'}_"
-                f"{wandb_cfg.group or 'default'}_{tyro_config.robot.asset.robot_type}"
-            )
-            wandb_dir = Path(wandb_cfg.dir or (experiment_dir / ".wandb"))
-            wandb_dir.mkdir(exist_ok=True, parents=True)
-            logger.info(f"Saving wandb logs to {wandb_dir}")
-
-            wandb_kwargs: dict[str, Any] = {
-                "project": wandb_cfg.project or default_project,
-                "name": wandb_cfg.name or default_run_name,
-                "config": dataclasses.asdict(tyro_config),
-                "dir": str(wandb_dir),
-                "mode": wandb_cfg.mode,
-            }
-            if wandb_cfg.entity:
-                wandb_kwargs["entity"] = wandb_cfg.entity
-            if wandb_cfg.group:
-                wandb_kwargs["group"] = wandb_cfg.group
-            if wandb_cfg.id:
-                wandb_kwargs["id"] = wandb_cfg.id
-            if wandb_cfg.tags:
-                wandb_kwargs["tags"] = list(wandb_cfg.tags)
-            if wandb_cfg.resume is not None:
-                wandb_kwargs["resume"] = wandb_cfg.resume
-            wandb_kwargs["settings"] = wandb.Settings(
-                init_timeout=float(os.environ.get("WANDB_INIT_TIMEOUT", "60"))
-            )
-
+            local_config_persisted = False
             try:
-                wandb.init(**wandb_kwargs)
-            except Exception as wandb_exc:
-                logger.exception(
-                    f"wandb.init failed on rank0: {wandb_exc}. Continuing without an active wandb run."
-                )
+                logger.info(f"Saving config file to {experiment_save_dir}")
+                config_path = experiment_save_dir / CONFIG_NAME
+                tyro_config.save_config(str(config_path))
+                finalized_provenance = training_provenance_from_env()
+                if finalized_provenance is not None:
+                    runtime_asset_manifest_path = persist_runtime_asset_manifest(
+                        experiment_save_dir / RUNTIME_ASSET_MANIFEST_FILENAME,
+                        finalized_provenance,
+                    )
+                    logger.info(
+                        "Persisted canonical runtime asset manifest to {}",
+                        runtime_asset_manifest_path,
+                    )
+                local_config_persisted = True
+                wandb_kwargs: dict[str, Any] | None = None
+                publish_wandb_startup: Callable[[], None] | None = None
+                if wandb_enabled:
+                    from holosoma.config_types.logger import WandbLoggerConfig
 
-            if wandb.run is not None:
-                wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
-                env_count_metadata = _collect_env_count_wandb_metadata(
-                    requested_total_num_envs=requested_total_num_envs,
-                    effective_total_num_envs=effective_total_num_envs,
-                    per_rank_num_envs=int(tyro_config.training.num_envs),
-                    world_size=world_size,
+                    if not isinstance(logger_cfg, WandbLoggerConfig):
+                        raise TypeError("Logger config must be WandbLoggerConfig when type is wandb.")
+                    wandb_cfg = logger_cfg
+                    default_project = tyro_config.training.project or wandb_cfg.project or "default_project"
+                    default_run_name = (
+                        f"{timestamp}_{tyro_config.training.name or 'run'}_"
+                        f"{wandb_cfg.group or 'default'}_{tyro_config.robot.asset.robot_type}"
+                    )
+                    wandb_dir = Path(wandb_cfg.dir or (experiment_dir / ".wandb"))
+                    wandb_dir.mkdir(exist_ok=True, parents=True)
+                    logger.info(f"Saving wandb logs to {wandb_dir}")
+
+                    wandb_kwargs = {
+                        "project": wandb_cfg.project or default_project,
+                        "name": wandb_cfg.name or default_run_name,
+                        "config": dataclasses.asdict(tyro_config),
+                        "dir": str(wandb_dir),
+                        "mode": wandb_cfg.mode,
+                    }
+                    if wandb_cfg.entity:
+                        wandb_kwargs["entity"] = wandb_cfg.entity
+                    if wandb_cfg.group:
+                        wandb_kwargs["group"] = wandb_cfg.group
+                    if wandb_cfg.id:
+                        wandb_kwargs["id"] = wandb_cfg.id
+                    if wandb_cfg.tags:
+                        wandb_kwargs["tags"] = list(wandb_cfg.tags)
+                    if wandb_cfg.resume is not None:
+                        wandb_kwargs["resume"] = wandb_cfg.resume
+                    wandb_kwargs["settings"] = wandb.Settings(
+                        init_timeout=float(os.environ.get("WANDB_INIT_TIMEOUT", "60"))
+                    )
+
+                    def publish_wandb_startup() -> None:
+                        env_count_metadata = _collect_env_count_wandb_metadata(
+                            requested_total_num_envs=requested_total_num_envs,
+                            effective_total_num_envs=effective_total_num_envs,
+                            per_rank_num_envs=int(tyro_config.training.num_envs),
+                            world_size=world_size,
+                        )
+                        _publish_wandb_startup_metadata(wandb, config_metadata=env_count_metadata)
+                        logger.info("Logged environment-count metadata to W&B: {}", env_count_metadata)
+                        object_bank_metadata = _collect_object_bank_wandb_metadata()
+                        if object_bank_metadata:
+                            _publish_wandb_startup_metadata(wandb, config_metadata=object_bank_metadata)
+                            logger.info("Logged object-bank metadata to W&B: {}", object_bank_metadata)
+                        provenance_metadata = _collect_training_provenance_wandb_metadata()
+                        if provenance_metadata:
+                            _publish_wandb_startup_metadata(wandb, config_metadata=provenance_metadata)
+                            logger.info("Logged immutable training-input provenance to W&B: {}", provenance_metadata)
+                        reward_config_metadata, reward_summary_metadata = collect_reward_wandb_metadata(
+                            tyro_config.reward
+                        )
+                        if reward_config_metadata:
+                            _publish_wandb_startup_metadata(
+                                wandb,
+                                config_metadata=reward_config_metadata,
+                                summary_metadata=reward_summary_metadata,
+                            )
+                            logger.info("Logged grouped reward metadata to W&B.")
+                        if config_path is not None:
+                            wandb.save(str(config_path), base_path=experiment_save_dir)
+                        if runtime_asset_manifest_path is not None:
+                            wandb.save(str(runtime_asset_manifest_path), base_path=experiment_save_dir)
+
+                rank_zero_wandb_outcome = _run_rank_zero_wandb_startup(
+                    wandb,
+                    wandb_enabled=wandb_enabled,
+                    wandb_mode=wandb_mode,
+                    require_run=wandb_required,
+                    wandb_kwargs=wandb_kwargs,
+                    publish_startup=publish_wandb_startup,
                 )
-                wandb.config.update(env_count_metadata, allow_val_change=True)
-                for key, value in env_count_metadata.items():
-                    wandb.run.summary[key] = value
-                wandb.log(env_count_metadata, step=0)
-                logger.info("Logged environment-count metadata to W&B: {}", env_count_metadata)
-                object_bank_metadata = _collect_object_bank_wandb_metadata()
-                if object_bank_metadata:
-                    wandb.config.update(object_bank_metadata, allow_val_change=True)
-                    for key, value in object_bank_metadata.items():
-                        wandb.run.summary[key] = value
-                    wandb.log(object_bank_metadata, step=0)
-                    logger.info("Logged object-bank metadata to W&B: {}", object_bank_metadata)
-                reward_config_metadata, reward_summary_metadata = collect_reward_wandb_metadata(tyro_config.reward)
-                if reward_config_metadata:
-                    wandb.config.update(reward_config_metadata, allow_val_change=True)
-                    for key, value in reward_summary_metadata.items():
-                        wandb.run.summary[key] = value
-                    if reward_summary_metadata:
-                        wandb.log(reward_summary_metadata, step=0)
-                    logger.info("Logged grouped reward metadata to W&B.")
-                if config_path is not None:
-                    wandb.save(str(config_path), base_path=experiment_save_dir)
+            except BaseException as wandb_setup_exc:
+                # Directory/config/Settings failures are rank-zero-only too;
+                # serialize them instead of stranding peers at the next sync.
+                rank_zero_wandb_outcome = _wandb_startup_error_outcome(wandb, wandb_setup_exc)
+                if not local_config_persisted:
+                    # Canonical local config/provenance persistence is required
+                    # even for a direct optional-W&B run.
+                    rank_zero_wandb_outcome["force_fatal"] = True
+
+        shared_wandb_outcome = _synchronize_wandb_startup_outcome(
+            dist_module=dist,
+            distributed_conf=distributed_conf,
+            device=device,
+            rank_zero_outcome=rank_zero_wandb_outcome,
+            local_require_run=wandb_required,
+            local_resume_must=_wandb_init_failure_is_fatal(wandb_resume_mode),
+        )
+        wandb_run_path = _resolve_wandb_startup_outcome(
+            shared_wandb_outcome,
+            require_run=wandb_required,
+            resume_mode=wandb_resume_mode,
+        )
+        if not shared_wandb_outcome["ok"] and is_main_process:
+            logger.error(
+                "W&B startup failed on rank zero ({}: {}); continuing without an active run because "
+                "neither HOLOSOMA_REQUIRE_WANDB_RUN nor resume='must' is active.",
+                shared_wandb_outcome["error_type"],
+                shared_wandb_outcome["error_message"],
+            )
+        elif wandb_run_path is not None and is_main_process:
+            logger.info("W&B startup outcome synchronized: run_path={}", wandb_run_path)
 
         _distributed_barrier(dist, distributed_conf)
 
         env_target = tyro_config.env_class
+
+        # W&B/config setup can take long enough for mutable node-local assets to
+        # drift.  Re-verify once more immediately before environment/simulator
+        # instantiation.  The object loader additionally compares its frozen
+        # normalized environment semantics with this embedded manifest.
+        finalized_provenance = finalize_runtime_asset_provenance(tyro_config)
+        _validate_prestarted_runtime_provenance(finalized_provenance)
+        _preflight_data_assets_before_sim()
+
+        # Establish the experiment RNG stream only after rank-0-only logger/W&B
+        # setup and the matching all-rank barrier.  Logger initialization is
+        # allowed to use Python/NumPy randomness internally; seeding before it
+        # made rank 0's simulator stream depend on whether/how W&B initialized.
+        # Keep this immediately before environment and algorithm construction so
+        # a fresh run is a function of the configured seed and global rank, not
+        # of auxiliary logging behavior.  A full checkpoint resume restores its
+        # saved rank-local RNG state at the end of ``algo.load``.
+        seed = _rank_training_seed(
+            tyro_config.training.seed,
+            world_size=world_size,
+            global_rank=(
+                int(distributed_conf["global_rank"])
+                if distributed_conf is not None
+                else 0
+            ),
+        )
+        seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
 
         tyro_env_config = get_tyro_env_config(tyro_config)
         env = get_class(env_target)(tyro_env_config, device=device)
@@ -617,13 +1945,13 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                     wandb_logging=wandb_enabled,
                     max_steps=max_debug_steps,
                 )
+            if is_main_process and wandb_enabled:
+                logger.info("Shutting down wandb...")
+                _finish_wandb_run(wandb, exit_code=0)
             if is_distributed:
                 _distributed_barrier(dist, distributed_conf)
                 logger.info("Shutting down distributed processes...")
                 dist.destroy_process_group()
-            if is_main_process and wandb_enabled:
-                logger.info("Shutting down wandb...")
-                wandb.finish()
             return
 
         algo_class = get_class(tyro_config.algo._target_)
@@ -659,13 +1987,23 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             )
             algo.load_policy_init(loaded_checkpoint)
 
+        # This is the controller's terminal startup handshake boundary.  It is
+        # deliberately after real simulator/environment construction,
+        # algo.setup (including model synchronization), and the authoritative
+        # checkpoint load.  The helper performs one final main-process-group
+        # barrier before every worker emits its unique launch-bound marker.
+        _emit_batch_worker_preflight_ready(
+            dist_module=dist,
+            distributed_conf=distributed_conf,
+        )
+
         # handle saving config
         algo.learn()
 
         # teardown wandb before SimApp closes ungracefully (IsaacLab)
         if is_main_process and wandb_enabled:
             logger.info("Shutting down wandb...")
-            wandb.teardown()
+            _finish_wandb_run(wandb, exit_code=0)
 
         # shutdown dist before SimApp closes ungracefully (IsaacLab)
         if is_distributed:
@@ -673,9 +2011,30 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             dist.destroy_process_group()
     except Exception as e:
         tb_str = traceback.format_exc()
+        # Failures before ``configure_logging`` previously disappeared for
+        # non-zero ranks, leaving torch-elastic with only ``exitcode=1``.  Keep
+        # the structured logger, but always emit a flushed stderr traceback so
+        # the first failed rank is diagnosable from the node log.
+        print(f"Exception occurred during training: {e}\n{tb_str}", file=sys.stderr, flush=True)
         logger.error(f"Exception occurred during training: {e}\n{tb_str}")
         sys.exit(1)  # manually set exit code, not possible via isaacsim app.close()
     finally:
+        if is_main_process and wandb_enabled and wandb is not None and getattr(wandb, "run", None) is not None:
+            try:
+                logger.info("Shutting down wandb from final cleanup...")
+                _finish_wandb_run(
+                    wandb,
+                    exit_code=1 if sys.exc_info()[0] is not None else 0,
+                )
+            except Exception:
+                logger.exception("W&B final cleanup failed.")
+        if dist is not None and is_distributed:
+            try:
+                if dist.is_available() and dist.is_initialized():
+                    logger.info("Shutting down distributed processes from final cleanup...")
+                    dist.destroy_process_group()
+            except Exception:
+                logger.exception("Distributed final cleanup failed.")
         if auto_close:
             close_simulation_app(simulation_app)
 
@@ -684,6 +2043,31 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
 def main() -> None:
     tyro_cfg = tyro.cli(AnnotatedExperimentConfig, config=TYRO_CONIFG)
+    # Runtime asset provenance must describe the same effective config that the
+    # environment will consume.  Finalize the launch-time pending sentinel
+    # before every cross-rank/checkpoint preflight and before importing Isaac.
+    tyro_cfg = _effective_runtime_config(tyro_cfg)
+    _validate_hierarchical_small_collectives_launch_contract()
+    _configure_defm_materialization_mode(tyro_cfg)
+    launch_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    _current_rank_training_seed(tyro_cfg.training.seed)
+    finalized_provenance = finalize_runtime_asset_provenance(tyro_cfg)
+    _validate_prestarted_runtime_provenance(finalized_provenance)
+    if finalized_provenance is not None:
+        print(
+            "[INFO] runtime_asset_provenance_finalized "
+            f"sha256={finalized_provenance['runtime_asset_manifest_sha256']}",
+            flush=True,
+        )
+    _preflight_data_assets_before_sim()
+    # torchrun publishes WORLD_SIZE before this process imports/initializes the
+    # simulator. Validate the global environment count here so a bad launcher
+    # contract cannot be rounded down after Isaac has already started.
+    _per_rank_env_count(tyro_cfg.training.num_envs, launch_world_size)
+    _preflight_cross_rank_provenance_before_sim()
+    _preflight_checkpoint_lineage_before_sim(tyro_cfg)
+    tyro_cfg = _preflight_policy_init_before_sim(tyro_cfg)
+    tyro_cfg = _preflight_training_resume_before_sim(tyro_cfg)
     print(tyro_cfg.curriculum)
     train(tyro_cfg)
 

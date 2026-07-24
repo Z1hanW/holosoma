@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from holosoma.config_types.terrain import MeshType
 from holosoma.observation import apply_observation_overrides
 from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
+from holosoma.utils.defm_runtime import set_defm_checkpoint_restore_mode
 from holosoma.utils.eval_utils import (
     CheckpointConfig,
     init_eval_logging,
@@ -318,36 +320,96 @@ def _update_algo_config(config: ExperimentConfig) -> ExperimentConfig:
     return config
 
 
+def _scrub_rollout_reference_reward_roots_for_eval(config: ExperimentConfig) -> ExperimentConfig:
+    """Disable rollout-reference reward sidecars for lightweight video eval.
+
+    Some training checkpoints carry reward params that point at node-local
+    teacher rollout/contact export roots. Video rollout does not need those
+    rewards, and missing sidecars should not prevent rendering the policy.
+    This is opt-in through an environment variable so normal training/resume
+    semantics stay unchanged.
+    """
+
+    raw = os.environ.get("HOLOSOMA_EVAL_DISABLE_ROLLOUT_REFERENCE_REWARDS", "")
+    if raw.strip().lower() not in {"1", "true", "yes", "on"}:
+        return config
+
+    reward_cfg = getattr(config, "reward", None)
+    terms = getattr(reward_cfg, "terms", None)
+    if not isinstance(terms, dict):
+        return config
+
+    updated_terms = {}
+    scrubbed_roots = 0
+    dropped_terms = 0
+    for name, term in terms.items():
+        params = dict(getattr(term, "params", {}) or {})
+        if "contact_export_root" in params:
+            dropped_terms += 1
+            continue
+        if "rollout_reference_root" in params:
+            params["rollout_reference_root"] = None
+            term = dataclasses.replace(term, params=params)
+            scrubbed_roots += 1
+        updated_terms[name] = term
+
+    if scrubbed_roots == 0 and dropped_terms == 0:
+        return config
+    logger.info(
+        "Adjusted video-eval reward sidecars: scrubbed rollout_reference_root on {} term(s), dropped {} contact-export term(s).",
+        scrubbed_roots,
+        dropped_terms,
+    )
+    reward_cfg = dataclasses.replace(reward_cfg, terms=updated_terms)
+    return dataclasses.replace(config, reward=reward_cfg)
+
+
 def run_physics_rollout(
     tyro_config: ExperimentConfig,
     checkpoint_cfg: CheckpointConfig,
     saved_config: ExperimentConfig,
     saved_wandb_path: str | None,
 ) -> None:
+    set_defm_checkpoint_restore_mode()
     env, device, simulation_app = setup_simulation_environment(tyro_config)
+    try:
+        eval_log_dir = get_experiment_dir(
+            tyro_config.logger,
+            tyro_config.training,
+            get_timestamp(),
+            task_name="eval",
+        )
+        eval_log_dir.mkdir(parents=True, exist_ok=True)
+        tyro_config.save_config(str(eval_log_dir / CONFIG_NAME))
 
-    eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")
-    eval_log_dir.mkdir(parents=True, exist_ok=True)
-    tyro_config.save_config(str(eval_log_dir / CONFIG_NAME))
+        checkpoint = load_checkpoint(checkpoint_cfg.checkpoint, str(eval_log_dir))
+        checkpoint_path = str(checkpoint)
 
-    checkpoint = load_checkpoint(checkpoint_cfg.checkpoint, str(eval_log_dir))
-    checkpoint_path = str(checkpoint)
-
-    algo_class = get_class(tyro_config.algo._target_)
-    algo = algo_class(
-        device=device,
-        env=env,
-        config=tyro_config.algo.config,
-        log_dir=str(eval_log_dir),
-        multi_gpu_cfg=None,
-    )
-    algo.setup()
-    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
-    algo.load(checkpoint_path)
-    algo.evaluate_policy(max_eval_steps=tyro_config.training.max_eval_steps)
-
-    if simulation_app:
-        close_simulation_app(simulation_app)
+        algo_class = get_class(tyro_config.algo._target_)
+        algo = algo_class(
+            device=device,
+            env=env,
+            config=tyro_config.algo.config,
+            log_dir=str(eval_log_dir),
+            multi_gpu_cfg=None,
+        )
+        algo.attach_evaluation_metadata(
+            saved_config,
+            tyro_config,
+            saved_wandb_path,
+        )
+        algo.setup()
+        algo.load_evaluation(checkpoint_path)
+        try:
+            algo.evaluate_policy(max_eval_steps=tyro_config.training.max_eval_steps)
+        finally:
+            simulator = getattr(env, "simulator", None)
+            video_recorder = getattr(simulator, "video_recorder", None)
+            if video_recorder is not None:
+                video_recorder.stop_recording()
+    finally:
+        if simulation_app:
+            close_simulation_app(simulation_app)
 
 
 def main() -> None:
@@ -392,10 +454,24 @@ def main() -> None:
 
     tyro_config = apply_observation_overrides(eval_cfg_overrides)
     tyro_config = apply_perception_overrides(tyro_config)
+    # Keep checkpoint actor inputs immutable while still allowing the motion,
+    # terrain, and visualization overrides applied below.
+    from holosoma.eval_agent import (
+        _bind_training_perception_reference_batch,
+        _validate_eval_policy_contract,
+    )
+
+    _validate_eval_policy_contract(saved_cfg, tyro_config)
     tyro_config = _update_motion_config(tyro_config, motion_path, pair_terrain)
     tyro_config = _update_terrain_config(tyro_config, geom_path, geom_meta, num_rows, num_cols)
     tyro_config = _update_training_config(tyro_config, inputs)
+    # A single-environment visual rollout must retain the training batch as
+    # the normalization reference for camera-hole sampling.  The standard
+    # eval_agent path already performs this binding; physics/Viser rollouts
+    # must do the same after their final environment count is known.
+    tyro_config = _bind_training_perception_reference_batch(saved_cfg, tyro_config)
     tyro_config = _update_algo_config(tyro_config)
+    tyro_config = _scrub_rollout_reference_reward_roots_for_eval(tyro_config)
 
     run_physics_rollout(tyro_config, checkpoint_cfg, saved_cfg, saved_wandb_path)
 

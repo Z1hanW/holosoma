@@ -45,3 +45,11 @@ def test_mujoco_render_848x480_perception_preset():
     assert cfg.camera_warp_edge_noise is False
     assert cfg.camera_warp_enable_holes is False
     assert cfg.camera_apply_sensor_noise is False
+
+
+def test_scientific_depth_preset_uses_versioned_rank_local_hole_stream():
+    cfg = perception_presets.camera_depth_d435i
+
+    assert cfg.camera_warp_enable_holes is True
+    assert cfg.camera_warp_hole_seed_semantics == "rank_local_v2"
+    assert cfg.camera_warp_hole_octave_profile == "legacy_single_octave_v1"

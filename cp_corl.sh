@@ -34,6 +34,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
+if [[ -f "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh" ]]; then
+  # Use the same Python environment as training; system python on some nodes
+  # does not have numpy, which is required to rewrite .npz metadata.
+  source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+fi
+PYTHON_BIN=${PYTHON_BIN:-python3}
+
 DEFAULT_BANK_NAME=${CORL_BANK_NAME:-"corl_128"}
 DEFAULT_NFS_BANK="/nfs/zzzihanw/ds_as_data/_distill/${DEFAULT_BANK_NAME}"
 DEFAULT_NFS_TAR="${DEFAULT_NFS_BANK}.tar"
@@ -68,7 +75,7 @@ if [[ "${LOCAL_BANK_NAME}" == "" || "${LOCAL_BANK_NAME}" == "." || "${LOCAL_BANK
 fi
 
 NFS_CORL_BANK_ABS=$(
-  python3 - "${NFS_CORL_BANK}" <<'PY'
+  "${PYTHON_BIN}" - "${NFS_CORL_BANK}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -76,7 +83,7 @@ print(Path(sys.argv[1]).expanduser().resolve())
 PY
 )
 LOCAL_DATA_ROOT_ABS=$(
-  python3 - "${LOCAL_DATA_ROOT}" <<'PY'
+  "${PYTHON_BIN}" - "${LOCAL_DATA_ROOT}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -84,7 +91,7 @@ print(Path(sys.argv[1]).expanduser().resolve())
 PY
 )
 EXPECTED_LOCAL_ROOT=$(
-  python3 - "${SCRIPT_DIR}/data/ds_as_data" <<'PY'
+  "${PYTHON_BIN}" - "${SCRIPT_DIR}/data/ds_as_data" <<'PY'
 from pathlib import Path
 import sys
 
@@ -152,7 +159,7 @@ elif [[ "${SEED_LOCAL_EXISTING}" == "1" && -d "${LOCAL_BANK_ABS}" ]]; then
     "${LOCAL_BANK_ABS}/" "${TMP_BANK_ABS}/"
   if [[ "${SEED_LOCAL_OBJECT_ASSETS}" == "1" && -f "${LOCAL_BANK_ABS}/_clip_object_urdf_map.json" ]]; then
     echo "[INFO] Seeding object URDF/mesh assets from existing local map..."
-    python3 - "${NFS_CORL_BANK_ABS}" "${LOCAL_BANK_ABS}" "${TMP_BANK_ABS}" <<'PY'
+    "${PYTHON_BIN}" - "${NFS_CORL_BANK_ABS}" "${LOCAL_BANK_ABS}" "${TMP_BANK_ABS}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -255,7 +262,7 @@ else
 fi
 
 echo "[INFO] Rewriting object paths to repo-local data dir..."
-python3 - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" "${EXPECTED_CLIP_COUNT}" <<'PY'
+"${PYTHON_BIN}" - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" "${EXPECTED_CLIP_COUNT}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -329,6 +336,49 @@ def find_staging_urdf(old_urdf: Path) -> Path:
         raise SystemExit(f"[ERROR] Ambiguous staging URDF for {urdf_name}: {preview}")
     return matches[0]
 
+
+ASSET_PATH_KEYS = (
+    "object_mesh_path",
+    "object_visual_mesh_path",
+    "object_collision_mesh_path",
+)
+ASSET_ROOT_NAMES = (
+    "objects_convex_hull",
+    "objects_visual_real",
+    "objects",
+)
+
+
+def find_staging_asset(raw_path: str, *, clip_id: str, key: str) -> Path:
+    raw_path = str(raw_path).strip()
+    if not raw_path:
+        raise SystemExit(f"[ERROR] Empty {key} for {clip_id}")
+
+    old_path = Path(raw_path).expanduser()
+    candidates: list[Path] = []
+    if not old_path.is_absolute():
+        candidates.append((staging_bank / old_path).resolve())
+
+    parts = old_path.parts
+    for root_name in ASSET_ROOT_NAMES:
+        if root_name in parts:
+            idx = parts.index(root_name)
+            candidates.append((staging_bank / Path(*parts[idx:])).resolve())
+
+    if len(parts) >= 2:
+        candidates.append((staging_bank / parts[-2] / parts[-1]).resolve())
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+
+    preview = ", ".join(str(path) for path in list(seen)[:5])
+    raise SystemExit(f"[ERROR] Missing staging asset for {clip_id} {key}={raw_path}; tried {preview}")
+
 payload = json.loads(map_path.read_text(encoding="utf-8"))
 if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
     clips = payload["clips"]
@@ -364,6 +414,14 @@ for clip_id, raw_entry in sorted(clips.items()):
         raise SystemExit(f"[ERROR] Missing motion npz for {clip_id}: {npz_path}")
 
     entry["object_urdf_path"] = str(installed_urdf)
+    installed_asset_paths: dict[str, str] = {}
+    for key in ASSET_PATH_KEYS:
+        if key not in entry:
+            continue
+        staging_asset = find_staging_asset(str(entry[key]), clip_id=clip_id, key=key)
+        installed_asset = (installed_bank / staging_asset.relative_to(staging_bank)).resolve()
+        entry[key] = str(installed_asset)
+        installed_asset_paths[key] = str(installed_asset)
     if not str(entry.get("object_name", "")).strip():
         entry["object_name"] = clip_id
     updated_clips[clip_id] = entry
@@ -375,9 +433,16 @@ for clip_id, raw_entry in sorted(clips.items()):
     for candidate_npz in npz_paths:
         with np.load(candidate_npz, allow_pickle=True) as data:
             npz_payload = {key: np.asarray(data[key]) for key in data.files}
+        changed_npz = False
         old_npz_urdf = scalar_str(npz_payload.get("object_urdf_path"))
         if old_npz_urdf != str(installed_urdf):
             npz_payload["object_urdf_path"] = np.asarray(str(installed_urdf))
+            changed_npz = True
+        for key, installed_asset in installed_asset_paths.items():
+            if key in npz_payload and scalar_str(npz_payload.get(key)) != installed_asset:
+                npz_payload[key] = np.asarray(installed_asset)
+                changed_npz = True
+        if changed_npz:
             if "object_name" not in npz_payload or not scalar_str(npz_payload.get("object_name")):
                 npz_payload["object_name"] = np.asarray(str(entry["object_name"]))
             write_npz_atomic(candidate_npz, npz_payload)
@@ -407,6 +472,17 @@ for clip_id, entry in updated_clips.items():
     if not urdf.is_file():
         errors.append(f"{clip_id}: missing staging URDF {urdf}")
         continue
+    for key in ASSET_PATH_KEYS:
+        if key not in entry:
+            continue
+        installed_asset = Path(str(entry[key]))
+        try:
+            asset = staging_bank / installed_asset.relative_to(installed_bank)
+        except ValueError:
+            errors.append(f"{clip_id}: {key} is outside installed bank: {installed_asset}")
+            continue
+        if not asset.is_file():
+            errors.append(f"{clip_id}: missing staging {key} {asset}")
     try:
         root = ET.parse(urdf).getroot()
     except Exception as exc:

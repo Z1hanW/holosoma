@@ -468,12 +468,12 @@ class TrackTriggerState:
         if self.policy_pub is not None:
             policy_stopped = self.policy_pub.publish("stop", source="track_trigger_web_reset")
             time.sleep(max(float(delay_s), 0.0))
-        self.control_pub.request_reset(str(reason))
+        reset_sent = self.control_pub.request_reset(str(reason))
         response = self.snapshot()
         response.update(
             {
-                "ok": bool(self.control_pub.enabled),
-                "sent": bool(self.control_pub.enabled),
+                "ok": bool(reset_sent),
+                "sent": bool(reset_sent),
                 "reason": str(reason),
                 "policy_stopped": bool(policy_stopped),
             }

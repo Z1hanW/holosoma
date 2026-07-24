@@ -25,6 +25,7 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]  # noqa: E4
 
 from holosoma.config_types.experiment import ExperimentConfig  # noqa: E402
 from holosoma.config_types.robot import RobotConfig  # noqa: E402
+from holosoma.observation import apply_observation_overrides  # noqa: E402
 from holosoma.perception import apply_perception_overrides  # noqa: E402
 from holosoma.utils.config_utils import CONFIG_NAME  # noqa: E402
 from holosoma.utils.eval_utils import (  # noqa: E402
@@ -183,7 +184,11 @@ def run_eval_with_viser(
     saved_wandb_path: str | None,
     viser_cfg: ViserEvalConfig,
 ) -> None:
+    tyro_config = apply_observation_overrides(tyro_config)
     tyro_config = apply_perception_overrides(tyro_config)
+    from holosoma.eval_agent import _validate_eval_policy_contract
+
+    _validate_eval_policy_contract(saved_config, tyro_config)
     env, device, simulation_app = setup_simulation_environment(tyro_config)
 
     eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")
@@ -207,9 +212,13 @@ def run_eval_with_viser(
         log_dir=str(eval_log_dir),
         multi_gpu_cfg=None,
     )
+    algo.attach_evaluation_metadata(
+        saved_config,
+        tyro_config,
+        saved_wandb_path,
+    )
     algo.setup()
-    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
-    algo.load(checkpoint_path)
+    algo.load_evaluation(checkpoint_path)
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
 

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import math
+import numbers
+from dataclasses import replace
+from typing import Any
+
 from loguru import logger
 
 from holosoma.envs.base_task.base_task import BaseTask
@@ -8,6 +13,10 @@ from holosoma.utils.torch_utils import torch_rand_float
 
 
 class LeggedRobotLocomotionManager(BaseTask):
+    # _reset_buffers_callback marks exactly the rows passed to reset_envs_idx;
+    # BaseTask may therefore reuse its already-materialized reset selection.
+    supports_direct_post_reset_refresh_ids = True
+
     BASE_NUM_ENVS = 4096
 
     def __init__(
@@ -123,17 +132,20 @@ class LeggedRobotLocomotionManager(BaseTask):
 
     def _refresh_envs_after_reset(self, env_ids):
         self.simulator.set_actor_root_state_tensor(env_ids, self.simulator.all_root_states)
-        self.simulator.set_dof_state_tensor(env_ids, self.simulator.dof_state)
+        self.simulator.set_dof_state_tensor(env_ids)
         self.simulator.clear_contact_forces_history(env_ids)
         self.need_to_refresh_envs[env_ids] = False
         self.simulator.refresh_sim_tensors()
-        self._pre_compute_observations_callback()
+        self._pre_compute_observations_callback(env_ids)
 
-    def _pre_compute_observations_callback(self):
+    def _pre_compute_observations_callback(self, env_ids: torch.Tensor | None = None):
         # prepare quantities
-        self.base_quat[:] = self.simulator.base_quat[:]
-        super()._pre_compute_observations_callback()
-        self.terrain_manager.update_heights()
+        if env_ids is None:
+            self.base_quat[:] = self.simulator.base_quat[:]
+        else:
+            self.base_quat[env_ids] = self.simulator.base_quat[env_ids]
+        super()._pre_compute_observations_callback(env_ids)
+        self.terrain_manager.update_heights(env_ids)
 
     def _update_tasks_callback(self):
         super()._update_tasks_callback()
@@ -179,7 +191,9 @@ class LeggedRobotLocomotionManager(BaseTask):
 
     def _update_log_dict(self):
         avg = self._get_average_episode_tracker().get_average()
-        self.log_dict["average_episode_length"] = avg.detach().cpu()
+        # LoggingHelper performs a single batched device-to-host transfer at
+        # the iteration boundary; avoid synchronizing the rollout here.
+        self.log_dict["average_episode_length"] = avg.detach()
 
     ################ Curriculum #################
 
@@ -189,6 +203,9 @@ class LeggedRobotLocomotionManager(BaseTask):
             raise RuntimeError("AverageEpisodeLengthTracker is not registered with the curriculum manager.")
         return tracker
 
+    def _get_penalty_curriculum(self):
+        return self.curriculum_manager.get_term("penalty_curriculum")
+
     @property
     def average_episode_length(self) -> float:
         avg = self._get_average_episode_tracker().get_average()
@@ -197,50 +214,196 @@ class LeggedRobotLocomotionManager(BaseTask):
     # ------------------------------------------------------------------
     # Checkpoint helpers
 
-    def get_checkpoint_state(self) -> dict[str, torch.Tensor | float]:
-        state: dict[str, torch.Tensor | float] = {}
-        state["average_episode_tracker"] = self._get_average_episode_tracker().state_dict()
-        if hasattr(self, "reward_penalty_scale"):
-            state["reward_penalty_scale"] = float(self.reward_penalty_scale)
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "version": 3,
+            "average_episode_tracker": self._get_average_episode_tracker().state_dict(),
+            "perception_managers": self._get_perception_checkpoint_state(),
+        }
+        penalty = self._get_penalty_curriculum()
+        if penalty is not None and bool(getattr(penalty, "enabled", False)):
+            state["penalty_curriculum"] = penalty.state_dict()
         return state
 
-    def load_checkpoint_state(self, state: dict[str, torch.Tensor | float] | None) -> None:
+    def validate_checkpoint_state(self, state: dict[str, Any] | None) -> None:
         if not state:
             return
+        if not isinstance(state, dict):
+            raise ValueError("Locomotion environment checkpoint state must be a dictionary.")
+        version = state.get("version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
+            raise ValueError(f"Unsupported locomotion environment checkpoint version: {version!r}.")
 
         tracker_state = state.get("average_episode_tracker")
-        if tracker_state is not None:
-            tracker = self._get_average_episode_tracker()
-            tracker.load_state_dict(tracker_state)
-            tracker.suppress_next_update()
+        if not isinstance(tracker_state, dict):
+            raise ValueError("Locomotion checkpoint is missing average_episode_tracker state.")
+        self._get_average_episode_tracker().validate_state_dict(tracker_state)
 
-        penalty_state = state.get("reward_penalty_scale")
-        if penalty_state is not None:
-            if isinstance(penalty_state, torch.Tensor):
-                self.reward_penalty_scale = float(penalty_state.item())
+        penalty = self._get_penalty_curriculum()
+        penalty_enabled = penalty is not None and bool(
+            getattr(penalty, "enabled", False)
+        )
+        if version in (2, 3):
+            penalty_state = state.get("penalty_curriculum")
+            if not penalty_enabled:
+                if penalty_state is not None:
+                    raise ValueError(
+                        "Locomotion checkpoint contains penalty curriculum state, but it is disabled."
+                    )
+            elif not isinstance(penalty_state, dict):
+                raise ValueError("Locomotion checkpoint is missing enabled penalty curriculum state.")
             else:
-                self.reward_penalty_scale = float(penalty_state)
+                penalty.validate_state_dict(penalty_state)
+            supported_keys = {
+                "version",
+                "average_episode_tracker",
+                "penalty_curriculum",
+            }
+            if version == 3:
+                supported_keys.add("perception_managers")
+            unexpected = set(state) - supported_keys
+            if unexpected:
+                raise ValueError(
+                    f"Locomotion checkpoint contains unsupported state keys: {sorted(unexpected)}."
+                )
+        else:
+            legacy_scale = state.get("reward_penalty_scale")
+            if penalty_enabled:
+                if torch.is_tensor(legacy_scale):
+                    if legacy_scale.numel() != 1:
+                        raise ValueError("Legacy reward_penalty_scale must be scalar.")
+                    legacy_scale = legacy_scale.detach().cpu().item()
+                if isinstance(legacy_scale, bool) or not isinstance(legacy_scale, numbers.Real):
+                    raise ValueError(
+                        "Legacy locomotion checkpoint is missing a numeric reward_penalty_scale."
+                    )
+                scale = float(legacy_scale)
+                if not math.isfinite(scale) or not penalty.min_scale <= scale <= penalty.max_scale:
+                    raise ValueError("Legacy reward_penalty_scale is outside configured bounds.")
+        if version == 3:
+            self._validate_perception_checkpoint_state(state.get("perception_managers"))
+        else:
+            self._validate_perception_checkpoint_state(None)
+
+    def _load_checkpoint_state(
+        self,
+        state: dict[str, Any] | None,
+        *,
+        suppress_tracker_update: bool,
+        restore_perception: bool,
+    ) -> None:
+        if not state:
+            return
+        self.validate_checkpoint_state(state)
+        version = state.get("version", 1)
+        tracker = self._get_average_episode_tracker()
+        tracker.load_state_dict(state["average_episode_tracker"])
+        # The caller owns the one-shot reset guard.  In particular, a
+        # canonical checkpoint-boundary reset consumes the guard armed by a
+        # normal checkpoint load; restoring the adaptive snapshot afterward
+        # must not resurrect it and suppress the first genuine episode.
+        tracker.set_next_update_suppressed(suppress_tracker_update)
+
+        penalty = self._get_penalty_curriculum()
+        if penalty is not None and bool(getattr(penalty, "enabled", False)):
+            if version in (2, 3):
+                penalty.load_state_dict(state["penalty_curriculum"])
+            else:
+                legacy_scale = state["reward_penalty_scale"]
+                if torch.is_tensor(legacy_scale):
+                    legacy_scale = legacy_scale.detach().cpu().item()
+                penalty_state = penalty.state_dict()
+                penalty_state["current_scale"] = float(legacy_scale)
+                penalty.load_state_dict(penalty_state)
+        if restore_perception and version == 3:
+            self._load_perception_checkpoint_state(state["perception_managers"])
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        self._load_checkpoint_state(
+            state,
+            suppress_tracker_update=True,
+            restore_perception=True,
+        )
+
+    def _restore_checkpoint_state_after_canonical_reset(self, state: dict[str, Any] | None) -> None:
+        self._load_checkpoint_state(
+            state,
+            suppress_tracker_update=False,
+            restore_perception=False,
+        )
 
     def synchronize_curriculum_state(self, *, device: str, world_size: int, process_group=None) -> None:
         if world_size <= 1:
             return
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
-            return
+            raise RuntimeError(
+                "Distributed locomotion curriculum synchronization requires an initialized process group."
+            )
         tracker = self._get_average_episode_tracker()
         avg_tensor = tracker.get_average().clone().detach().to(device)
         torch.distributed.broadcast(avg_tensor, src=0, group=process_group)
         tracker.set_average(avg_tensor.to(self.device), suppress_update=False)
 
-        if hasattr(self, "reward_penalty_scale"):
-            penalty_tensor = torch.tensor(float(self.reward_penalty_scale), device=device, dtype=torch.float)
+        penalty = self._get_penalty_curriculum()
+        legacy_cfg = getattr(self, "_curriculum_penalty_cfg", None)
+        if penalty is not None and bool(getattr(penalty, "enabled", False)):
+            penalty_tensor = torch.tensor(
+                float(penalty.current_scale),
+                device=device,
+                dtype=torch.float64,
+            )
             torch.distributed.broadcast(penalty_tensor, src=0, group=process_group)
-            self.reward_penalty_scale = float(penalty_tensor.item())
+            penalty_state = penalty.state_dict()
+            penalty_state["current_scale"] = float(penalty_tensor.item())
+            # The term owns both the authoritative scalar and the live reward
+            # weights.  Updating only ``env.reward_penalty_scale`` leaves the
+            # actual distributed objectives divergent.
+            penalty.load_state_dict(penalty_state)
+        elif isinstance(legacy_cfg, dict) and bool(
+            getattr(self, "use_reward_penalty_curriculum", False)
+        ):
+            penalty_tensor = torch.tensor(
+                float(legacy_cfg["current_scale"]),
+                device=device,
+                dtype=torch.float64,
+            )
+            torch.distributed.broadcast(penalty_tensor, src=0, group=process_group)
+            synchronized_scale = float(penalty_tensor.item())
+            if not math.isfinite(synchronized_scale) or not (
+                float(legacy_cfg["min_scale"])
+                <= synchronized_scale
+                <= float(legacy_cfg["max_scale"])
+            ):
+                raise ValueError("Synchronized legacy penalty scale is invalid.")
+            legacy_cfg["current_scale"] = synchronized_scale
+            original_weights = getattr(self, "_curriculum_penalty_original_weights", {})
+            penalty_names = getattr(self, "_curriculum_penalty_reward_names", [])
+            for name in penalty_names:
+                if name not in original_weights or name not in self.reward_manager.active_terms:
+                    continue
+                term_cfg = self.reward_manager.get_term_cfg(name)
+                self.reward_manager.set_term_cfg(
+                    name,
+                    replace(
+                        term_cfg,
+                        weight=float(original_weights[name]) * synchronized_scale,
+                    ),
+                )
+            self.reward_penalty_scale = synchronized_scale
+            if hasattr(self, "log_dict"):
+                self.log_dict["penalty_scale"] = torch.tensor(
+                    synchronized_scale,
+                    dtype=torch.float,
+                )
+        elif hasattr(self, "reward_penalty_scale"):
+            raise RuntimeError(
+                "Penalty curriculum exposes a mirrored scale but no authoritative term/config to synchronize."
+            )
 
     def _push_robots(self, env_ids):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
         if len(env_ids) == 0:
             return
-        self.need_to_refresh_envs[env_ids] = True
         max_vel_tensor = self._max_push_vel
         if self.randomization_manager is not None:
             state = self.randomization_manager.get_state("push_randomizer_state")
@@ -254,7 +417,8 @@ class LeggedRobotLocomotionManager(BaseTask):
         self.push_robot_vel_buf[env_ids] = rand * max_vel_tensor.unsqueeze(0)
         self.record_push_robot_vel_buf[env_ids] = self.push_robot_vel_buf[env_ids].clone()
         self.simulator.robot_root_states[env_ids, 7:9] = self.push_robot_vel_buf[env_ids]
-        # Push impulses only take effect in the simulator once we write the mutated root state tensor back.
+        # This writes through immediately.  Do not queue reset-only refresh work:
+        # that path also clears contact history and re-runs perception for the rows.
         self.simulator.set_actor_root_state_tensor_robots(env_ids, self.simulator.robot_root_states)
         self._max_push_vel = max_vel_tensor.clone()
 

@@ -45,12 +45,24 @@ def _apply_distill_proprio_history_only(
     groups = dict(observation.groups)
     proprio_history_length = max(1, int(proprio_history_length))
 
+    algo_cfg = config.algo
+    algo_config = getattr(algo_cfg, "config", None)
+    module_dict = getattr(algo_config, "module_dict", None) if algo_config is not None else None
+    actor_input_names = set(module_dict.actor.input_dim) if module_dict is not None else set()
+    critic_input_names = set(module_dict.critic.input_dim) if module_dict is not None else set()
+
     actor_action_term = None
     critic_action_term = None
     actor_actions_needed = False
     critic_actions_needed = False
 
-    for group_name in ("actor_obs_proprio", "actor_obs_proprio_no_linvel", "actor_obs", "actor_obs_legacy"):
+    actor_proprio_group_names = (
+        "actor_obs_proprio",
+        "actor_obs_proprio_no_linvel",
+        "actor_obs_proprio_with_actions_no_linvel",
+        "actor_obs_proprio_no_linvel_actions",
+    )
+    for group_name in (*actor_proprio_group_names, "actor_obs", "actor_obs_legacy"):
         group_cfg = groups.get(group_name)
         if group_cfg is None:
             continue
@@ -71,21 +83,25 @@ def _apply_distill_proprio_history_only(
     if critic_action_term is None:
         critic_action_term = actor_action_term
 
-    for group_name in ("actor_obs_proprio", "actor_obs_proprio_no_linvel"):
+    for group_name in actor_proprio_group_names:
         group_cfg = groups.get(group_name)
         if group_cfg is None:
             continue
         terms = dict(group_cfg.terms)
-        if terms.pop("actions", None) is not None:
+        if terms.pop("actions", None) is not None and group_name in actor_input_names:
             actor_actions_needed = True
         groups[group_name] = dataclasses.replace(group_cfg, history_length=proprio_history_length, terms=terms)
 
     for group_name in (
         "actor_obs_root",
+        "actor_obs_root_contact_aware",
         "actor_obs_torso",
+        "actor_obs_torso_contact_aware",
         "actor_obs_track",
         "actor_obs_box",
         "actor_obs_drop",
+        "actor_obs_pickup_button",
+        "actor_obs_drop_button",
     ):
         group_cfg = groups.get(group_name)
         if group_cfg is not None:
@@ -94,7 +110,7 @@ def _apply_distill_proprio_history_only(
     critic_proprio_group = groups.get("critic_proprio_history")
     if critic_proprio_group is not None:
         terms = dict(critic_proprio_group.terms)
-        if terms.pop("actions", None) is not None:
+        if terms.pop("actions", None) is not None and "critic_proprio_history" in critic_input_names:
             critic_actions_needed = True
         groups["critic_proprio_history"] = dataclasses.replace(
             critic_proprio_group,
@@ -119,9 +135,6 @@ def _apply_distill_proprio_history_only(
 
     observation = dataclasses.replace(observation, groups=groups)
 
-    algo_cfg = config.algo
-    algo_config = getattr(algo_cfg, "config", None)
-    module_dict = getattr(algo_config, "module_dict", None) if algo_config is not None else None
     if module_dict is None:
         return dataclasses.replace(config, observation=observation)
 
@@ -130,7 +143,7 @@ def _apply_distill_proprio_history_only(
     if actor_actions_needed:
         actor_cfg = _insert_input_after(
             actor_cfg,
-            after_keys=("actor_obs_proprio", "actor_obs_proprio_no_linvel"),
+            after_keys=actor_proprio_group_names,
             new_key="actor_obs_actions",
         )
     if critic_actions_needed and "critic_actions" not in critic_cfg.input_dim:

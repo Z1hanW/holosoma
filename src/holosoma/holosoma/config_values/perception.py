@@ -69,10 +69,11 @@ WARP_SENSORS_G1_D435_MESH_FILE_MAP = {
     "right_wrist_yaw_link": "combined_right_wrist_rubberhand.STL",
 }
 
-none = PerceptionConfig(enabled=False)
+none = PerceptionConfig(enabled=False, reset_refresh_semantics="targeted_v2")
 
 heightmap = PerceptionConfig(
     enabled=True,
+    reset_refresh_semantics="targeted_v2",
     output_mode="heightmap",
     # Match far-tracking HeightmapSceneCfg:
     # GridPatternCfg(resolution=0.1, size=[1.6, 1.6]), attach on pelvis with z-offset.
@@ -140,6 +141,9 @@ camera_depth_d435i = PerceptionConfig(
     camera_warp_edge_far_depth_thresh=2.5,
     camera_warp_enable_holes=True,
     camera_warp_hole_prob=0.2,
+    camera_warp_hole_seed_semantics="rank_local_v2",
+    camera_warp_hole_octave_profile="legacy_single_octave_v1",
+    reset_refresh_semantics="targeted_v2",
     camera_warp_additive_noise_std=0.03,
     camera_warp_depth_offset_std=0.03,
     # Match far-tracking defaults: placement randomization stays on, sensor noise stays off.
@@ -168,12 +172,16 @@ camera_depth_d435i_17x17 = replace(
 
 camera_depth_d435i_defm_vit_s14 = replace(
     camera_depth_d435i,
-    # Keep the same far-tracking-style 58x87 depth preprocessing, but swap the encoder.
+    # DeFM's metric-aware preprocessing requires depth in meters. Keep the
+    # crop/resize/noise pipeline, but do not apply the far-tracking [-0.5, 0.5]
+    # observation normalization before the DeFM encoder.
+    camera_warp_normalize=False,
     encoder_output_dim=384,
     encoder_type="defm_vit_s14",
     encoder_fusion="concat",
     encoder_pretrained=True,
-    encoder_pretrained_path=None,
+    encoder_pretrained_path="data/defm/weights/defm_vit_s14.pth",
+    encoder_pretrained_sha256="37a6e95befea3a16732a743b2ebec854fd5eaed912ebaf9fbffc63a2306f1e90",
     encoder_freeze_backbone=True,
     encoder_target_size=224,
     encoder_patch_size=14,
@@ -181,12 +189,14 @@ camera_depth_d435i_defm_vit_s14 = replace(
 
 camera_depth_d435i_defm_regnet_y_800mf = replace(
     camera_depth_d435i,
-    # Keep the same far-tracking-style 58x87 depth preprocessing, but swap the encoder.
+    # DeFM consumes metric depth rather than the normalized far-tracking image.
+    camera_warp_normalize=False,
     encoder_output_dim=784,
     encoder_type="defm_regnet_y_800mf",
     encoder_fusion="concat",
     encoder_pretrained=True,
-    encoder_pretrained_path=None,
+    encoder_pretrained_path="data/defm/weights/defm_regnet_y_800mf.pth",
+    encoder_pretrained_sha256="6a78e6cce176e691cfbc1c8991815c5c90e98b369ecc153ddf48a6cc8641f14d",
     encoder_freeze_backbone=True,
     encoder_target_size=224,
     encoder_patch_size=None,
@@ -194,12 +204,14 @@ camera_depth_d435i_defm_regnet_y_800mf = replace(
 
 camera_depth_d435i_defm_efficientnet_b2 = replace(
     camera_depth_d435i,
-    # Keep the same far-tracking-style 58x87 depth preprocessing, but use a smaller DeFM CNN.
+    # DeFM consumes metric depth rather than the normalized far-tracking image.
+    camera_warp_normalize=False,
     encoder_output_dim=208,
     encoder_type="defm_efficientnet_b2",
     encoder_fusion="concat",
     encoder_pretrained=True,
-    encoder_pretrained_path=None,
+    encoder_pretrained_path="data/defm/weights/defm_efficientnet_b2.pth",
+    encoder_pretrained_sha256="565404bdb073a3e81d5af3f8d6f76200384ba511bc81b51324298c6b630a4b58",
     encoder_freeze_backbone=True,
     encoder_target_size=224,
     encoder_patch_size=None,

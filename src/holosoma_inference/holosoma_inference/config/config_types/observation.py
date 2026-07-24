@@ -2,7 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import field
+from typing import Any
+
 from pydantic.dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ObservationTermDescriptor:
+    """Canonical training-time semantics for one deployed observation term.
+
+    Deployment intentionally does not reproduce observation noise.  ``noise``
+    records the distribution used while training so metadata-backed policies
+    can still be authenticated against the exact training contract.
+    """
+
+    func: str
+    """Fully qualified training observation function path."""
+
+    params: dict[str, Any] = field(default_factory=dict)
+    """Serialized keyword arguments passed to the training observation term."""
+
+    noise: float = 0.0
+    """Training-time noise magnitude; inference itself remains deterministic."""
+
+    clip: tuple[float, float] | None = None
+    """Per-term post-scale clip bounds used during training."""
 
 
 @dataclass(frozen=True)
@@ -51,3 +76,15 @@ class ObservationConfig:
     Example:
         {"actor_obs": 1, "critic_obs": 3}
     """
+
+    clip_observations: float = 100.0
+    """Global post-scale observation clip, matching the training environment."""
+
+    term_descriptors: dict[str, ObservationTermDescriptor] = field(default_factory=dict)
+    """Canonical semantic descriptors for every deployed observation term."""
+
+    group_concatenate: dict[str, bool] = field(default_factory=dict)
+    """Expected training ``concatenate`` setting for each deployed actor group."""
+
+    group_enable_noise: dict[str, bool] = field(default_factory=dict)
+    """Expected training ``enable_noise`` setting for each deployed actor group."""

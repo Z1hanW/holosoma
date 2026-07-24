@@ -3,8 +3,9 @@
 From: https://github.com/escontra/gauss_gym/blob/main/gauss_gym/utils/warp_utils.py
 """
 import numpy as np
-import torch
 import warp as wp
+
+from holosoma.utils.safe_torch_import import torch
 
 wp.init()
 

@@ -12,15 +12,15 @@ set -euo pipefail
 # - actor_obs_drop_button
 # - actor_obs_proprio_with_actions_no_linvel
 #
-# actor_obs_pickup_button is 1 before carry-start t1 and 0 from t1 onward.
-# actor_obs_drop_button is 0 before carry-end t2 and 1 from t2 to clip end.
+# Button t1/t2 come only from the sustained source-motion object-root rel-z
+# lift window. Contact unions remain adaptive-sampling data; the independently
+# configured root carry window (formal default: peak_height) is unchanged.
 
 usage() {
   cat <<'EOF'
 Usage:
   bash distill_as_dual_button.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
   bash distill_as_dual_button.sh corl_128 [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
-  bash distill_as_dual_button.sh --resume-from-box [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
 
 Behavior:
   Delegates AS data preparation and launch to distill_as_button.sh, but changes
@@ -34,12 +34,13 @@ Examples:
   # this wrapper defaults to corl_128.
 
 Button convention:
-  pickup_button = 1 before carry-start t1, 0 from t1 through clip end
-  drop_button   = 0 before carry-end t2,   1 from t2 through clip end
+  t1/t2         = sustained kinematic-lift source window (object_z - root_z)
+  pickup_button = 1 before kinematic t1, 0 from t1 through clip end
+  drop_button   = 0 before kinematic t2, 1 from t2 through clip end
+  Contact unions still drive adaptive sampling; root carry remains independent.
 
 Useful env vars:
-  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369/model_17000.pt
-  BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
+  RESUME_FROM_BOX=0          required: a single-button box actor is not shape-compatible with this dual-button actor
   RUN_NAME=<name>            override W&B run display name
   TRAINING_NAME=<name>       override log/checkpoint training name
   SCHEDULE_NAME=<name>       override schedule label
@@ -103,7 +104,7 @@ if [[ "${CORL_128}" == "0" \
   POSITIONAL=("corl_128" "${POSITIONAL[@]}")
 fi
 
-if [[ -z "${AS_SUCCESS133_FINAL0P5+x}" && -z "${RESUME_FROM_BOX+x}" ]]; then
+if [[ -z "${AS_SUCCESS133_FINAL0P5+x}" ]]; then
   AS_SUCCESS133_FINAL0P5=1
 fi
 
@@ -126,6 +127,71 @@ normalize_bool() {
 
 AS_SUCCESS133_FINAL0P5="$(normalize_bool AS_SUCCESS133_FINAL0P5 "${AS_SUCCESS133_FINAL0P5:-0}")"
 RESUME_FROM_BOX="$(normalize_bool RESUME_FROM_BOX "${RESUME_FROM_BOX:-0}")"
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+  echo "[ERROR] RESUME_FROM_BOX=1 is incompatible with the dual-button actor: adding pickup_button changes the strict first-layer shape." >&2
+  echo "[ERROR] Train the dual-button actor from scratch or curriculum-resume an architecture-matched dual-button checkpoint with RESUME_CKPT (not bitwise trajectory continuation)." >&2
+  exit 2
+fi
+
+readonly DUAL_BUTTON_STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_pickup_button','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
+readonly -a DUAL_BUTTON_HISTORY_GROUPS=(
+  actor_obs_root_contact_aware
+  actor_obs_pickup_button
+  actor_obs_drop_button
+  actor_obs_proprio_with_actions_no_linvel
+)
+STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-${DUAL_BUTTON_STUDENT_ACTOR_INPUTS}}"
+if [[ "${STUDENT_ACTOR_INPUTS//[[:space:]]/}" \
+      != "${DUAL_BUTTON_STUDENT_ACTOR_INPUTS}" ]]; then
+  echo "[ERROR] Dual-button distillation requires the exact ordered 95D STUDENT_ACTOR_INPUTS contract: ${DUAL_BUTTON_STUDENT_ACTOR_INPUTS}" >&2
+  echo "[ERROR] Got STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS}" >&2
+  exit 2
+fi
+for dual_button_arg in "${POSITIONAL[@]}"; do
+  dual_button_option=${dual_button_arg%%=*}
+  dual_button_option=${dual_button_option,,}
+  dual_button_option=${dual_button_option//_/-}
+  case "${dual_button_option}" in
+    --observation.groups.actor-obs-root-contact-aware.history-length|\
+    --observation.groups.actor-obs-pickup-button.history-length|\
+    --observation.groups.actor-obs-drop-button.history-length|\
+    --observation.groups.actor-obs-proprio-with-actions-no-linvel.history-length)
+      echo "[ERROR] Dual-button actor history is launcher-owned and fixed at 1; remove forwarded override ${dual_button_arg}." >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH+x}" \
+      && "${STUDENT_PROPRIO_HISTORY_LENGTH}" != 1 ]]; then
+  echo "[ERROR] Dual-button exact 95D actor requires STUDENT_PROPRIO_HISTORY_LENGTH=1." >&2
+  exit 2
+fi
+if [[ -n "${CONTACT_AWARE_HISTORY_LENGTH+x}" \
+      && "${CONTACT_AWARE_HISTORY_LENGTH}" != 1 ]]; then
+  echo "[ERROR] Dual-button exact 95D actor requires CONTACT_AWARE_HISTORY_LENGTH=1 when supplied." >&2
+  exit 2
+fi
+for dual_button_history_bool in CONTACT_AWARE_HISTORY AS_CONTACT_AWARE_HISTORY; do
+  dual_button_history_value="$(normalize_bool \
+    "${dual_button_history_bool}" "${!dual_button_history_bool:-0}")"
+  if [[ "${dual_button_history_value}" != 0 ]]; then
+    echo "[ERROR] Dual-button exact 95D actor requires ${dual_button_history_bool}=0." >&2
+    exit 2
+  fi
+done
+STUDENT_PROPRIO_HISTORY_LENGTH=1
+CONTACT_AWARE_HISTORY=0
+AS_CONTACT_AWARE_HISTORY=0
+CONTACT_AWARE_HISTORY_LENGTH=1
+HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED=1
+DUAL_BUTTON_CANONICAL_HISTORY_ARGS=()
+for dual_button_history_group in "${DUAL_BUTTON_HISTORY_GROUPS[@]}"; do
+  DUAL_BUTTON_CANONICAL_HISTORY_ARGS+=(
+    "--observation.groups.${dual_button_history_group}.history-length=1"
+  )
+done
+unset dual_button_arg dual_button_option
+unset dual_button_history_bool dual_button_history_value dual_button_history_group
 
 export AS_SUCCESS133_FINAL0P5
 export RESUME_FROM_BOX
@@ -136,43 +202,41 @@ fi
 export AS_CONTACT_AWARE=1
 export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
 export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
-export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_pickup_button','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']}"
+export STUDENT_ACTOR_INPUTS
+export STUDENT_PROPRIO_HISTORY_LENGTH
+export CONTACT_AWARE_HISTORY AS_CONTACT_AWARE_HISTORY CONTACT_AWARE_HISTORY_LENGTH
+export HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED
+readonly DUAL_BUTTON_WINDOW_MODE=kinematic_lift
+CONTACT_AWARE_BUTTON_WINDOW_MODE="${CONTACT_AWARE_BUTTON_WINDOW_MODE:-${DUAL_BUTTON_WINDOW_MODE}}"
+if [[ "${CONTACT_AWARE_BUTTON_WINDOW_MODE}" != "${DUAL_BUTTON_WINDOW_MODE}" ]]; then
+  echo "[ERROR] Dual-button distillation requires CONTACT_AWARE_BUTTON_WINDOW_MODE=${DUAL_BUTTON_WINDOW_MODE}. Got: ${CONTACT_AWARE_BUTTON_WINDOW_MODE}" >&2
+  exit 2
+fi
+export CONTACT_AWARE_BUTTON_WINDOW_MODE
 
-if [[ "${CORL_128}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_corl128_dual_button_init_box}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_corl128_dual_button_init_box_depth}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_corl128_init_box_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-CORL 128-clip curated AS teacher-rollout subset from success155_bcleb5oi58000_final0p5_primitiveproj, initialized from box-button actor policy parameters. It uses teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling. The dual-button interface adds pickup_button, 1 before carry-start t1 and 0 from t1 onward, plus drop_button, 0 before carry-end t2 and 1 from t2 through clip end.}"
-elif [[ "${CORL_128}" == "1" ]]; then
+if [[ "${CORL_128}" == "1" ]]; then
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_corl128_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_corl128_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_corl128_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-CORL 128-clip curated AS teacher-rollout subset from success155_bcleb5oi58000_final0p5_primitiveproj. It uses teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling. The dual-button interface adds pickup_button, 1 before carry-start t1 and 0 from t1 onward, plus drop_button, 0 before carry-end t2 and 1 from t2 through clip end.}"
-elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_dual_button_init_box}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_dual_button_init_box_depth}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_init_box_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered perception distill initialized from box-button policy parameters. Uses contact-aware sparse root plus pickup/drop button student inputs: pickup_button is 1 before carry-start t1 and 0 from t1 onward; drop_button is 0 before carry-end t2 and 1 from t2 through clip end. Data prep, contact sidecars, adaptive sampling, camera randomization, DAgger/PPO schedule, and training-from-iteration-0 behavior are inherited from distill_as_button.sh.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-CORL dual-button AS distill. Button t1/t2 are the sustained source-motion object_z-root_z kinematic-lift window: pickup is 1 before t1 and drop is 1 from t2. Independently, the all-region contact union reweights adaptive timestep sampling and the root carry window keeps its configured semantics (formal default peak_height). Start-at-zero is an explicit reset mixture; PPO starts at the configured iteration-0 coefficient.}"
 elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered perception distill with contact-aware sparse root plus pickup/drop button student inputs: pickup_button is 1 before carry-start t1 and 0 from t1 onward; drop_button is 0 before carry-end t2 and 1 from t2 through clip end. Data prep, contact sidecars, adaptive sampling, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
-elif [[ "${RESUME_FROM_BOX}" == "1" ]]; then
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_keep169_dual_button_init_box}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_keep169_dual_button_init_box_depth}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_init_box_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 perception distill initialized from box-button policy parameters. Uses contact-aware sparse root plus pickup/drop button student inputs: pickup_button is 1 before carry-start t1 and 0 from t1 onward; drop_button is 0 before carry-end t2 and 1 from t2 through clip end. Data prep, contact sidecars, adaptive sampling, DAgger/PPO schedule, and training-from-iteration-0 behavior are inherited from distill_as_button.sh.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use only the sustained source-motion object_z-root_z kinematic-lift window; contact unions remain adaptive-sampling data and the root carry window remains independently configured (formal default peak_height). Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
 else
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS perception distill with contact-aware sparse root plus pickup/drop button student inputs: pickup_button is 1 before carry-start t1 and 0 from t1 onward; drop_button is 0 before carry-end t2 and 1 from t2 through clip end. Data prep, contact sidecars, adaptive sampling, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use only the sustained source-motion object_z-root_z kinematic-lift window; contact unions remain adaptive-sampling data and the root carry window remains independently configured (formal default peak_height). Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
 fi
 
 echo "[INFO] Launching AS/OMOMO dual-button perception distillation"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
+echo "[INFO] contact_aware_button_window_mode=${CONTACT_AWARE_BUTTON_WINDOW_MODE}"
+echo "[INFO] button_window_semantics=source_object_root_rel_z_sustained_lift contact_union_role=adaptive_sampling root_carry_role=independent"
 echo "[INFO] pickup_button_interface=1 pickup_button=1_before_t1_0_from_t1_to_end"
 echo "[INFO] drop_button_interface=1 drop_button=0_before_t2_1_from_t2_to_end"
 
-exec bash "${SCRIPT_DIR}/distill_as_button.sh" "${POSITIONAL[@]}"
+exec bash "${SCRIPT_DIR}/distill_as_button.sh" \
+  "${POSITIONAL[@]}" "${DUAL_BUTTON_CANONICAL_HISTORY_ARGS[@]}"

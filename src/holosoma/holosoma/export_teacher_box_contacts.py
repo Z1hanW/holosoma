@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
+import stat
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
@@ -35,6 +37,7 @@ from holosoma.utils.eval_utils import (  # noqa: E402
 )
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp  # noqa: E402
 from holosoma.utils.helpers import get_class  # noqa: E402
+from holosoma.utils.defm_runtime import set_defm_checkpoint_restore_mode  # noqa: E402
 from holosoma.utils.rotations import quat_error_magnitude, quat_inverse, quat_mul  # noqa: E402
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
@@ -304,8 +307,25 @@ def _normalize_output_dir(raw: str) -> Path:
     path = Path(raw)
     default_raw = ExportConfig.__dataclass_fields__["output_dir"].default  # type: ignore[index]
     if str(raw).strip() == str(default_raw):
-        return _default_output_dir().resolve()
-    return path.expanduser().resolve()
+        return _lexical_absolute_path(_default_output_dir())
+    return _lexical_absolute_path(path)
+
+
+def _prepare_export_output_namespace(output_dir: Path, *, prepared_rollout: bool) -> None:
+    """Create a shard output once; never merge a prepared run into old bytes."""
+
+    if not prepared_rollout:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return
+    try:
+        output_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "Prepared teacher rollout shard output already exists; refusing to reuse or delete any prior data. "
+            f"Choose a fresh RUN_ID/OUTPUT_ROOT. path={output_dir}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not create fresh prepared teacher rollout shard output {output_dir}: {exc}") from exc
 
 
 def _ensure_motion_command(env: Any) -> MotionCommand:
@@ -358,6 +378,281 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _write_text_list(path: Path, values: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(values) + ("\n" if values else ""), encoding="utf-8")
+
+
+def _lexical_absolute_path(path: Path | str) -> Path:
+    """Normalize dots without resolving any symlink component."""
+
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _open_lexical_regular_file_no_follow(path: Path, *, label: str) -> tuple[int, Path]:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError(f"O_NOFOLLOW is unavailable while reading {label}: {path}")
+    lexical_path = _lexical_absolute_path(path)
+    if not lexical_path.name:
+        raise RuntimeError(f"Expected a file path while reading {label}: {lexical_path}")
+    directory_flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NOFOLLOW
+    )
+    directory_descriptor = os.open(lexical_path.anchor, directory_flags)
+    try:
+        for component in lexical_path.parent.parts[1:]:
+            child_descriptor = os.open(component, directory_flags, dir_fd=directory_descriptor)
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+        descriptor = os.open(lexical_path.name, file_flags, dir_fd=directory_descriptor)
+        return descriptor, lexical_path
+    except BaseException:
+        os.close(directory_descriptor)
+        raise
+    finally:
+        # Ownership of a successfully opened file descriptor is transferred to
+        # the caller; the parent directory descriptor is never transferred.
+        if "descriptor" in locals():
+            os.close(directory_descriptor)
+
+
+def _stable_regular_file_bytes(path: Path, *, label: str) -> tuple[bytes, dict[str, Any]]:
+    """Read one regular file through a no-follow descriptor and bind its bytes."""
+    try:
+        descriptor, lexical_path = _open_lexical_regular_file_no_follow(path, label=label)
+    except OSError as exc:
+        raise RuntimeError(f"Could not open {label} without following symlinks: {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise RuntimeError(f"Expected one-link regular file for {label}: {lexical_path}")
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 4 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(descriptor)
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if before_identity != after_identity or size != after.st_size:
+            raise RuntimeError(f"{label} changed while it was read: {lexical_path}")
+        return b"".join(chunks), {"sha256": digest.hexdigest(), "size": int(size)}
+    finally:
+        os.close(descriptor)
+
+
+def _stable_file_identity(path: Path, *, label: str) -> dict[str, Any]:
+    return _stable_regular_file_bytes(path, label=label)[1]
+
+
+def _directory_file_manifest(directory: Path, *, label: str) -> list[dict[str, Any]]:
+    if not directory.is_dir() or directory.is_symlink():
+        raise RuntimeError(f"Expected nonsymlink directory for {label}: {directory}")
+    files: list[dict[str, Any]] = []
+    for path in sorted(directory.rglob("*")):
+        relative_path = path.relative_to(directory).as_posix()
+        if path.is_symlink():
+            raise RuntimeError(f"Symlink is forbidden in {label}: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"Non-regular path is forbidden in {label}: {path}")
+        files.append({"path": relative_path, **_stable_file_identity(path, label=label)})
+    return files
+
+
+def _load_exact_rollout_object_map(
+    *,
+    expected_clip_ids: list[str],
+) -> tuple[dict[str, Any], Path]:
+    raw_path = os.environ.get("AS_OBJECT_MAP", "").strip()
+    if not raw_path:
+        raise RuntimeError(
+            "TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256 requires exported AS_OBJECT_MAP; "
+            "refusing to synthesize a provenance-losing shard map."
+        )
+    map_path = _lexical_absolute_path(raw_path)
+    raw, _identity = _stable_regular_file_bytes(map_path, label="teacher rollout source object map")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid teacher rollout source object map: {map_path}: {exc}") from exc
+    if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+        metadata = {key: value for key, value in payload.items() if key != "clips"}
+        clips = payload["clips"]
+    elif isinstance(payload, dict):
+        metadata = {}
+        clips = payload
+    else:
+        raise RuntimeError(f"Teacher rollout source object map must be a JSON mapping: {map_path}")
+    if set(clips) != set(expected_clip_ids):
+        raise RuntimeError(
+            "Teacher rollout source object map does not exactly match the shard clip set: "
+            f"actual={sorted(clips)!r} expected={sorted(expected_clip_ids)!r}"
+        )
+    selected: dict[str, Any] = {}
+    for clip_id in expected_clip_ids:
+        entry = clips.get(clip_id)
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Teacher rollout object-map entry must be a mapping: {clip_id}")
+        selected[clip_id] = entry
+    return {**metadata, "clips": selected}, map_path
+
+
+def _load_expected_rollout_clip_ids() -> list[str]:
+    expected_file_raw = os.environ.get("TEACHER_ROLLOUT_EXPECTED_CLIP_IDS_FILE", "").strip()
+    if not expected_file_raw:
+        raise RuntimeError(
+            "TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256 requires TEACHER_ROLLOUT_EXPECTED_CLIP_IDS_FILE."
+        )
+    expected_file = _lexical_absolute_path(expected_file_raw)
+    expected_bytes, _expected_identity = _stable_regular_file_bytes(
+        expected_file,
+        label="teacher rollout expected clip list",
+    )
+    try:
+        expected_clip_ids = [line.strip() for line in expected_bytes.decode("utf-8").splitlines() if line.strip()]
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"Teacher rollout expected clip list is not UTF-8: {expected_file}: {exc}") from exc
+    if not expected_clip_ids or len(expected_clip_ids) != len(set(expected_clip_ids)):
+        raise RuntimeError("Teacher rollout expected clip list must be nonempty and contain unique clip IDs.")
+    return expected_clip_ids
+
+
+def _validate_summary_object_metadata(
+    summaries: list[ClipSummary],
+    *,
+    object_map_payload: dict[str, Any],
+    object_map_path: Path,
+) -> None:
+    clips = object_map_payload["clips"]
+    for summary in summaries:
+        expected = clips[summary.clip_id]
+        expected_name = str(expected.get("object_name", "")).strip()
+        if not expected_name or summary.object_name != expected_name:
+            raise RuntimeError(
+                f"Teacher rollout object name differs from its authenticated map for {summary.clip_id}: "
+                f"actual={summary.object_name!r} expected={expected_name!r}"
+            )
+        raw_expected_urdf = str(expected.get("object_urdf_path", "")).strip()
+        if not raw_expected_urdf:
+            raise RuntimeError(f"Teacher rollout object map has no URDF path for {summary.clip_id}")
+        expected_urdf = Path(raw_expected_urdf).expanduser()
+        if not expected_urdf.is_absolute():
+            expected_urdf = object_map_path.parent / expected_urdf
+        if Path(summary.object_urdf_path).expanduser().resolve() != expected_urdf.resolve():
+            raise RuntimeError(
+                f"Teacher rollout object URDF differs from its authenticated map for {summary.clip_id}: "
+                f"actual={summary.object_urdf_path!r} expected={str(expected_urdf)!r}"
+            )
+        expected_size = np.asarray(expected.get("object_size"), dtype=np.float64)
+        actual_size = np.asarray(
+            [summary.primitive_extent_x, summary.primitive_extent_y, summary.primitive_extent_z],
+            dtype=np.float64,
+        )
+        if expected_size.shape != (3,) or not np.isfinite(expected_size).all() or np.any(expected_size <= 0):
+            raise RuntimeError(f"Teacher rollout object map has invalid object_size for {summary.clip_id}")
+        if not np.allclose(actual_size, expected_size, rtol=0.0, atol=1e-6):
+            raise RuntimeError(
+                f"Teacher rollout object size differs from its authenticated map for {summary.clip_id}: "
+                f"actual={actual_size.tolist()!r} expected={expected_size.tolist()!r}"
+            )
+
+
+def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o644)
+    try:
+        offset = 0
+        while offset < len(raw):
+            offset += os.write(descriptor, raw[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _write_teacher_rollout_shard_manifest(
+    output_dir: Path,
+    *,
+    summaries: list[ClipSummary],
+    source_checkpoint_sha256: str,
+    object_map_payload: dict[str, Any],
+) -> None:
+    prepared_manifest_sha256 = os.environ.get("TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256", "").strip()
+    if not prepared_manifest_sha256:
+        return
+    if len(prepared_manifest_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in prepared_manifest_sha256
+    ):
+        raise RuntimeError("TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256 must be 64 lowercase hexadecimal characters.")
+    expected_clip_ids = _load_expected_rollout_clip_ids()
+    summary_clip_ids = [summary.clip_id for summary in summaries]
+    if len(set(summary_clip_ids)) != len(summary_clip_ids) or set(summary_clip_ids) != set(expected_clip_ids):
+        raise RuntimeError(
+            "Teacher rollout summaries do not exactly cover the prepared shard clip set: "
+            f"actual={summary_clip_ids!r} expected={expected_clip_ids!r}"
+        )
+
+    motion_bank = output_dir / "motion_bank"
+    clips_root = output_dir / "clips"
+    motion_outputs = {
+        clip_id: _stable_file_identity(
+            motion_bank / f"{_sanitize_name(clip_id)}.npz",
+            label="teacher rollout motion output",
+        )
+        for clip_id in expected_clip_ids
+    }
+    clip_outputs: dict[str, Any] = {}
+    for summary in summaries:
+        directory_name = f"{summary.clip_index:04d}_{_sanitize_name(summary.clip_id)}"
+        clip_directory = clips_root / directory_name
+        clip_outputs[summary.clip_id] = {
+            "directory_name": directory_name,
+            "files": _directory_file_manifest(clip_directory, label="teacher rollout contact output"),
+        }
+
+    payload = {
+        "schema": "teacher_realmesh_rollout_shard_output_v1",
+        "shard_name": os.environ.get("TEACHER_ROLLOUT_SHARD_NAME", "").strip(),
+        "prepared_manifest_sha256": prepared_manifest_sha256,
+        "teacher_checkpoint_sha256": source_checkpoint_sha256,
+        "expected_clip_ids": expected_clip_ids,
+        "object_map_payload": object_map_payload,
+        "exporter_code": _stable_file_identity(Path(__file__).resolve(), label="teacher rollout exporter code"),
+        "summary_csv": _stable_file_identity(output_dir / "summary.csv", label="teacher rollout summary CSV"),
+        "summary_json": _stable_file_identity(output_dir / "summary.json", label="teacher rollout summary JSON"),
+        "success_clips": _stable_file_identity(
+            output_dir / "success_clips.txt",
+            label="teacher rollout success clip list",
+        ),
+        "failure_clips": _stable_file_identity(
+            output_dir / "failure_clips.txt",
+            label="teacher rollout failure clip list",
+        ),
+        "object_map_output": _stable_file_identity(
+            motion_bank / "_clip_object_urdf_map.json",
+            label="teacher rollout output object map",
+        ),
+        "motion_outputs": motion_outputs,
+        "clip_outputs": clip_outputs,
+    }
+    _write_atomic_json(output_dir / "shard_output_manifest.json", payload)
 
 
 def _project_point_to_mesh_surface(point_xyz: np.ndarray, object_mesh: Any) -> np.ndarray:
@@ -428,7 +723,7 @@ def _reset_envs_without_advancing(env: Any) -> dict[str, torch.Tensor]:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     env.reset_envs_idx(env_ids)
     env.simulator.set_actor_root_state_tensor_robots(env_ids, env.simulator.robot_root_states)
-    env.simulator.set_dof_state_tensor_robots(env_ids, env.simulator.dof_state)
+    env.simulator.set_dof_state_tensor_robots(env_ids)
     _sync_simulator_after_state_write(env)
     env._pre_compute_observations_callback()
     env._compute_observations()
@@ -459,7 +754,7 @@ def _write_motion_command_targets_to_sim(
     env.simulator.dof_pos[env_ids_tensor] = motion_command.joint_pos.index_select(0, env_ids_tensor)
     env.simulator.dof_vel[env_ids_tensor] = motion_command.joint_vel.index_select(0, env_ids_tensor)
     env.simulator.set_actor_root_state_tensor_robots(env_ids_tensor, root_states)
-    env.simulator.set_dof_state_tensor_robots(env_ids_tensor, env.simulator.dof_state)
+    env.simulator.set_dof_state_tensor_robots(env_ids_tensor)
 
     if motion_command.motion.has_object:
         object_pos_w = motion_command.object_pos_w.index_select(0, env_ids_tensor)
@@ -491,7 +786,7 @@ def _write_motion_command_targets_to_sim(
         root_states[:, 3:7] = quat_mul(quat_error, root_states[:, 3:7], w_last=True)
         root_states[:, 3:7] = root_states[:, 3:7] / torch.linalg.norm(root_states[:, 3:7], dim=-1, keepdim=True).clamp_min(1.0e-8)
         env.simulator.set_actor_root_state_tensor_robots(env_ids_tensor, root_states)
-        env.simulator.set_dof_state_tensor_robots(env_ids_tensor, env.simulator.dof_state)
+        env.simulator.set_dof_state_tensor_robots(env_ids_tensor)
 
     _sync_simulator_after_state_write(env)
     env._pre_compute_observations_callback()
@@ -2066,12 +2361,17 @@ def run_export_with_tyro(
     saved_config: ExperimentConfig,
     saved_wandb_path: str | None,
 ) -> Path:
+    set_defm_checkpoint_restore_mode()
     tyro_config = apply_observation_overrides(tyro_config)
     tyro_config = apply_perception_overrides(tyro_config)
+    from holosoma.eval_agent import _validate_eval_policy_contract
+
+    _validate_eval_policy_contract(saved_config, tyro_config)
     tyro_config = _with_contact_sensor_bodies(tyro_config)
 
     output_dir = _normalize_output_dir(export_cfg.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    prepared_rollout = bool(os.environ.get("TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256", "").strip())
+    _prepare_export_output_namespace(output_dir, prepared_rollout=prepared_rollout)
 
     eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="contact_export")
     eval_log_dir.mkdir(parents=True, exist_ok=True)
@@ -2089,9 +2389,27 @@ def run_export_with_tyro(
         log_dir=str(eval_log_dir),
         multi_gpu_cfg=None,
     )
+    algo.attach_evaluation_metadata(
+        saved_config,
+        tyro_config,
+        saved_wandb_path,
+    )
     algo.setup()
-    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
-    algo.load(str(checkpoint_path))
+    algo.load_evaluation(str(checkpoint_path))
+    source_checkpoint_sha256 = getattr(
+        algo,
+        "_source_checkpoint_sha256",
+        None,
+    )
+    if (
+        not isinstance(source_checkpoint_sha256, str)
+        or len(source_checkpoint_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in source_checkpoint_sha256)
+    ):
+        raise RuntimeError(
+            "Teacher contact export has no authenticated source checkpoint SHA256; "
+            "refusing to publish lineage-ambiguous contact sidecars."
+        )
     logger.info("Checkpoint load returned; switching exporter into eval/inference mode.")
 
     if hasattr(algo, "_eval_mode"):
@@ -2148,21 +2466,34 @@ def run_export_with_tyro(
         _write_csv(output_dir / "summary.csv", summary_rows)
 
         motion_bank_dir = output_dir / "motion_bank"
-        if motion_bank_dir.is_dir():
-            clip_object_map = {
-                summary.clip_id: {
-                    "object_name": summary.object_name,
-                    "object_size": [
-                        float(summary.primitive_extent_x),
-                        float(summary.primitive_extent_y),
-                        float(summary.primitive_extent_z),
-                    ],
-                    "object_urdf_path": summary.object_urdf_path,
+        object_map_payload: dict[str, Any]
+        if os.environ.get("TEACHER_ROLLOUT_PREPARED_MANIFEST_SHA256", "").strip():
+            object_map_payload, object_map_path = _load_exact_rollout_object_map(
+                expected_clip_ids=[summary.clip_id for summary in summaries],
+            )
+            _validate_summary_object_metadata(
+                summaries,
+                object_map_payload=object_map_payload,
+                object_map_path=object_map_path,
+            )
+        else:
+            object_map_payload = {
+                "clips": {
+                    summary.clip_id: {
+                        "object_name": summary.object_name,
+                        "object_size": [
+                            float(summary.primitive_extent_x),
+                            float(summary.primitive_extent_y),
+                            float(summary.primitive_extent_z),
+                        ],
+                        "object_urdf_path": summary.object_urdf_path,
+                    }
+                    for summary in summaries
                 }
-                for summary in summaries
             }
+        if motion_bank_dir.is_dir():
             (motion_bank_dir / "_clip_object_urdf_map.json").write_text(
-                json.dumps({"clips": clip_object_map}, indent=2),
+                json.dumps(object_map_payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
 
@@ -2173,6 +2504,12 @@ def run_export_with_tyro(
 
         summary_json = {
             "checkpoint": str(checkpoint_cfg.checkpoint),
+            "source_checkpoint_sha256": source_checkpoint_sha256,
+            "source_training_provenance": getattr(
+                algo,
+                "_training_provenance",
+                None,
+            ),
             "saved_wandb_path": saved_wandb_path,
             "num_clips": len(summaries),
             "num_success": len(success_ids),
@@ -2182,6 +2519,12 @@ def run_export_with_tyro(
             "export_config": asdict(export_cfg),
         }
         (output_dir / "summary.json").write_text(json.dumps(summary_json, indent=2), encoding="utf-8")
+        _write_teacher_rollout_shard_manifest(
+            output_dir,
+            summaries=summaries,
+            source_checkpoint_sha256=source_checkpoint_sha256,
+            object_map_payload=object_map_payload,
+        )
 
         logger.info(
             "Teacher contact export finished: {} success / {} failure. Outputs saved to {}",

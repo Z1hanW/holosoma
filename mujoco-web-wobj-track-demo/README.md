@@ -64,11 +64,12 @@ Use a different tracking checkpoint:
   --model-path /path/to/model_05000.onnx
 ```
 
-Use the raw motion clip without the training-time prepend/append transitions:
+For an explicitly non-scientific diagnostic only, embed the raw motion clip
+without the authenticated training-time transition:
 
 ```bash
 /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python scripts/prepare_demo_assets.py \
-  --no-apply-training-motion-transitions
+  --unsafe-skip-training-motion-transitions
 ```
 
 Validate the staged bundle:

@@ -51,6 +51,17 @@ case "${ACTION}" in
     ;;
 esac
 
+if [[ "${ACTION}" == "launch" || "${ACTION}" == "check" ]]; then
+  cat >&2 <<'EOF'
+[ERROR] batch_distill_as_meshphys8.sh launch/check is quarantined.
+This legacy controller does not pin/export the distributed runtime identity,
+uses mutable remote source trees, and can report a successful check before the
+real provenance/startup path runs. Use batch_ne.sh, whose snapshot, ownership,
+runtime-manifest, checkpoint, and cross-rank provenance contracts are enforced.
+EOF
+  exit 2
+fi
+
 if [[ -n "${NODES:-}" ]]; then
   # shellcheck disable=SC2206
   NODE_LIST=(${NODES})

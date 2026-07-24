@@ -226,40 +226,24 @@ def _load_motion_qpos(
     robot_config: RobotConfig,
     viser_joint_names: list[str],
 ) -> tuple[np.ndarray, int]:
+    """Load a viewer-ready qpos trajectory.
+
+    ``joint_pos`` in a training motion bank is normally a DOF-only array; its
+    first seven values are joints, not a floating-base position/quaternion.
+    Reconstructing qpos from that array would therefore corrupt both the root
+    pose and the joint-name indexing.  Conversion from training-bank fields is
+    intentionally handled by the dedicated proxy/conversion pipeline instead.
+    """
+
+    del robot_config, viser_joint_names  # Kept in the API for existing callers.
     with np.load(motion_path, allow_pickle=True) as data:
+        if "qpos" not in data:
+            raise ValueError(
+                f"Motion file missing qpos: {motion_path}. "
+                "Viewer fallback to reconstruct qpos from joint_pos is disabled."
+            )
+        qpos = np.asarray(data["qpos"], dtype=np.float32)
         fps = int(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data else 30
-
-        if "qpos" in data:
-            qpos = np.asarray(data["qpos"], dtype=np.float32)
-            return qpos, fps
-
-        if "joint_pos" not in data:
-            raise ValueError(f"Motion file missing qpos/joint_pos: {motion_path}")
-
-        joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
-        if joint_pos.ndim != 2 or joint_pos.shape[1] < 7:
-            raise ValueError(f"Invalid joint_pos shape in {motion_path}: {joint_pos.shape}")
-
-        root_qpos = joint_pos[:, :7]
-        motion_joint_values = joint_pos[:, 7:]
-        if "joint_names" in data:
-            motion_joint_names = [str(name) for name in np.asarray(data["joint_names"]).tolist()]
-        else:
-            motion_joint_names = list(robot_config.dof_names[: motion_joint_values.shape[1]])
-        name_to_motion_idx = {name: idx for idx, name in enumerate(motion_joint_names)}
-        missing = [name for name in viser_joint_names if name not in name_to_motion_idx]
-        if missing:
-            raise ValueError(f"Motion joints missing for Viser URDF in {motion_path}: {missing}")
-        motion_joint_indices = np.asarray([name_to_motion_idx[name] for name in viser_joint_names], dtype=np.int64)
-        joints = motion_joint_values[:, motion_joint_indices]
-
-        pieces = [root_qpos, joints]
-        if "object_pos_w" in data and "object_quat_w" in data:
-            object_pos = np.asarray(data["object_pos_w"], dtype=np.float32)
-            object_quat = np.asarray(data["object_quat_w"], dtype=np.float32)
-            if object_pos.ndim == 2 and object_quat.ndim == 2 and object_pos.shape[0] == joint_pos.shape[0]:
-                pieces.extend([object_pos, object_quat])
-        qpos = np.concatenate(pieces, axis=-1).astype(np.float32, copy=False)
     return qpos, fps
 
 

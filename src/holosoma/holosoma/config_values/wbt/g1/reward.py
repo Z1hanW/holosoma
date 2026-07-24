@@ -69,6 +69,13 @@ _ARM_SUPPORT_CONTACT_BODY_NAMES = [
 _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES = [
     "left_wrist",
     "right_wrist",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist_roll",
+    "right_wrist_roll",
+    "left_wrist_pitch",
+    "right_wrist_pitch",
+    "torso",
 ]
 _AS_KEEP169_CONTACT_EXPORT_ROOT = (
     "data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513/contact_export_from_retarget"
@@ -555,6 +562,7 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
         ),
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
+            params={"max_penalty": -1.0},
             weight=-0.1,
         ),
         "limits_dof_pos": RewardTermCfg(

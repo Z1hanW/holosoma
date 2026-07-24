@@ -78,6 +78,7 @@ if [[ "${PERCEPTION_PRESET}" == "camera_depth_d435i" ]]; then
   fi
   EXP_NAME="exp:g1-29dof-wbt-videomimic-distill-mlp"
   DISTILL_OVERRIDES=(
+    --algo.config.distill.enabled=True
     --algo.config.distill.mode=dagger
     --algo.config.distill.policy_to_clone="${STAGE1_CKPT}"
     --algo.config.distill.teacher_obs_keys="${TEACHER_OBS_KEYS}"

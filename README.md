@@ -68,6 +68,155 @@ python src/holosoma/holosoma/train_agent.py \
 
 See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
 
+### No Silent Fallbacks
+
+Do not add fallback behavior that silently substitutes missing or invalid data,
+geometry, checkpoints, config, logging, or distributed-training state. If a
+required artifact cannot be loaded, the code must fail loudly with a clear error.
+
+Any fallback must be explicitly approved by the project owner before it is added,
+and the code path must make that fallback visible in logs or UI so it cannot be
+mistaken for the intended data or behavior.
+
+Policy initialization is strict. `--training.policy-init-checkpoint` must match
+the current actor state dict exactly, including all keys and tensor shapes.
+Partial actor initialization is forbidden: do not load only the compatible
+subset of a checkpoint and continue training. If the checkpoint architecture
+does not match, start without policy init or use a checkpoint trained with the
+exact same actor architecture.
+
+### Required Realmesh Debug Sequences
+
+The AS realmesh debug rollout/original comparison depends on a fixed set of
+sequences. Do not prune, rename, replace with cuboid fallback geometry, or
+regenerate these realmesh debug sequences without explicit owner approval.
+
+The current comparison viewer uses:
+
+```text
+realmesh rollout bank:
+data/ds_as_data/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target/_single_slot_motion_bank
+
+realmesh rollout contact export:
+data/ds_as_data/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target/contact_export_from_teacher_realmesh_rollout
+
+original realmesh packed motion bank:
+/nfs/zzzihanw/ds_as_data/debug/_single_slot_motion_bank
+```
+
+These debug banks currently resolve their object mesh assets through
+`/nfs/zzzihanw/ds_as_data/debug/objects/*/object_mesh_yup.obj`. The rollout
+target directory is not a self-contained geometry package; if `/nfs/zzzihanw`
+is unavailable, the strict viewer must fail instead of substituting boxes.
+
+The convex-hull-all-mesh version of the 30 rollout debug sequences is stored at:
+
+```text
+/nfs/zzzihanw/prism-debug/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target_convexhull_allmesh
+```
+
+In that package, URDF visual meshes, URDF collision meshes, clip-map
+`object_mesh_path`, clip-map `object_collision_mesh_path`, motion-bank metadata,
+and contact-export metadata all point to `objects_convex_hull/*.obj`. It is
+intended to fail validation if any object falls back to real mesh or cuboid
+geometry.
+
+The 30 required debug comparison clip ids are:
+
+```text
+scaledown__any_ball_24
+scaledown__any_ball_26
+scaledown__any_ball_28
+scaledown__any_barrel_25
+scaledown__any_bin_16
+scaledown__any_bin_17
+scaledown__any_bin_19
+scaledown__any_bin_20
+scaledown__any_bin_21
+scaledown__any_bin_22
+scaledown__any_bin_24
+scaledown__any_bin_25
+scaledown__any_bin_27
+scaledown__any_bin_28
+scaledown__any_bin_29
+unscale__any_ball_24
+unscale__any_ball_29
+unscale__any_bin_16
+unscale__any_bin_17
+unscale__any_bin_18
+unscale__any_bin_19
+unscale__any_bin_20
+unscale__any_bin_22
+unscale__any_bin_23
+unscale__any_bin_24
+unscale__any_bin_25
+unscale__any_bin_27
+unscale__any_bin_28
+unscale__any_bin_29
+unscale__any_bin_31
+```
+
+To replay the strict rollout-vs-original comparison in `viser`:
+
+```bash
+PYTHONPATH=src python3 -m holosoma.debug_rollout_grid_viewer \
+  --data-root data/ds_as_data/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target/contact_export_from_teacher_realmesh_rollout \
+  --host 0.0.0.0 \
+  --port 7082 \
+  --group-size 1 \
+  --cols 1 \
+  --spacing 3.6 \
+  --playback-fps 30 \
+  --robot-mode urdf \
+  --object-visual surface-points \
+  --object-point-count 4000 \
+  --original-motion-dir /nfs/zzzihanw/ds_as_data/debug/_single_slot_motion_bank
+```
+
+### Checkpoint Uploads
+
+Training runs that use W&B logging should upload `.pt` checkpoints by default.
+Do not set `HOLOSOMA_SKIP_WANDB_CHECKPOINT_UPLOAD` or
+`HOLOSOMA_SKIP_WANDB_FILE_UPLOAD` for normal training launches. The multi-node
+`batch_ne.sh` launcher clears those variables before starting training, and its
+default checkpoint save interval is `SAVE_INTERVAL=500`.
+
+### Pure RL Bootstrap
+
+Use `debug_pure_rl_bootstrap.sh` for pure PPO warm-up runs. This launcher is
+separate from distillation launchers and must not be used with teacher policy,
+DAgger, box-policy init, or checkpoint resume.
+
+Stage A is the default early-learning setup: fixed `3e-4` actor/critic learning
+rates, reduced exploration noise, no entropy bonus, two PPO epochs per rollout,
+`clip_param=0.1`, `max_grad_norm=0.5`, start from timestep zero, reduced reset
+noise, no adaptive timestep sampler, no push randomization, relaxed
+tracking/object termination thresholds, and softer contact guidance with lower
+contact weights. It is intended to make early episodes long enough for PPO to
+learn useful locomotion and pickup behavior without the action-rate/critic
+explosion seen with the earlier aggressive `1e-3` setting.
+
+Later stages are explicit:
+
+```bash
+PURE_RL_BOOTSTRAP_STAGE=B ./debug_pure_rl_bootstrap.sh
+PURE_RL_BOOTSTRAP_STAGE=C ./debug_pure_rl_bootstrap.sh
+```
+
+Stage B tightens thresholds and guidance weights. Stage C restores the formal
+termination thresholds, original contact weights, force-gated contact guidance,
+and push randomization. The launcher still delegates to `debug_pure_rl.sh`, so
+missing real mesh assets or accidental checkpoint init must fail loudly.
+
+For multi-GPU pure-RL bootstrap runs, keep the launcher defaults:
+`HOLOSOMA_GLOO_SMALL_COLLECTIVES=1`, `HOLOSOMA_GLOO_GRAD_REDUCE=1`,
+`HOLOSOMA_SYNC_AFTER_GRAD_ALLREDUCE=1`, and
+`HOLOSOMA_SYNC_EACH_ITERATION=0`. This avoids mixing NCCL gradient all-reduce
+with Gloo/CPU small collectives in the PPO update, which previously caused
+silent rank waits around iteration boundaries. On 2026-07-09, the verified
+8-GPU Stage-A run used 2048 envs/GPU, the 5-layer actor
+`[2048,1024,512,256,128]`, no distillation, and no checkpoint init.
+
 ### CoRL Baseline Real-Data Training
 
 All training data must be read from repo-local relative paths under `data/`.

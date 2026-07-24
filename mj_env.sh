@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${ROOT_DIR}/scripts/mujoco_perception_env.sh"
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-${ROOT_DIR}/mujoco-web-wobj-depth-demo/public/demo-assets/clips/box_74/policy.onnx}"
 COMMAND_WEB_LOG="${COMMAND_WEB_LOG:-${ROOT_DIR}/logs/live_debug/mj_command_web.log}"
 TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
@@ -50,6 +51,10 @@ Environment:
   MJ_ENV_RECORD_DURATION          default: 12 seconds
   MJ_ENV_RECORD_OUTPUT            default: logs/live_debug/mujoco_rollout_<timestamp>.mp4
   MJ_ENV_RECORD_MUJOCO_XML         default: logs/live_debug/mujoco_rollout_<timestamp>.xml for rendered MP4
+  PERCEPTION_CAMERA_WARP_EDGE_NOISE_EXPLICIT / PERCEPTION_CAMERA_WARP_ENABLE_HOLES_EXPLICIT /
+  PERCEPTION_CAMERA_APPLY_SENSOR_NOISE_EXPLICIT
+                                  set to 1 only to force the corresponding env value over ONNX metadata;
+                                  launcher fallback values are automatically marked non-explicit
 EOF
 }
 
@@ -295,9 +300,9 @@ export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION="${HOLOSOMA_MUJOCO_
 export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION:-0.3}"
 export HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES="${HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES:-0}"
 export HOLOSOMA_MUJOCO_RESET_NOISE="0"
-export PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
-export PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
-export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
+holosoma_set_launcher_default PERCEPTION_CAMERA_WARP_EDGE_NOISE False
+holosoma_set_launcher_default PERCEPTION_CAMERA_WARP_ENABLE_HOLES False
+holosoma_set_launcher_default PERCEPTION_CAMERA_APPLY_SENSOR_NOISE False
 
 HEADLESS_FLAG="$(resolve_headless)"
 export TRAINING_HEADLESS="$HEADLESS_FLAG"

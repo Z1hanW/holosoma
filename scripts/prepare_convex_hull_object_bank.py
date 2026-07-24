@@ -62,11 +62,12 @@ def _scalar_str(value: object) -> str:
     return str(item).strip()
 
 
-def _write_npz_with_urdf(src: Path, dst: Path, object_urdf_path: str) -> None:
+def _write_npz_with_metadata(src: Path, dst: Path, metadata_updates: dict[str, str]) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with np.load(src, allow_pickle=True) as data:
         payload = {key: np.asarray(data[key]) for key in data.files}
-    payload["object_urdf_path"] = np.asarray(object_urdf_path)
+    for key, value in metadata_updates.items():
+        payload[key] = np.asarray(str(value))
     fd, tmp_raw = tempfile.mkstemp(prefix=f"{dst.stem}.", suffix=".npz")
     os.close(fd)
     tmp = Path(tmp_raw)
@@ -118,6 +119,7 @@ def _convex_hull_for_mesh(
     target_bank: Path,
     hull_by_mesh: dict[Path, Path],
     stats_by_mesh: dict[str, dict[str, int | str]],
+    copy_visual_source: bool,
 ) -> Path:
     dst_mesh = hull_by_mesh.get(src_mesh)
     if dst_mesh is not None:
@@ -128,15 +130,17 @@ def _convex_hull_for_mesh(
     dst_mesh = target_bank / "objects_convex_hull" / f"{safe_stem}_{digest}" / f"{safe_stem}_convex_hull.obj"
     v0, f0, v1, f1 = _export_convex_hull(src_mesh, dst_mesh)
     hull_by_mesh[src_mesh] = dst_mesh
-    stats_by_mesh[str(src_mesh)] = {
+    stats: dict[str, int | str] = {
         "source_mesh": str(src_mesh),
-        "visual_mesh": str(_copy_visual_mesh(src_mesh, target_bank)),
         "convex_hull_mesh": str(dst_mesh),
         "source_vertices": v0,
         "source_faces": f0,
         "hull_vertices": v1,
         "hull_faces": f1,
     }
+    if copy_visual_source:
+        stats["visual_mesh"] = str(_copy_visual_mesh(src_mesh, target_bank))
+    stats_by_mesh[str(src_mesh)] = stats
     return dst_mesh
 
 
@@ -147,6 +151,7 @@ def _rewrite_urdf_to_collision_hulls(
     target_bank: Path,
     hull_by_mesh: dict[Path, Path],
     stats_by_mesh: dict[str, dict[str, int | str]],
+    visual_mode: str,
 ) -> tuple[list[Path], list[Path]]:
     tree = ET.parse(src_urdf)
     root = tree.getroot()
@@ -164,7 +169,16 @@ def _rewrite_urdf_to_collision_hulls(
             src_mesh = _resolve_path(mesh_ref, src_urdf.parent)
             if not src_mesh.is_file():
                 raise FileNotFoundError(f"missing visual mesh referenced by {src_urdf}: {src_mesh}")
-            dst_mesh = _copy_visual_mesh(src_mesh, target_bank)
+            if visual_mode == "convex_hull":
+                dst_mesh = _convex_hull_for_mesh(
+                    src_mesh=src_mesh,
+                    target_bank=target_bank,
+                    hull_by_mesh=hull_by_mesh,
+                    stats_by_mesh=stats_by_mesh,
+                    copy_visual_source=False,
+                )
+            else:
+                dst_mesh = _copy_visual_mesh(src_mesh, target_bank)
             mesh_tag.set("filename", _relpath(dst_mesh, dst_urdf.parent))
             visual_meshes.append(dst_mesh)
             processed.add(id(mesh_tag))
@@ -184,6 +198,7 @@ def _rewrite_urdf_to_collision_hulls(
                 target_bank=target_bank,
                 hull_by_mesh=hull_by_mesh,
                 stats_by_mesh=stats_by_mesh,
+                copy_visual_source=visual_mode != "convex_hull",
             )
             mesh_tag.set("filename", _relpath(dst_mesh, dst_urdf.parent))
             used_hulls.append(dst_mesh)
@@ -200,7 +215,16 @@ def _rewrite_urdf_to_collision_hulls(
         src_mesh = _resolve_path(mesh_ref, src_urdf.parent)
         if not src_mesh.is_file():
             raise FileNotFoundError(f"missing source mesh referenced by {src_urdf}: {src_mesh}")
-        dst_mesh = _copy_visual_mesh(src_mesh, target_bank)
+        if visual_mode == "convex_hull":
+            dst_mesh = _convex_hull_for_mesh(
+                src_mesh=src_mesh,
+                target_bank=target_bank,
+                hull_by_mesh=hull_by_mesh,
+                stats_by_mesh=stats_by_mesh,
+                copy_visual_source=False,
+            )
+        else:
+            dst_mesh = _copy_visual_mesh(src_mesh, target_bank)
         mesh_tag.set("filename", _relpath(dst_mesh, dst_urdf.parent))
         visual_meshes.append(dst_mesh)
 
@@ -236,6 +260,7 @@ def prepare_bank(
     expected_count: int | None,
     payload_mode: str,
     sidecar_mode: str,
+    visual_mode: str,
     force: bool,
 ) -> dict[str, Any]:
     source_bank = source_bank.expanduser().resolve()
@@ -287,6 +312,7 @@ def prepare_bank(
                 target_bank=target_bank,
                 hull_by_mesh=hull_by_mesh,
                 stats_by_mesh=stats_by_mesh,
+                visual_mode=visual_mode,
             )
             hulls_by_urdf[src_urdf] = hull_meshes
             entry_visual_meshes = visual_meshes
@@ -299,22 +325,29 @@ def prepare_bank(
             ]
 
         installed_urdf = str(dst_urdf)
+        visual_paths = sorted({str(path) for path in entry_visual_meshes})
+        collision_paths = sorted({str(path) for path in hulls_by_urdf.get(src_urdf, [])})
+        metadata_updates = {"object_urdf_path": installed_urdf}
+        if len(visual_paths) == 1:
+            metadata_updates["object_mesh_path"] = visual_paths[0]
+            metadata_updates["object_visual_mesh_path"] = visual_paths[0]
+        if len(collision_paths) == 1:
+            metadata_updates["object_collision_mesh_path"] = collision_paths[0]
+
         source_npz = source_bank / f"{clip_id}.npz"
         if not source_npz.is_file():
             raise FileNotFoundError(f"clip {clip_id} missing source npz: {source_npz}")
-        _write_npz_with_urdf(source_npz, target_bank / f"{clip_id}.npz", installed_urdf)
+        _write_npz_with_metadata(source_npz, target_bank / f"{clip_id}.npz", metadata_updates)
 
         source_slot_npz = source_bank / "_single_slot_motion_bank" / f"{clip_id}.npz"
         slot_npz_source = source_slot_npz if source_slot_npz.is_file() else source_npz
-        _write_npz_with_urdf(
+        _write_npz_with_metadata(
             slot_npz_source,
             target_bank / "_single_slot_motion_bank" / f"{clip_id}.npz",
-            installed_urdf,
+            metadata_updates,
         )
 
         entry["object_urdf_path"] = installed_urdf
-        visual_paths = sorted({str(path) for path in entry_visual_meshes})
-        collision_paths = sorted({str(path) for path in hulls_by_urdf.get(src_urdf, [])})
         if len(visual_paths) == 1:
             entry["object_mesh_path"] = visual_paths[0]
             entry["object_visual_mesh_path"] = visual_paths[0]
@@ -332,6 +365,7 @@ def prepare_bank(
             "objects",
             "objects_visual_real",
             "objects_convex_hull",
+            "_single_slot_urdfs",
             MARKER_NAME,
             "convex_hull_manifest.json",
             "nfs_package_manifest.json",
@@ -355,13 +389,15 @@ def prepare_bank(
     if not success_contact_root.exists() and realmesh_contact_root.is_dir():
         shutil.copytree(realmesh_contact_root, success_contact_root, symlinks=False)
 
+    _rewrite_contact_metadata(target_bank=target_bank, updated_clips=updated_clips)
+
     output_payload = dict(metadata)
     output_payload["clips"] = updated_clips
     output_payload["convex_hull_object_bank"] = {
         "source_bank": str(source_bank),
         "unique_source_urdf_count": len(urdf_by_src),
         "unique_source_mesh_count": len(hull_by_mesh),
-        "visual_meshes": "real_source_mesh_copy",
+        "visual_meshes": "convex_hull" if visual_mode == "convex_hull" else "real_source_mesh_copy",
         "collision_meshes": "convex_hull",
     }
     map_path = target_bank / "_clip_object_urdf_map.json"
@@ -394,6 +430,7 @@ def prepare_bank(
         "sidecar_files": sidecar_files,
         "payload_mode": payload_mode,
         "sidecar_mode": sidecar_mode,
+        "visual_mode": visual_mode,
         "mesh_stats": list(stats_by_mesh.values()),
     }
     (target_bank / "convex_hull_manifest.json").write_text(
@@ -413,7 +450,34 @@ def prepare_bank(
     return manifest
 
 
-def validate_bank(target_bank: Path, expected_count: int | None) -> list[str]:
+def _rewrite_contact_metadata(*, target_bank: Path, updated_clips: dict[str, Any]) -> None:
+    for contact_root in sorted(target_bank.glob("contact_export_from_teacher*")):
+        clips_root = contact_root / "clips"
+        if not clips_root.is_dir():
+            continue
+        for clip_dir in sorted(path for path in clips_root.iterdir() if path.is_dir()):
+            metadata_path = clip_dir / "metadata.json"
+            if not metadata_path.is_file():
+                continue
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            clip_id = str(payload.get("clip_id") or "").strip()
+            if not clip_id:
+                clip_id = re.sub(r"^\d+_", "", clip_dir.name)
+            entry = updated_clips.get(clip_id)
+            if not isinstance(entry, dict):
+                continue
+            payload["object_urdf_path"] = str(entry.get("object_urdf_path", "")).strip()
+            for key in ("object_mesh_path", "object_visual_mesh_path", "object_collision_mesh_path"):
+                value = str(entry.get(key, "")).strip()
+                if value:
+                    payload[key] = value
+            motion_path = target_bank / "_single_slot_motion_bank" / f"{clip_id}.npz"
+            if motion_path.is_file():
+                payload["teacher_rollout_motion_bank_path"] = _relpath(motion_path, clip_dir)
+            metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def validate_bank(target_bank: Path, expected_count: int | None, visual_mode: str) -> list[str]:
     errors: list[str] = []
     _, clips = _load_clip_map(target_bank / "_clip_object_urdf_map.json")
     if expected_count is not None and len(clips) != expected_count:
@@ -444,19 +508,25 @@ def validate_bank(target_bank: Path, expected_count: int | None) -> list[str]:
             errors.append(f"{clip_id}: URDF has no visual mesh")
         if not collision_meshes:
             errors.append(f"{clip_id}: URDF has no collision mesh")
+        expected_visual_dir = "objects_convex_hull" if visual_mode == "convex_hull" else "objects_visual_real"
         for mesh in visual_meshes:
-            if "objects_visual_real" not in str(mesh):
-                errors.append(f"{clip_id}: visual mesh is not a real visual copy: {mesh}")
+            if expected_visual_dir not in str(mesh):
+                errors.append(f"{clip_id}: visual mesh is not in {expected_visual_dir}: {mesh}")
         for mesh in collision_meshes:
             if "objects_convex_hull" not in str(mesh):
                 errors.append(f"{clip_id}: collision mesh is not in objects_convex_hull: {mesh}")
-        if visual_meshes and collision_meshes and {str(m) for m in visual_meshes} == {str(m) for m in collision_meshes}:
+        if (
+            visual_mode != "convex_hull"
+            and visual_meshes
+            and collision_meshes
+            and {str(m) for m in visual_meshes} == {str(m) for m in collision_meshes}
+        ):
             errors.append(f"{clip_id}: visual and collision mesh refs should differ")
         visual_meta = str(entry.get("object_mesh_path", "") or entry.get("object_visual_mesh_path", "")).strip()
         if visual_meta:
             visual_meta_path = _resolve_path(visual_meta, (target_bank / "_clip_object_urdf_map.json").parent)
-            if "objects_visual_real" not in str(visual_meta_path):
-                errors.append(f"{clip_id}: object_mesh_path should point to real visual mesh: {visual_meta_path}")
+            if expected_visual_dir not in str(visual_meta_path):
+                errors.append(f"{clip_id}: object_mesh_path should point to {expected_visual_dir}: {visual_meta_path}")
         collision_meta = str(entry.get("object_collision_mesh_path", "")).strip()
         if collision_meta:
             collision_meta_path = _resolve_path(collision_meta, (target_bank / "_clip_object_urdf_map.json").parent)
@@ -466,20 +536,55 @@ def validate_bank(target_bank: Path, expected_count: int | None) -> list[str]:
             if npz_path.exists():
                 with np.load(npz_path, allow_pickle=True) as data:
                     npz_urdf = _scalar_str(data.get("object_urdf_path"))
-                if npz_urdf != str(urdf):
-                    errors.append(f"{clip_id}: {npz_path.name} object_urdf_path mismatch")
+                    if npz_urdf != str(urdf):
+                        errors.append(f"{clip_id}: {npz_path.name} object_urdf_path mismatch")
+                    for key, expected_dir in (
+                        ("object_mesh_path", expected_visual_dir),
+                        ("object_visual_mesh_path", expected_visual_dir),
+                        ("object_collision_mesh_path", "objects_convex_hull"),
+                    ):
+                        value = _scalar_str(data.get(key))
+                        if value and expected_dir not in value:
+                            errors.append(f"{clip_id}: {npz_path.name} {key} should point to {expected_dir}: {value}")
+    for contact_root in sorted(target_bank.glob("contact_export_from_teacher*")):
+        clips_root = contact_root / "clips"
+        if not clips_root.is_dir():
+            continue
+        for clip_dir in sorted(path for path in clips_root.iterdir() if path.is_dir()):
+            metadata_path = clip_dir / "metadata.json"
+            if not metadata_path.is_file():
+                continue
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            clip_id = str(payload.get("clip_id") or re.sub(r"^\d+_", "", clip_dir.name)).strip()
+            if clip_id not in clips:
+                continue
+            object_urdf = str(payload.get("object_urdf_path", "")).strip()
+            if not object_urdf or not Path(object_urdf).is_file():
+                errors.append(f"{clip_id}: contact metadata missing generated object_urdf_path in {metadata_path}")
+            object_mesh = str(payload.get("object_mesh_path", "")).strip()
+            if expected_visual_dir not in object_mesh:
+                errors.append(f"{clip_id}: contact metadata object_mesh_path should point to {expected_visual_dir}: {object_mesh}")
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Prepare a bank whose URDF collision meshes use convex hull OBJ assets while visual meshes remain real source meshes."
+        description=(
+            "Prepare a bank whose URDF collision meshes use convex hull OBJ assets; "
+            "visual meshes can either remain real source meshes or use the same convex hulls."
+        )
     )
     parser.add_argument("--source-bank", required=True, type=Path)
     parser.add_argument("--target-bank", required=True, type=Path)
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--payload-mode", choices=("copy", "symlink"), default="copy")
     parser.add_argument("--sidecar-mode", choices=("copy", "symlink"), default="copy")
+    parser.add_argument(
+        "--visual-mode",
+        choices=("real", "convex_hull"),
+        default="real",
+        help="Use real copied visual meshes or convex hull meshes for URDF visual geometry.",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -490,9 +595,10 @@ def main() -> int:
             expected_count=args.expected_count,
             payload_mode=args.payload_mode,
             sidecar_mode=args.sidecar_mode,
+            visual_mode=args.visual_mode,
             force=args.force,
         )
-        errors = validate_bank(args.target_bank.expanduser().resolve(), args.expected_count)
+        errors = validate_bank(args.target_bank.expanduser().resolve(), args.expected_count, args.visual_mode)
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2

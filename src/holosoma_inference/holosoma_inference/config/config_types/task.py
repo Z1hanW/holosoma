@@ -70,13 +70,16 @@ class TaskConfig:
     """Optional single motion clip path used for split sim2sim WBT inference."""
 
     apply_training_motion_transitions: bool = False
-    """Apply training-time default-pose prepend/append transitions to split sim2sim motion data."""
+    """Materialize the artifact's authenticated effective training transition contract."""
 
     use_sim_state: bool = False
     """Subscribe to simulator root/object state over ZMQ for split sim2sim inference."""
 
     sim_state_port: int = 5557
     """ZMQ port used to receive split sim2sim simulator state."""
+
+    sim_state_max_wall_age_ms: float = 500.0
+    """Maximum wall-clock age of a cached split-sim state before policy commands stop."""
 
     use_split_perception_obs: bool = False
     """Subscribe to split simulator perception observations for models that expect perception_obs."""

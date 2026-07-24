@@ -26,7 +26,9 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]  # noqa: E4
 
 from holosoma.config_types.experiment import ExperimentConfig  # noqa: E402
 from holosoma.config_types.robot import RobotConfig  # noqa: E402
+from holosoma.observation import apply_observation_overrides  # noqa: E402
 from holosoma.perception import apply_perception_overrides  # noqa: E402
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint  # noqa: E402
 from holosoma.utils.config_utils import CONFIG_NAME  # noqa: E402
 from holosoma.utils.eval_utils import (  # noqa: E402
     CheckpointConfig,
@@ -109,7 +111,10 @@ def _sanitize_scene_lists(config_data: dict) -> None:
 
 
 def _load_saved_config_local(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
-    checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_contents, _checkpoint_sha256 = load_verified_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+    )
     config_data = checkpoint_contents["experiment_config"]
     if not isinstance(config_data, dict):
         raise ValueError("experiment_config in checkpoint is not a dict.")
@@ -277,10 +282,6 @@ def _force_clip(env, motion_cmd, clip_idx: int, env_index: int) -> dict[str, tor
     return env.obs_buf_dict
 
 
-def _build_actor_obs(algo, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-    return torch.cat([obs_dict[k] for k in algo.actor_obs_keys], dim=1)
-
-
 def run_eval_with_viser_clip(
     tyro_config: ExperimentConfig,
     checkpoint_cfg: CheckpointConfig,
@@ -288,7 +289,11 @@ def run_eval_with_viser_clip(
     saved_wandb_path: str | None,
     viser_cfg: ViserLiveConfig,
 ) -> None:
+    tyro_config = apply_observation_overrides(tyro_config)
     tyro_config = apply_perception_overrides(tyro_config)
+    from holosoma.eval_agent import _validate_eval_policy_contract
+
+    _validate_eval_policy_contract(saved_config, tyro_config)
     env, device, simulation_app = setup_simulation_environment(tyro_config)
 
     eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")
@@ -309,12 +314,33 @@ def run_eval_with_viser_clip(
         log_dir=str(eval_log_dir),
         multi_gpu_cfg=None,
     )
+    algo.attach_evaluation_metadata(
+        saved_config,
+        tyro_config,
+        saved_wandb_path,
+    )
     algo.setup()
-    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
-    algo.load(checkpoint_path)
+    algo.load_evaluation(checkpoint_path)
 
-    env.set_is_evaluating()
-    obs_dict = env.reset_all()
+    algo._create_eval_callbacks()  # noqa: SLF001 - live viewer mirrors evaluate_policy.
+    obs_dict = algo._pre_evaluate_policy()  # noqa: SLF001
+    actor_state = algo._create_actor_state()  # noqa: SLF001
+    algo.eval_policy = algo.get_inference_policy()
+    init_actions = torch.zeros(env.num_envs, algo.num_act, device=device)
+    actor_state.update({"obs": obs_dict, "actions": init_actions})
+    actor_state["obs"]["critic_obs"] = torch.cat(
+        [actor_state["obs"][key] for key in algo.critic_obs_keys],
+        dim=1,
+    )
+
+    def install_forced_observation(forced_obs: dict[str, torch.Tensor]) -> None:
+        actor_state["obs"] = forced_obs
+        actor_state["obs"]["critic_obs"] = torch.cat(
+            [actor_state["obs"][key] for key in algo.critic_obs_keys],
+            dim=1,
+        )
+        for stale_key in ("dones", "rewards", "extras"):
+            actor_state.pop(stale_key, None)
 
     motion_cmd = env.command_manager.get_state("motion_command") if env.command_manager else None
     if motion_cmd is None or not hasattr(motion_cmd, "motion"):
@@ -343,38 +369,68 @@ def run_eval_with_viser_clip(
         pending_clip["name"] = str(clip_dropdown.value)
 
     # Ensure initial clip matches the dropdown selection.
-    obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
-
-    policy = algo.get_inference_policy()
+    install_forced_observation(
+        _force_clip(
+            env,
+            motion_cmd,
+            selected_clip["idx"],
+            env_index,
+        )
+    )
+    selected_reset_mask = torch.zeros(env.num_envs, device=device, dtype=torch.bool)
+    selected_reset_mask[env_index] = True
+    algo.actor.reset(selected_reset_mask)
+    algo.critic.reset(selected_reset_mask)
     step = 0
 
-    while True:
-        if pending_clip["name"]:
-            name = pending_clip["name"]
-            pending_clip["name"] = None
-            if name in clip_name_to_idx:
-                selected_clip["name"] = name
-                selected_clip["idx"] = clip_name_to_idx[name]
-                obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
+    try:
+        while True:
+            if pending_clip["name"]:
+                name = pending_clip["name"]
+                pending_clip["name"] = None
+                if name in clip_name_to_idx:
+                    selected_clip["name"] = name
+                    selected_clip["idx"] = clip_name_to_idx[name]
+                    install_forced_observation(
+                        _force_clip(
+                            env,
+                            motion_cmd,
+                            selected_clip["idx"],
+                            env_index,
+                        )
+                    )
+                    algo.actor.reset(selected_reset_mask)
+                    algo.critic.reset(selected_reset_mask)
 
-        actor_obs = _build_actor_obs(algo, obs_dict)
-        actions = policy({"actor_obs": actor_obs})
-        obs_dict, _, reset_buf, _ = env.step({"actions": actions})
+            actor_state["step"] = step
+            actor_state = algo._pre_eval_env_step(actor_state)  # noqa: SLF001
+            actor_state = algo.env_step(actor_state)
+            actor_state = algo._post_eval_env_step(actor_state)  # noqa: SLF001
 
-        if viser_cfg.auto_reapply_clip:
-            current_idx = int(motion_cmd.clip_ids[env_index].item())
-            if current_idx != selected_clip["idx"]:
-                obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
+            if viser_cfg.auto_reapply_clip:
+                current_idx = int(motion_cmd.clip_ids[env_index].item())
+                if current_idx != selected_clip["idx"]:
+                    install_forced_observation(
+                        _force_clip(
+                            env,
+                            motion_cmd,
+                            selected_clip["idx"],
+                            env_index,
+                        )
+                    )
+                    algo.actor.reset(selected_reset_mask)
+                    algo.critic.reset(selected_reset_mask)
 
-        if step % max(1, int(viser_cfg.update_interval)) == 0:
-            viewer.update_from_env(env, env_index)
-            current_clip = _current_clip_name(motion_cmd, env_index) or "n/a"
-            clip_label.content = f"Current clip: `{current_clip}`"
+            if step % max(1, int(viser_cfg.update_interval)) == 0:
+                viewer.update_from_env(env, env_index)
+                current_clip = _current_clip_name(motion_cmd, env_index) or "n/a"
+                clip_label.content = f"Current clip: `{current_clip}`"
 
-        step += 1
-
-    if simulation_app:
-        close_simulation_app(simulation_app)
+            step += 1
+    finally:
+        algo._post_evaluate_policy()  # noqa: SLF001
+        if simulation_app:
+            close_simulation_app(simulation_app)
 
 
 def main() -> None:

@@ -77,6 +77,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 DEFAULT_TERRAIN_CHECKPOINT="${DEFAULT_TERRAIN_CHECKPOINT:-${WANDB_RUN_URL:-}}"
@@ -106,9 +107,11 @@ local_checkpoint_is_tracking_only() {
   local checkpoint_path="$1"
   "${PYTHON_BIN}" - "${checkpoint_path}" <<'PY' 2>/dev/null || true
 import sys
-import torch
 
-cfg = torch.load(sys.argv[1], map_location="cpu").get("experiment_config", {})
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
+
+payload, _checkpoint_sha256 = load_verified_torch_checkpoint(sys.argv[1], map_location="cpu")
+cfg = payload.get("experiment_config", {})
 perception_cfg = cfg.get("perception") if isinstance(cfg, dict) else None
 enabled = perception_cfg.get("enabled") if isinstance(perception_cfg, dict) else False
 print("1" if not bool(enabled) else "0")
@@ -451,7 +454,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import torch
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 
 def _parse_wandb_reference(reference: str) -> tuple[str, str]:
@@ -491,8 +494,10 @@ def _load_payload(checkpoint_ref: str):
             ckpt_path = Path(downloaded.name)
             if not ckpt_path.is_absolute():
                 ckpt_path = (Path.cwd() / ckpt_path).resolve()
-            return torch.load(ckpt_path, map_location="cpu")
-    return torch.load(checkpoint_ref, map_location="cpu")
+            payload, _checkpoint_sha256 = load_verified_torch_checkpoint(ckpt_path, map_location="cpu")
+            return payload
+    payload, _checkpoint_sha256 = load_verified_torch_checkpoint(checkpoint_ref, map_location="cpu")
+    return payload
 
 
 payload = _load_payload(sys.argv[1])

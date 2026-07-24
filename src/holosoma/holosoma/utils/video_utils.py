@@ -118,6 +118,7 @@ def create_video(
     wandb_logging=True,
     episode_id=None,
     wandb_key="Training rollout",
+    wandb_commit=True,
 ):
     """Create video with configurable output format and destination.
 
@@ -140,6 +141,10 @@ def create_video(
         Episode ID for filename generation.
     wandb_key : str, default="Training rollout"
         Wandb key name for the uploaded video.
+    wandb_commit : bool, default=True
+        Whether the W&B media row should advance its implicit history step.
+        Training callers should pass ``False`` so the next iteration-indexed
+        scalar log commits the media and metrics together.
 
     Returns
     -------
@@ -218,7 +223,10 @@ def create_video(
 
         # Step 3: Handle wandb upload if requested
         if wandb_logging and _is_wandb_available():
-            wandb.log({wandb_key: wandb.Video(str(final_video), format="mp4")})
+            wandb.log(
+                {wandb_key: wandb.Video(str(final_video), format="mp4")},
+                commit=wandb_commit,
+            )
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

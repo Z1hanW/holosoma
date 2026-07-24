@@ -1,6 +1,157 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tyro applies repeated options with later values winning.  Inspect the raw
+# argv before any helper/source/asset/provenance work so a forwarded tail
+# cannot contradict the launcher-owned, audited deployment contract.
+reject_launcher_owned_cli_overrides() {
+  local raw_arg option canonical_option
+  for raw_arg in "$@"; do
+    option=${raw_arg%%=*}
+    canonical_option=${option,,}
+    canonical_option=${canonical_option//_/-}
+    case "${canonical_option}" in
+      --algo.config.num-learning-iterations|\
+      --training.checkpoint|\
+      --training.policy-init-checkpoint|\
+      --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob|\
+      --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end|\
+      --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter|\
+      --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter|\
+      --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob|\
+      --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end|\
+      --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter|\
+      --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter|\
+      --training.export-onnx|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-alpha|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg)
+        echo "[ERROR] ${option} is launcher-owned and cannot be overridden in forwarded argv/EXTRA_ARGS." >&2
+        echo "[ERROR] Set the corresponding launcher environment variable before launch." >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+reject_launcher_owned_cli_overrides "$@" || exit
+unset -f reject_launcher_owned_cli_overrides
+
+canonicalize_bounded_positive_integer() {
+  local variable_name="$1" maximum="$2" error_text="$3"
+  local raw_value="${!variable_name}" normalized leading_zero_prefix
+  local LC_ALL=C
+  if [[ ! "${raw_value}" =~ ^[0-9]+$ ]]; then
+    echo "${error_text} Got: ${raw_value}" >&2
+    return 2
+  fi
+  if (( ${#raw_value} > 64 )); then
+    echo "${error_text} Got: <overlong-${#raw_value}-digit-integer>" >&2
+    return 2
+  fi
+  leading_zero_prefix=${raw_value%%[!0]*}
+  normalized=${raw_value#"${leading_zero_prefix}"}
+  [[ -n "${normalized}" ]] || normalized=0
+  if [[ "${normalized}" == 0 \
+        || ${#normalized} -gt ${#maximum} \
+        || ( ${#normalized} -eq ${#maximum} && "${normalized}" > "${maximum}" ) ]]; then
+    echo "${error_text} Got: ${raw_value}" >&2
+    return 2
+  fi
+  printf -v "${variable_name}" '%s' "${normalized}"
+}
+
+# Resolve deployment-affecting contracts before sourcing launch helpers or
+# touching assets.  A t1-aligned sparse command can be trained, but the current
+# inference runtime cannot reconstruct it from live state, so exporting such a
+# policy would create an intentionally unusable deployment artifact.
+EXPORT_ONNX_EXPLICIT=0
+[[ -n "${EXPORT_ONNX+x}" ]] && EXPORT_ONNX_EXPLICIT=1
+EXPORT_ONNX=${EXPORT_ONNX:-True}
+case "${EXPORT_ONNX,,}" in
+  1|true|yes|on) EXPORT_ONNX=True ;;
+  0|false|no|off) EXPORT_ONNX=False ;;
+  *)
+    echo "[ERROR] EXPORT_ONNX must be a boolean. Got: ${EXPORT_ONNX}" >&2
+    exit 2
+    ;;
+esac
+
+CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-contact_interval}
+case "${CONTACT_AWARE_BUTTON_WINDOW_MODE}" in
+  contact_interval|kinematic_lift) ;;
+  *)
+    echo "[ERROR] CONTACT_AWARE_BUTTON_WINDOW_MODE must be exactly contact_interval or kinematic_lift. Got: ${CONTACT_AWARE_BUTTON_WINDOW_MODE}" >&2
+    exit 2
+    ;;
+esac
+
+CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-peak_height}
+case "${CONTACT_AWARE_CARRY_WINDOW_MODE}" in
+  rel_z|peak_height) ;;
+  *)
+    echo "[ERROR] CONTACT_AWARE_CARRY_WINDOW_MODE must be exactly rel_z or peak_height. Got: ${CONTACT_AWARE_CARRY_WINDOW_MODE}" >&2
+    exit 2
+    ;;
+esac
+
+CONTACT_AWARE_PEAK_HEIGHT_ALPHA=${CONTACT_AWARE_PEAK_HEIGHT_ALPHA:-0.91}
+if ! [[ "${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] \
+    || ! awk -v value="${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" 'BEGIN { exit !(value >= 0.0 && value <= 1.0) }'; then
+  echo "[ERROR] CONTACT_AWARE_PEAK_HEIGHT_ALPHA must be a finite number in [0, 1]. Got: ${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" >&2
+  exit 2
+fi
+
+CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS:-5}
+canonicalize_bounded_positive_integer \
+  CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS 4096 \
+  '[ERROR] CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS must be an integer in [1, 4096].' || exit
+
+CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  _contact_aware_sparse_root_command_mode_norm="${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE,,}"
+  _contact_aware_sparse_root_command_mode_norm="${_contact_aware_sparse_root_command_mode_norm//-/_}"
+  case "${_contact_aware_sparse_root_command_mode_norm}" in
+    tracking_error|tracking|default|robot_tracking_error)
+      CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=tracking_error
+      ;;
+    t1_aligned_segment|segment|segment_30)
+      CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=t1_aligned_segment
+      ;;
+    *)
+      echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error or t1_aligned_segment. Got: ${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" >&2
+      exit 2
+      ;;
+  esac
+  unset _contact_aware_sparse_root_command_mode_norm
+fi
+
+CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  canonicalize_bounded_positive_integer \
+    CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS 1000000 \
+    '[ERROR] CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS must be an integer in [1, 1000000].' || exit
+fi
+
+CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]] \
+    && { ! [[ "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] \
+      || ! awk -v value="${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" 'BEGIN { exit !(value >= 0.0 && value <= 180.0) }'; }; then
+  echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG must be a finite number in [0, 180]. Got: ${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" >&2
+  exit 2
+fi
+
+if [[ "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" == "t1_aligned_segment" && "${EXPORT_ONNX}" == "True" ]]; then
+  echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=t1_aligned_segment is not implemented by inference and cannot be used with EXPORT_ONNX=True." >&2
+  echo "[ERROR] Set EXPORT_ONNX=False to train this mode, or use tracking_error for a deployable policy." >&2
+  exit 2
+fi
+unset -f canonicalize_bounded_positive_integer
+
 # Distill object-carry generalist -> sparse-root-command student with depth perception access.
 #
 # Student policy observation (actor):
@@ -22,10 +173,11 @@ set -euo pipefail
 # - contact-aware-history: contact-aware plus 5-frame student/critic proprio history
 # - shoo7sr1-near03-debug: shoo7sr1 debug reproduction; only depth near
 #   differs from the saved shoo7sr1 config (0.3 instead of 0.1). Set
-#   SHOO7SR1_OBS_VARIANT to linvel, action_history, or linvel_action_history
-#   for observation ablations on top of that baseline.
+#   SHOO7SR1_OBS_VARIANT=baseline is currently the only implemented contract.
+#   Other aliases fail closed until they have distinct checkpointed architectures.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/reset_curriculum_contract.sh"
 cd "${SCRIPT_DIR}"
 source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
@@ -39,13 +191,12 @@ TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
+SCHEDULE_VARIANT_EXPLICIT=0
+[[ -n "${SCHEDULE_VARIANT+x}" ]] && SCHEDULE_VARIANT_EXPLICIT=1
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
 CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
 CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
-CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
-CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
-CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
 BAD_TRACKING_THRESHOLD_AUGMENT=${BAD_TRACKING_THRESHOLD_AUGMENT:-${BAD_TRACKING_THRESHOLD_MULTIPLIER:-${BAD_TRACKING_THRESHOLD_SCALE:-1.0}}}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
 SHOO7SR1_OBS_VARIANT=${SHOO7SR1_OBS_VARIANT:-baseline}
@@ -208,18 +359,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     default)
       SCHEDULE_VARIANT="default"
+      SCHEDULE_VARIANT_EXPLICIT=1
       shift
       ;;
     dagger_mix|dagger-mix|daggermix)
       SCHEDULE_VARIANT="dagger_mix"
+      SCHEDULE_VARIANT_EXPLICIT=1
       shift
       ;;
     dag_first|dag-first|dagger-first)
       SCHEDULE_VARIANT="dag_first"
+      SCHEDULE_VARIANT_EXPLICIT=1
       shift
       ;;
     ppo_first|ppo-first)
       SCHEDULE_VARIANT="ppo_first"
+      SCHEDULE_VARIANT_EXPLICIT=1
       shift
       ;;
     contact-aware|contact_aware|contactaware)
@@ -286,6 +441,12 @@ while [[ $# -gt 0 && "$1" != -* ]]; do
       POSITIONAL_RUN_NAME="${1#*:}"
       shift
       continue
+      ;;
+    exp:*|algo:*|simulator:*|terrain:*|perception:*|observation:*|action:*|reward:*|termination:*|randomization:*|command:*|curriculum:*|robot:*|nightly:*|logger:*)
+      # This is a Tyro component selector from the advertised extra-train-args
+      # tail, not a positional run name.  Leave it (and everything after it)
+      # for the exact train CLI preflight.
+      break
       ;;
   esac
 
@@ -402,6 +563,12 @@ DAGGER_LOSS_COEF_EXPLICIT=0
 [[ -n "${DAGGER_LOSS_COEF+x}" ]] && DAGGER_LOSS_COEF_EXPLICIT=1
 PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
 [[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
+FIXED_BC_EVAL_LOG_INTERVAL_EXPLICIT=0
+[[ -n "${FIXED_BC_EVAL_LOG_INTERVAL+x}" ]] && FIXED_BC_EVAL_LOG_INTERVAL_EXPLICIT=1
+FIXED_BC_GUARD_ENABLED_EXPLICIT=0
+[[ -n "${FIXED_BC_GUARD_ENABLED+x}" ]] && FIXED_BC_GUARD_ENABLED_EXPLICIT=1
+FIXED_BC_GUARD_START_EPOCH_EXPLICIT=0
+[[ -n "${FIXED_BC_GUARD_START_EPOCH+x}" ]] && FIXED_BC_GUARD_START_EPOCH_EXPLICIT=1
 USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=0
 [[ -n "${USE_ADAPTIVE_TIMESTEPS_SAMPLER+x}" ]] && USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
 SCHEDULE_NAME_EXPLICIT=0
@@ -432,8 +599,6 @@ CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT=0
 [[ -n "${CAMERA_WARP_ADDITIVE_NOISE_STD+x}" ]] && CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT=1
 CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT=0
 [[ -n "${CAMERA_WARP_DEPTH_OFFSET_STD+x}" ]] && CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT=1
-EXPORT_ONNX_EXPLICIT=0
-[[ -n "${EXPORT_ONNX+x}" ]] && EXPORT_ONNX_EXPLICIT=1
 MOTION_DIR_EXPLICIT=0
 [[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 
@@ -469,6 +634,10 @@ if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
 fi
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR_EXPLICIT=0
+[[ -n "${MASTER_ADDR:-}" ]] && MASTER_ADDR_EXPLICIT=1
+MASTER_PORT_EXPLICIT=0
+[[ -n "${MASTER_PORT:-}" ]] && MASTER_PORT_EXPLICIT=1
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 if ! [[ "${NNODES}" =~ ^[0-9]+$ ]] || (( NNODES < 1 )); then
   echo "[ERROR] NNODES must be a positive integer. Got: ${NNODES}" >&2
@@ -476,6 +645,15 @@ if ! [[ "${NNODES}" =~ ^[0-9]+$ ]] || (( NNODES < 1 )); then
 fi
 if ! [[ "${NODE_RANK}" =~ ^[0-9]+$ ]] || (( NODE_RANK < 0 || NODE_RANK >= NNODES )); then
   echo "[ERROR] NODE_RANK must be an integer in [0, NNODES). Got NODE_RANK=${NODE_RANK} NNODES=${NNODES}" >&2
+  exit 1
+fi
+if (( NNODES > 1 )) && (( MASTER_ADDR_EXPLICIT == 0 || MASTER_PORT_EXPLICIT == 0 )); then
+  echo "[ERROR] Multi-node launch requires explicit shared MASTER_ADDR and MASTER_PORT on every node." >&2
+  echo "[ERROR] Got NNODES=${NNODES} MASTER_ADDR=${MASTER_ADDR:-<empty>} MASTER_PORT=${MASTER_PORT:-<empty>}." >&2
+  exit 1
+fi
+if [[ -n "${MASTER_PORT:-}" ]] && { ! [[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] || (( MASTER_PORT < 1 || MASTER_PORT > 65535 )); }; then
+  echo "[ERROR] MASTER_PORT must be an integer in [1, 65535]. Got: ${MASTER_PORT}" >&2
   exit 1
 fi
 GLOBAL_WORLD_SIZE=$((NPROC * NNODES))
@@ -708,15 +886,23 @@ clip_ids = [
     for line in success_clips_file.read_text(encoding="utf-8").splitlines()
     if line.strip() and not line.strip().startswith("#")
 ]
+active_clip_ids = set(clip_ids)
 required_files = ("teacher_rollout_reference.npz", "left_wrist_contact_interval_steps.npy")
 
 def infer_clip_id(dir_name: str) -> str:
-    return dir_name.split("_", 1)[1].strip() if "_" in dir_name else dir_name.strip()
+    normalized = dir_name.strip()
+    prefix, separator, suffix = normalized.partition("_")
+    return suffix.strip() if separator and prefix.isdecimal() and suffix.strip() else normalized
 
 contact_dirs: dict[str, Path] = {}
 for candidate in sorted(contact_root.iterdir()):
     if candidate.is_dir():
-        contact_dirs.setdefault(infer_clip_id(candidate.name), candidate)
+        clip_id = candidate.name if candidate.name in active_clip_ids else infer_clip_id(candidate.name)
+        if clip_id in contact_dirs:
+            raise SystemExit(
+                f"Duplicate contact directories for {clip_id}: {contact_dirs[clip_id]}, {candidate}"
+            )
+        contact_dirs[clip_id] = candidate
 
 missing: list[str] = []
 for clip_id in clip_ids:
@@ -809,8 +995,14 @@ if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "$
 fi
 
 OBJECT_MAP_PATH="${MOTION_DIR}/_clip_object_urdf_map.json"
-OBJECT_BANK_WANDB_ENV="${MOTION_DIR}/_object_bank_wandb.env"
-rm -f "${OBJECT_BANK_WANDB_ENV}"
+unset HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT
+unset HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT
+unset HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT
+unset HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT
+unset HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT
+unset HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT
+unset HOLOSOMA_OBJECT_BANK_MOTION_DIR
+unset HOLOSOMA_OBJECT_BANK_OBJECT_MAP
 
 if [[ -f "${OBJECT_MAP_PATH}" ]]; then
   ACTIVE_OBJECT_BANK_INFO=$(
@@ -945,24 +1137,6 @@ for clip_id, urdf in zip(active_clip_ids, resolved_urdfs, strict=True):
         box_clip_count += 1
         box_urdfs.add(urdf)
 
-env_path = motion_dir / "_object_bank_wandb.env"
-env_path.write_text(
-    "\n".join(
-        [
-            f"HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT={len(active_clip_ids)}",
-            f"HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT={len(counts)}",
-            f"HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT={box_clip_count}",
-            f"HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT={len(box_urdfs)}",
-            f"HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT={omomo_clip_count}",
-            f"HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT={len(omomo_urdfs)}",
-            f"HOLOSOMA_OBJECT_BANK_MOTION_DIR={motion_dir}",
-            f"HOLOSOMA_OBJECT_BANK_OBJECT_MAP={object_map}",
-        ]
-    )
-    + "\n",
-    encoding="utf-8",
-)
-
 print(
     f"{len(active_clip_ids)}|{len(counts)}|{box_clip_count}|{len(box_urdfs)}|"
     f"{omomo_clip_count}|{len(omomo_urdfs)}|{top}"
@@ -973,11 +1147,16 @@ else
   ACTIVE_OBJECT_BANK_INFO=""
 fi
 
-if [[ -f "${OBJECT_BANK_WANDB_ENV}" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "${OBJECT_BANK_WANDB_ENV}"
-  set +a
+if [[ -n "${ACTIVE_OBJECT_BANK_INFO}" ]]; then
+  IFS='|' read -r ACTIVE_OBJECT_BANK_CLIPS ACTIVE_OBJECT_BANK_URDFS ACTIVE_OBJECT_BANK_BOX_MOTION ACTIVE_OBJECT_BANK_BOX_URDFS ACTIVE_OBJECT_BANK_OMOMO_MOTION ACTIVE_OBJECT_BANK_OMOMO_URDFS ACTIVE_OBJECT_BANK_TOP <<< "${ACTIVE_OBJECT_BANK_INFO}"
+  export HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT="${ACTIVE_OBJECT_BANK_CLIPS}"
+  export HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT="${ACTIVE_OBJECT_BANK_URDFS}"
+  export HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT="${ACTIVE_OBJECT_BANK_BOX_MOTION}"
+  export HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT="${ACTIVE_OBJECT_BANK_BOX_URDFS}"
+  export HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT="${ACTIVE_OBJECT_BANK_OMOMO_MOTION}"
+  export HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT="${ACTIVE_OBJECT_BANK_OMOMO_URDFS}"
+  export HOLOSOMA_OBJECT_BANK_MOTION_DIR="$(realpath -m "${MOTION_DIR}")"
+  export HOLOSOMA_OBJECT_BANK_OBJECT_MAP="$(realpath -m "${OBJECT_MAP_PATH}")"
 fi
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
@@ -995,6 +1174,7 @@ TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
+holosoma_canonicalize_positive_int32 NUM_LEARNING_ITERATIONS || exit
 PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
@@ -1007,57 +1187,91 @@ DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_START=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_
 DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END:-0.0}
 DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION:-3500}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
+FIXED_BC_GUARD_ENABLED=${FIXED_BC_GUARD_ENABLED:-False}
+FIXED_BC_GUARD_REFERENCE_END_EPOCH=${FIXED_BC_GUARD_REFERENCE_END_EPOCH:-600}
+FIXED_BC_GUARD_MAX_REFERENCE_RATIO=${FIXED_BC_GUARD_MAX_REFERENCE_RATIO:-2.0}
+FIXED_BC_GUARD_ABSOLUTE_MAX_MU_MSE=${FIXED_BC_GUARD_ABSOLUTE_MAX_MU_MSE:-0.160}
+FIXED_BC_GUARD_START_EPOCH=${FIXED_BC_GUARD_START_EPOCH:--1}
+FIXED_BC_GUARD_CONSECUTIVE_EVALS=${FIXED_BC_GUARD_CONSECUTIVE_EVALS:-3}
+case "$(echo "${FIXED_BC_GUARD_ENABLED}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) FIXED_BC_GUARD_ENABLED=True ;;
+  0|false|no|off) FIXED_BC_GUARD_ENABLED=False ;;
+  *)
+    echo "[ERROR] FIXED_BC_GUARD_ENABLED must be a boolean. Got: ${FIXED_BC_GUARD_ENABLED}" >&2
+    exit 2
+    ;;
+esac
 if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
   SCHEDULE_NAME="sparse_root_teacher_anchor_v3_step_mix"
 fi
 if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-  SCHEDULE_NOTES="No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule."
+  SCHEDULE_NOTES="No teacher rollout mix. PPO/DAgger use the default staircase blend: with start=1000, end=4500, start_coeff=0.0, target_coeff=0.9, and step=500, PPO remains 0.0 through iteration 1499, then rises in seven equal 0.9/7 (~0.128571) increments and reaches 0.9 at iteration 4500; with dagger_loss_coef=1.0, the effective BC weight moves from 1.0 to 0.1 over that schedule."
 fi
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
-START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
+START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-}
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
-FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
+FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
 ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
 CONTACT_EXPORT_ROOT=${CONTACT_EXPORT_ROOT:-${TEACHER_ROLLOUT_REFERENCE_ROOT:-}}
-CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-rel_z}
-CONTACT_AWARE_PEAK_HEIGHT_ALPHA=${CONTACT_AWARE_PEAK_HEIGHT_ALPHA:-0.91}
-CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS:-5}
 UNIFORM_T1_WINDOW_SAMPLING_ENABLED=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED:-True}
 UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS:-50}
 UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
+UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC=${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC:-}
+if [[ -n "${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}" ]]; then
+  if ! "${PYTHON_BIN}" - "${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}" <<'PY'
+import math
+import sys
+
+try:
+    value = float(sys.argv[1])
+except ValueError as exc:
+    raise SystemExit(1) from exc
+raise SystemExit(0 if math.isfinite(value) and 0.0 <= value <= 1.0 else 1)
+PY
+  then
+    echo "[ERROR] UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC must be a finite probability in [0, 1]. Got: ${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}" >&2
+    exit 2
+  fi
+fi
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
-EXPORT_ONNX=${EXPORT_ONNX:-True}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"}
 STUDENT_ACTOR_HIDDEN_DIMS=${STUDENT_ACTOR_HIDDEN_DIMS:-}
-DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
+DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-False}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
 RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-False}
 ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
+CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION:-False}
+case "$(echo "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True ;;
+  0|false|no|off) CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=False ;;
+  *)
+    echo "[ERROR] CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION must be a boolean. Got: ${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" >&2
+    exit 2
+    ;;
+esac
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
 VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 
 if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
-  SCHEDULE_VARIANT="ppo_first"
+  if [[ "${SCHEDULE_VARIANT_EXPLICIT}" -eq 0 ]]; then
+    SCHEDULE_VARIANT="ppo_first"
+  fi
   if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
     STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']"
   fi
   if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
     USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
-  fi
-  CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-peak_height}
-  if [[ "${CONTACT_AWARE_CARRY_WINDOW_MODE}" == "rel_z" ]]; then
-    CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
   fi
   if [[ "${CONTACT_AWARE_HISTORY}" == "1" ]]; then
     if [[ "${STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
@@ -1089,17 +1303,23 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   # Debug ablation: reproduce shoo7sr1, except depth near is intentionally 0.3.
   _shoo7_obs_variant="$(echo "${SHOO7SR1_OBS_VARIANT}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
   case "${_shoo7_obs_variant}" in
-    baseline|none|no_linvel_no_actions|no_linvel_no_action|proprio_no_linvel)
+    baseline|none|proprio_no_linvel)
       SHOO7SR1_OBS_VARIANT=baseline
       _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"
+      ;;
+    no_linvel_no_actions|no_linvel_no_action)
+      echo "[ERROR] SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}' is misleading: the saved shoo7sr1 baseline uses actor_obs_proprio_with_actions_no_linvel and therefore includes action history." >&2
+      echo "[ERROR] Use baseline to reproduce the saved with-actions contract; a true no-actions architecture is not implemented." >&2
+      exit 2
       ;;
     linvel|linear_velocity|base_lin_vel|base_linear_velocity)
       echo "[ERROR] SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}' would include base/root linear velocity in student observations. Use baseline or action_history." >&2
       exit 2
       ;;
     action_history|actions_history|action_hist|actions_hist)
-      SHOO7SR1_OBS_VARIANT=action_history
-      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"
+      echo "[ERROR] SHOO7SR1_OBS_VARIANT=action_history is not implemented: it currently aliases the baseline actor observation and would not be a real ablation." >&2
+      echo "[ERROR] Define a distinct, checkpoint-compatible action-history observation contract before enabling this variant." >&2
+      exit 2
       ;;
     linvel_action_history|linear_velocity_action_history|base_lin_vel_action_history|both)
       echo "[ERROR] SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}' would include base/root linear velocity in student observations. Use baseline or action_history." >&2
@@ -1116,7 +1336,9 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   fi
 
   PERCEPTION_PRESET="camera_depth_d435i"
-  EXPORT_ONNX=True
+  if [[ "${EXPORT_ONNX_EXPLICIT}" -eq 0 ]]; then
+    EXPORT_ONNX=True
+  fi
   if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
     STUDENT_ACTOR_INPUTS="${_shoo7_student_actor_inputs}"
   fi
@@ -1292,9 +1514,11 @@ case "${SCHEDULE_VARIANT}" in
         TEACHER_ACTION_MIX_RATIO_END_ITERATION="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
       fi
     fi
-    if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" && -n "${TEACHER_ACTION_MIX_RATIO_END}" ]]; then
-      TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO_START}"
-    fi
+    # Keep the static ratio independent from the scheduled ratio.  Copying the
+    # schedule's first value into the static field makes two configuration
+    # sources appear enabled at once; PPO correctly rejects that ambiguity and
+    # older code silently ignored the static value.  The live ratio is already
+    # initialized from teacher_action_mix_ratio_start inside PPO.
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
       SCHEDULE_NAME="old_tracker_dagger_action_mix"
     fi
@@ -1333,13 +1557,13 @@ case "${SCHEDULE_VARIANT}" in
       PPO_START_EPOCH=0
     fi
     if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
-      DAGGER_END_EPOCH=6300
+      DAGGER_END_EPOCH=4900
     fi
     if [[ "${PPO_START_COEFF_EXPLICIT}" -eq 0 ]]; then
       PPO_START_COEFF=0.0
     fi
     if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
-      PPO_TARGET_COEFF=0.9
+      PPO_TARGET_COEFF=0.7
     fi
     if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
       PPO_SCHEDULE_STEP_EPOCHS=700
@@ -1348,10 +1572,27 @@ case "${SCHEDULE_VARIANT}" in
       DAGGER_LOSS_COEF=1.0
     fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
+      SCHEDULE_NAME="sparse_root_teacher_anchor_v5_ppo070_fixed_bc_guard"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="PPO-first hybrid: DAgger/BC is fully weighted at iteration 0. PPO starts at 0.0 and increases by 0.1 every 700 iterations until 0.9 at 6300; effective DAgger/BC weight starts at 1.0 and decreases to 0.1."
+      SCHEDULE_NOTES="PPO-first hybrid selected from the r21 fixed-set Pareto trace: DAgger/BC is fully weighted at iteration 0, PPO increases by 0.1 every 700 iterations to 0.7 at 4900, and the persistent BC weight remains 0.3. The fixed-BC guard freezes its pure-BC reference by iteration 600 and fails closed on sustained regression."
+    fi
+    if [[ "${FIXED_BC_EVAL_LOG_INTERVAL_EXPLICIT}" -eq 0 ]]; then
+      FIXED_BC_EVAL_LOG_INTERVAL=100
+    fi
+    if [[ "${FIXED_BC_GUARD_ENABLED_EXPLICIT}" -eq 0 ]]; then
+      if (( DAGGER_END_EPOCH > FIXED_BC_GUARD_REFERENCE_END_EPOCH )); then
+        FIXED_BC_GUARD_ENABLED=True
+      else
+        FIXED_BC_GUARD_ENABLED=False
+      fi
+    fi
+    if [[ "${FIXED_BC_GUARD_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      if [[ "${FIXED_BC_GUARD_ENABLED}" == True ]]; then
+        FIXED_BC_GUARD_START_EPOCH="${DAGGER_END_EPOCH}"
+      else
+        FIXED_BC_GUARD_START_EPOCH=-1
+      fi
     fi
     ;;
   *)
@@ -1365,7 +1606,11 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
     SCHEDULE_NAME="${SCHEDULE_NAME}_contact_aware"
   fi
   if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection by default: command stays zero before the object is stably near peak carry height and after it stably drops below that height band."
+    if [[ "${CONTACT_AWARE_CARRY_WINDOW_MODE}" == "peak_height" ]]; then
+      SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection: command stays zero before the object is stably near peak carry height and after it stably drops below that height band."
+    else
+      SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses object-root relative-height carry-window detection (rel_z)."
+    fi
   fi
   if [[ "${CONTACT_AWARE_HISTORY}" == "1" ]]; then
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
@@ -1377,15 +1622,13 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   fi
 fi
 
-START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
-
 BAD_TRACKING_THRESHOLD_AUGMENT_NORM="$(normalize_bad_tracking_threshold_augment "${BAD_TRACKING_THRESHOLD_AUGMENT}")"
 BAD_TRACKING_REF_POS_THRESHOLD="$(scale_threshold 0.5 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
 BAD_TRACKING_REF_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
 BAD_TRACKING_BODY_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
 BAD_TRACKING_OBJECT_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
 BAD_TRACKING_OBJECT_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
-FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
+holosoma_configure_all_reset_curricula NUM_LEARNING_ITERATIONS || exit
 
 TEACHER_REF_RUN_ID="5vlz6pj8"
 TEACHER_REF_MODEL_FILE="model_24000.pt"
@@ -1440,10 +1683,11 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
       TEACHER_PERCEPTION_OBS_KEY="teacher_perception_obs"
     fi
     if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
-      TEACHER_ACTOR_OBS_HISTORY_LENGTH=""
+      TEACHER_ACTOR_OBS_HISTORY_LENGTH="1"
     fi
     append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_teacher_compat for exact legacy ordering"
     append_teacher_compat_note "teacher now consumes ${TEACHER_PERCEPTION_PRESET} via ${TEACHER_PERCEPTION_OBS_KEY}"
+    append_teacher_compat_note "teacher actor observation history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} for 5vlz6pj8 checkpoint compatibility"
     ;;
   u5lguxvl_generalist)
     if [[ "${TEACHER_OBS_KEYS_EXPLICIT}" -eq 0 ]]; then
@@ -1471,6 +1715,81 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     exit 1
     ;;
 esac
+
+if [[ -z "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
+  if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
+    echo "[ERROR] Cannot infer teacher observation history before environment construction from an unrecognized remote checkpoint: ${TEACHER_CHECKPOINT}" >&2
+    echo "[ERROR] Set TEACHER_ACTOR_OBS_HISTORY_LENGTH explicitly, or select a recognized TEACHER_COMPAT_PROFILE." >&2
+    exit 2
+  fi
+  if [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
+    echo "[ERROR] Teacher checkpoint is not a readable local file for metadata inspection: ${TEACHER_CHECKPOINT}" >&2
+    echo "[ERROR] Set TEACHER_ACTOR_OBS_HISTORY_LENGTH explicitly." >&2
+    exit 2
+  fi
+  TEACHER_ACTOR_OBS_HISTORY_LENGTH=$(
+    "${PYTHON_BIN}" - "${TEACHER_CHECKPOINT}" "${TEACHER_OBS_KEYS}" <<'PY'
+from __future__ import annotations
+
+import ast
+import os
+import sys
+
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
+
+checkpoint_path, obs_keys_raw = sys.argv[1:3]
+checkpoint, _ = load_verified_torch_checkpoint(
+    checkpoint_path,
+    expected_sha256=os.environ.get("TEACHER_CHECKPOINT_EXPECTED_SHA256") or None,
+    map_location="cpu",
+)
+try:
+    groups = checkpoint["experiment_config"]["observation"]["groups"]
+except (KeyError, TypeError) as exc:
+    raise SystemExit(
+        "[ERROR] Teacher checkpoint has no observation-group metadata; "
+        "set TEACHER_ACTOR_OBS_HISTORY_LENGTH explicitly."
+    ) from exc
+
+try:
+    parsed_keys = ast.literal_eval(obs_keys_raw)
+except Exception:
+    parsed_keys = [part.strip().strip("'\"") for part in obs_keys_raw.split(",") if part.strip()]
+if isinstance(parsed_keys, str):
+    obs_keys = [parsed_keys]
+else:
+    obs_keys = list(parsed_keys)
+if not obs_keys:
+    raise SystemExit("[ERROR] TEACHER_OBS_KEYS is empty")
+
+history_by_key = {}
+for key in obs_keys:
+    group = groups.get(str(key)) if isinstance(groups, dict) else None
+    if not isinstance(group, dict) or "history_length" not in group:
+        raise SystemExit(
+            f"[ERROR] Teacher checkpoint metadata has no history_length for observation group {key!r}; "
+            "set TEACHER_ACTOR_OBS_HISTORY_LENGTH explicitly."
+        )
+    history_by_key[str(key)] = group["history_length"]
+
+history_values = set(history_by_key.values())
+if len(history_values) != 1:
+    raise SystemExit(
+        "[ERROR] Teacher observation groups have different saved history lengths "
+        f"{history_by_key!r}; the launcher cannot represent this with one override."
+    )
+history = history_values.pop()
+if not isinstance(history, int) or history < 1:
+    raise SystemExit(f"[ERROR] Invalid teacher history metadata: {history_by_key!r}")
+print(history)
+PY
+  )
+  append_teacher_compat_note "teacher actor observation history length inferred as ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} from checkpoint metadata"
+fi
+if ! [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] TEACHER_ACTOR_OBS_HISTORY_LENGTH must be a positive integer. Got: ${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" >&2
+  exit 2
+fi
 
 if [[ -n "${TEACHER_COMPAT_NOTES_AUTO}" ]]; then
   if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
@@ -1531,6 +1850,7 @@ echo "[INFO] export_onnx=${EXPORT_ONNX}"
 echo "[INFO] shoo7sr1_near03_debug=${SHOO7SR1_NEAR03_DEBUG}"
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   echo "[INFO] shoo7sr1_obs_variant=${SHOO7SR1_OBS_VARIANT}"
+  echo "[INFO] shoo7sr1_baseline_action_semantics=actor_obs_proprio_with_actions_no_linvel_includes_current_action_history"
 fi
 if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
   echo "[INFO] camera_pitch_deg=${CAMERA_PITCH_DEG}"
@@ -1559,6 +1879,8 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nnodes=${NNODES} node_
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
+echo "[INFO] contact_aware_button_window_mode=${CONTACT_AWARE_BUTTON_WINDOW_MODE}"
+echo "[INFO] contact_aware_carry_window_mode=${CONTACT_AWARE_CARRY_WINDOW_MODE}"
 echo "[INFO] contact_aware_history=${CONTACT_AWARE_HISTORY} history_length=${CONTACT_AWARE_HISTORY_LENGTH}"
 if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
   echo "[INFO] contact_aware_sparse_root_command_mode=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
@@ -1623,6 +1945,7 @@ else
   echo "[INFO] ppo_start_noise_std=<disabled>"
 fi
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
+echo "[INFO] fixed_bc_guard enabled=${FIXED_BC_GUARD_ENABLED} reference_end_epoch=${FIXED_BC_GUARD_REFERENCE_END_EPOCH} max_reference_ratio=${FIXED_BC_GUARD_MAX_REFERENCE_RATIO} absolute_max_mu_mse=${FIXED_BC_GUARD_ABSOLUTE_MAX_MU_MSE} start_epoch=${FIXED_BC_GUARD_START_EPOCH} consecutive_evals=${FIXED_BC_GUARD_CONSECUTIVE_EVALS}"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
@@ -1634,11 +1957,17 @@ if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
     echo "[INFO] offline_wrist_region_names=${OFFLINE_WRIST_REGION_NAMES}"
   fi
 fi
-echo "[INFO] uniform_t1_window_sampling=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED} half_width=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS} density_boost=${UNIFORM_T1_WINDOW_DENSITY_BOOST}"
+echo "[INFO] uniform_t1_window_sampling=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED} half_width=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS} density_boost=${UNIFORM_T1_WINDOW_DENSITY_BOOST} target_sample_frac=${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC:-<unset>}"
+case "$(echo "${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    echo "[INFO] adaptive_sampling_composition=failure_density_reweighted_by_contact_t1_window start_zero=explicit_mixture metrics=effective_distribution"
+    ;;
+esac
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
+echo "[INFO] contact_interval_runtime_prepend_compensation=${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}"
 echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
 echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS}"
 echo "[INFO] dagger_ignore_episode_initial_steps=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}"
@@ -1675,13 +2004,30 @@ if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   for _raw_teacher_obs_key in "${_teacher_obs_key_list[@]}"; do
     _teacher_obs_group="$(echo "${_raw_teacher_obs_key}" | tr -d "[]'\"[:space:]")"
     if [[ -n "${_teacher_obs_group}" && "${_teacher_obs_group}" == actor_obs* ]]; then
+      if [[ "${HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED:-0}" == 1 ]]; then
+        case "${_teacher_obs_group}" in
+          actor_obs_root_contact_aware|actor_obs_pickup_button|actor_obs_drop_button|actor_obs_proprio_with_actions_no_linvel)
+            # The dual wrapper appends one canonical history=1 value for each
+            # selected actor group at the very end of argv.  Do not create a
+            # duplicate option here; validate_train_cli rejects duplicates.
+            continue
+            ;;
+        esac
+      fi
       EXTRA_DISTILL_ARGS+=(
         --observation.groups."${_teacher_obs_group}".history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
       )
     fi
   done
 fi
-if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
+if [[ "${HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED:-0}" == 1 ]]; then
+  readonly _dual_button_history_actor_contract="['actor_obs_root_contact_aware','actor_obs_pickup_button','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
+  if [[ "${STUDENT_ACTOR_INPUTS//[[:space:]]/}" != "${_dual_button_history_actor_contract}" \
+        || "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" != 1 ]]; then
+    echo "[ERROR] HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED=1 requires the exact dual-button actor and STUDENT_PROPRIO_HISTORY_LENGTH=1." >&2
+    exit 2
+  fi
+elif [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --observation.groups.actor_obs_proprio.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
     --observation.groups.actor_obs_proprio_no_linvel.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
@@ -1689,6 +2035,9 @@ if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
     --observation.groups.actor_obs_proprio_no_linvel_actions.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
   )
 fi
+# This marker is a launcher-internal construction guard, not training state.
+# The four canonical values already travel in the wrapper-owned argv tail.
+unset HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED
 if [[ -n "${STUDENT_ACTION_HISTORY_LENGTH:-}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --observation.groups.actor_obs_actions.history-length="${STUDENT_ACTION_HISTORY_LENGTH}"
@@ -1731,9 +2080,10 @@ if [[ "${STUDENT_POLICY_TYPE}" == "flow" ]]; then
     --algo.config.module-dict.actor.layer-config.flow-inference-noise-std="${STUDENT_FLOW_INFERENCE_NOISE_STD}"
   )
 fi
-if [[ "${EXPORT_ONNX_EXPLICIT}" -eq 1 || "${EXPORT_ONNX}" == "False" || "${EXPORT_ONNX}" == "false" ]]; then
-  EXTRA_DISTILL_ARGS+=(--training.export-onnx="${EXPORT_ONNX}")
-fi
+# This canonical launcher-owned value must always reach the real CLI.  Relying
+# on a downstream default would let the audit output and executed policy
+# contract diverge when defaults change.
+EXTRA_DISTILL_ARGS+=(--training.export-onnx="${EXPORT_ONNX}")
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-lin-vel="[0.5, 0.5, 0.2]"
@@ -1861,6 +2211,13 @@ if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
   OBJECT_GEOMETRY_MODE_ENV=(HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}")
 fi
 
+UNIFORM_T1_TARGET_ARGS=()
+if [[ -n "${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}" ]]; then
+  UNIFORM_T1_TARGET_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-target-sample-frac="${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}"
+  )
+fi
+
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
@@ -1891,16 +2248,23 @@ exec env \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   DAGGER_MATCH_STD="${DAGGER_MATCH_STD}" \
   ENTROPY_COEF="${ENTROPY_COEF}" \
+  HOLOSOMA_VALIDATED_RESET_CURRICULUM=1 \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
   START_AT_TIMESTEP_ZERO_PROB_END="${START_AT_TIMESTEP_ZERO_PROB_END}" \
   START_AT_TIMESTEP_ZERO_PROB_START_ITER="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
   START_AT_TIMESTEP_ZERO_PROB_END_ITER="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER="${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
   UNIFORM_T1_WINDOW_SAMPLING_ENABLED="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
   UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
   UNIFORM_T1_WINDOW_DENSITY_BOOST="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \
+  UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC="${UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC}" \
   HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
   ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND}" \
   DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
+  CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION="${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" \
   ENABLE_DEFAULT_POSE_APPEND="${ENABLE_DEFAULT_POSE_APPEND}" \
   DEFAULT_POSE_APPEND_DURATION_S="${DEFAULT_POSE_APPEND_DURATION_S}" \
   VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
@@ -1927,24 +2291,26 @@ exec env \
     "${CRITIC_PERCEPTION_ARGS[@]}" \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
+    --algo.config.distill.fixed-bc-guard-enabled="${FIXED_BC_GUARD_ENABLED}" \
+    --algo.config.distill.fixed-bc-guard-reference-end-epoch="${FIXED_BC_GUARD_REFERENCE_END_EPOCH}" \
+    --algo.config.distill.fixed-bc-guard-max-reference-ratio="${FIXED_BC_GUARD_MAX_REFERENCE_RATIO}" \
+    --algo.config.distill.fixed-bc-guard-absolute-max-mu-mse="${FIXED_BC_GUARD_ABSOLUTE_MAX_MU_MSE}" \
+    --algo.config.distill.fixed-bc-guard-start-epoch="${FIXED_BC_GUARD_START_EPOCH}" \
+    --algo.config.distill.fixed-bc-guard-consecutive-evals="${FIXED_BC_GUARD_CONSECUTIVE_EVALS}" \
     --algo.config.distill.ppo-start-coeff="${PPO_START_COEFF}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
     --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
     --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" \
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode="${CONTACT_AWARE_BUTTON_WINDOW_MODE}" \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode="${CONTACT_AWARE_CARRY_WINDOW_MODE}" \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-alpha="${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps="${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-sampling-enabled="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-half-width-steps="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-density-boost="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
-    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
-    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
-    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
-    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
+    --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation="${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" \
+    "${UNIFORM_T1_TARGET_ARGS[@]}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     "${EXTRA_DISTILL_ARGS[@]}" \
     "${PERCEPTION_OVERRIDE_ARGS[@]}" \

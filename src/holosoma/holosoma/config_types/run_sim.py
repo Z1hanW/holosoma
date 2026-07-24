@@ -26,17 +26,6 @@ from holosoma.config_types.terrain import TerrainManagerCfg
 from holosoma.config_types.video import VideoConfig
 
 
-def _with_hyphen_aliases(defaults: dict[str, object]) -> dict[str, object]:
-    """Add hyphenated aliases for subcommand keys to match docs/scripts."""
-    aliased: dict[str, object] = {}
-    for key, value in defaults.items():
-        aliased[key] = value
-        alias = key.replace("_", "-")
-        if alias not in aliased:
-            aliased[alias] = value
-    return aliased
-
-
 def default_training_config() -> TrainingConfig:
     """Create minimal training config for direct simulation."""
     return TrainingConfig(num_envs=1, headless=False, seed=42, torch_deterministic=False)
@@ -67,11 +56,36 @@ class MotionInitConfig:
     """Simulator actor name for the initialized object."""
 
 
-# Use sim2sim-optimized configs from config_values.run_sim
-SIMULATOR_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.run_sim.DEFAULTS)
-ROBOT_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.robot.DEFAULTS)
-TERRAIN_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.terrain.DEFAULTS)
-PERCEPTION_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.perception.DEFAULTS)
+@dataclass(frozen=True)
+class DirectPerceptionRandomizationConfig:
+    """Camera-only reset randomization reproduced by direct split simulation.
+
+    Direct simulation deliberately does not run the checkpoint's robot/object
+    domain randomizers.  These fields carry only the effective camera producer
+    distribution required to reproduce a perception policy's input contract.
+    Because training and direct simulation consume a process-global RNG with
+    different batch sizes/call interleavings, this does not promise the same
+    per-episode sample path as the vectorized training process.
+    """
+
+    enabled: bool = False
+    # Lists are intentional: authenticated contracts are serialized as strict
+    # JSON arrays, and Tyro's literal parser does not coerce JSON lists into
+    # nested tuple annotations.
+    translation_range: dict[str, list[float]] | None = None
+    rotation_range_deg: dict[str, list[float]] | None = None
+    noise_std_mult_range: list[float] | None = None
+    noise_drop_prob_range: list[float] | None = None
+
+
+# Tyro already normalizes underscores and hyphens in subcommand names.  Keep
+# one canonical registration per preset; duplicate aliases are normalized to
+# the same name and otherwise trigger an ambiguous last-registration-wins
+# warning while constructing every direct-simulation parser.
+SIMULATOR_DEFAULTS = dict(holosoma.config_values.run_sim.DEFAULTS)
+ROBOT_DEFAULTS = dict(holosoma.config_values.robot.DEFAULTS)
+TERRAIN_DEFAULTS = dict(holosoma.config_values.terrain.DEFAULTS)
+PERCEPTION_DEFAULTS = dict(holosoma.config_values.perception.DEFAULTS)
 
 
 @dataclass(frozen=True)
@@ -80,8 +94,8 @@ class RunSimConfig:
     Minimal configuration for direct simulation via run_sim.py.
 
     Usage Examples:
-        python -m holosoma.run_sim simulator:mujoco robot:t1 terrain:terrain-locomotion-plane
-        python -m holosoma.run_sim simulator:isaacgym robot:g1 terrain:terrain-locomotion-mix
+        python -m holosoma.run_sim simulator:mujoco robot:t1-29dof-waist-wrist terrain:terrain-locomotion-plane
+        python -m holosoma.run_sim simulator:isaacgym robot:g1-29dof terrain:terrain-locomotion-mix
     """
 
     # Core components for simulation - using Annotated subcommands like ExperimentConfig
@@ -104,6 +118,20 @@ class RunSimConfig:
         PerceptionConfig,
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(PERCEPTION_DEFAULTS)),
     ] = holosoma.config_values.perception.none
+
+    perception_randomization: DirectPerceptionRandomizationConfig = field(
+        default_factory=DirectPerceptionRandomizationConfig
+    )
+    """Authenticated camera-only reset distribution for the perception producer."""
+
+    perception_producer_tick_dt: float | None = None
+    """Training control-step period used to advance the direct perception producer."""
+
+    perception_allow_mujoco_noise: bool = False
+    """Re-enable the checkpoint's effective camera noise in direct MuJoCo production."""
+
+    perception_contract_envelope_b64: str | None = None
+    """Canonical base64 JSON envelope carrying the ONNX perception contract and SHA-256."""
 
     # Minimal configs needed for FullSimConfig
     training: TrainingConfig = field(default_factory=default_training_config)

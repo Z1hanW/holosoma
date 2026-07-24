@@ -12,8 +12,10 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_videomimic,
     g1_29dof_wbt_observation_w_object_legacy,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
     g1_29dof_wbt_observation_w_object,
+    g1_29dof_wbt_observation_w_object_teacher_linvel,
 )
 
 none = None
@@ -29,7 +31,9 @@ DEFAULTS = {
     "g1_29dof_wbt_terrain_transformer": g1_29dof_wbt_observation_terrain_transformer,
     "g1_29dof_wbt_videomimic": g1_29dof_wbt_observation_videomimic,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_observation_w_object,
+    "g1_29dof_wbt_w_object_teacher_linvel": g1_29dof_wbt_observation_w_object_teacher_linvel,
     "g1_29dof_wbt_w_object_legacy": g1_29dof_wbt_observation_w_object_legacy,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
 }

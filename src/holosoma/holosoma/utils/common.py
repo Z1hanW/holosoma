@@ -29,12 +29,63 @@
 import logging
 import os
 import random
-import sys
 from datetime import datetime
 
 import numpy as np
 
 from holosoma.utils.safe_torch_import import torch
+
+
+_MAX_NUMPY_LEGACY_SEED = 2**32 - 1
+
+
+def validate_numpy_seed(seed: int) -> int:
+    """Validate a seed accepted by NumPy's process-global MT19937 API."""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= _MAX_NUMPY_LEGACY_SEED:
+        raise ValueError(
+            f"Seed must be an integer in [0, {_MAX_NUMPY_LEGACY_SEED}], got {seed!r}."
+        )
+    return seed
+
+
+def rank_training_seed(base_seed: int, *, world_size: int, global_rank: int) -> int:
+    """Return the collision-free rank seed shared by every simulation entrypoint."""
+
+    if isinstance(base_seed, bool) or not isinstance(base_seed, int):
+        raise ValueError(f"training.seed must be an integer, got {base_seed!r}.")
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size < 1:
+        raise ValueError(f"WORLD_SIZE must be a positive integer, got {world_size!r}.")
+    if (
+        isinstance(global_rank, bool)
+        or not isinstance(global_rank, int)
+        or not 0 <= global_rank < world_size
+    ):
+        raise ValueError(
+            f"RANK must be an integer in [0, WORLD_SIZE), got rank={global_rank!r}, "
+            f"world_size={world_size}."
+        )
+    maximum_rank_seed = base_seed + world_size - 1
+    if base_seed < 0 or maximum_rank_seed > _MAX_NUMPY_LEGACY_SEED:
+        raise ValueError(
+            "training.seed plus the global-rank offset must stay in NumPy's "
+            f"[0, {_MAX_NUMPY_LEGACY_SEED}] range: base_seed={base_seed}, "
+            f"world_size={world_size}, maximum_rank_seed={maximum_rank_seed}."
+        )
+    return base_seed + global_rank
+
+
+def validate_deterministic_runtime(torch_deterministic: bool) -> None:
+    """Validate CUDA determinism prerequisites before any RNG/CUDA mutation."""
+
+    if torch_deterministic and os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in {
+        ":4096:8",
+        ":16:8",
+    }:
+        raise RuntimeError(
+            "Deterministic CUDA execution requires CUBLAS_WORKSPACE_CONFIG=:4096:8 "
+            "or :16:8 before Python/CUDA startup."
+        )
 
 
 # if there's overlap between args_list and commandline input, use commandline input
@@ -91,25 +142,35 @@ def get_time_stamp():
 
 
 def seeding(seed=0, torch_deterministic=False):
+    seed = validate_numpy_seed(seed)
+    validate_deterministic_runtime(bool(torch_deterministic))
     logger = logging.getLogger()
     logger.info("Setting seed: %d", seed)
 
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+    if not os.environ.get("PYTHONHASHSEED", "").strip():
+        logger.warning(
+            "PYTHONHASHSEED was not exported before this interpreter started; "
+            "Python hash ordering is outside the configured training seed."
+        )
+
     if torch_deterministic:
         # refer to https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
         torch.use_deterministic_algorithms(True)
     else:
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
+        # Make repeated embedded train/eval calls authoritative.  Otherwise a
+        # prior deterministic run leaves this process in strict mode even when
+        # the next config explicitly disables it.
+        torch.use_deterministic_algorithms(False)
 
     return seed
 

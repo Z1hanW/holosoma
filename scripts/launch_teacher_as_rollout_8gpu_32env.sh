@@ -4,6 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${SCRIPT_DIR}"
 
+cat >&2 <<'EOF'
+[ERROR] launch_teacher_as_rollout_8gpu_32env.sh is quarantined.
+It rebuilds consumable outputs in place, resolves the teacher independently per
+shard, and records hard-coded metadata that can disagree with launch overrides.
+Use scripts/launch_teacher_as_realmesh_rollout.sh; it enforces immutable teacher
+identity, shard-summary equality, and atomic content-addressed publication.
+EOF
+exit 2
+
 RUN_ID="${RUN_ID:-as_teacher_rollout_8gpu32env_$(date -u +%Y%m%d_%H%M%S)_bcleb5oi_model58000_195_final0p5_primitiveproj}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
 PER_GPU_ENVS="${PER_GPU_ENVS:-32}"

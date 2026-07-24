@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import numbers
 import os
 import re
+import sys
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
@@ -22,9 +26,23 @@ from holosoma.config_types.command import (
 )
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.managers.termination.manager import TerminationManager
 from holosoma.utils.clip_sampling import build_prefix_mask, piecewise_constant_schedule_value, project_group_weights
+from holosoma.utils.contact_intervals import (
+    CONTACT_INTERVAL_FALLBACK_FILES as _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_FALLBACK_FILES,
+    convert_contact_interval_timebase as _convert_contact_interval_timebase,
+    infer_contact_export_clip_id as _infer_contact_export_clip_id,
+    normalize_contact_interval_pair as _normalize_contact_interval_pair,
+    resolve_contact_export_clip_id as _resolve_contact_export_clip_id,
+    select_primary_contact_interval as _select_primary_contact_interval,
+)
 from holosoma.utils.path import resolve_data_file_path
-from holosoma.utils.rank_local_shards import resolve_rank_local_motion_path
+from holosoma.utils.motion_transition_source import (
+    MOTION_TRANSITION_SOURCE_KEY,
+    canonical_motion_transition_source,
+    resolve_motion_transition_source_for_motion_path,
+)
+from holosoma.utils.rank_local_shards import current_rank_local_shard_metadata, resolve_rank_local_motion_path
 from holosoma.utils.rotations import (
     get_euler_xyz,
     normalize_angle,
@@ -44,7 +62,151 @@ from holosoma.utils.simulator_config import SimulatorType
 
 _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
 _RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
+_LIFT_DIAGNOSTIC_OBJECT_LIFT_HEIGHT_THRESHOLD = 0.08
+_LIFT_DIAGNOSTIC_MIN_CONTACT_FORCE = 1.0
+_LIFT_DIAGNOSTIC_FALSE_POSITIVE_MAX_WORLD_LIFT = 0.04
+_LIFT_DIAGNOSTIC_FALSE_POSITIVE_MIN_ROOT_DROP = 0.05
 _CLIP_PICKUP_LIFT_RATIO_THRESHOLD = 0.35
+_STANDARD_MOTION_END_TERM_PATH = "holosoma.managers.termination.terms.wbt:motion_ends"
+_ENABLED_ENV_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
+MAX_MOTION_TRANSITION_STEPS = 4096
+MOTION_TRANSITION_CONTRACT_VERSION = 1
+_MOTION_TRANSITION_SOURCE_SEMANTICS = {
+    "single_clip_static",
+    "global_multi_clip_runtime",
+}
+_CURRICULUM_LIVE_TRACKING_ERROR_KEYS = frozenset(
+    {
+        "motion/error_ref_pos",
+        "motion/error_ref_rot",
+        "motion/error_ref_lin_vel",
+        "motion/error_ref_ang_vel",
+        "motion/error_body_pos",
+        "motion/error_body_rot",
+        "motion/error_body_lin_vel",
+        "motion/error_body_ang_vel",
+        "motion/error_joint_pos",
+        "motion/error_joint_vel",
+        "motion/error_object_ref_pos",
+        "motion/error_object_ref_rot",
+        "motion/error_object_ref_lin_vel",
+    }
+)
+
+
+def canonical_motion_transition_contract(contract: Any) -> dict[str, Any]:
+    """Validate and canonicalize the effective training motion-transition contract."""
+
+    if not isinstance(contract, dict):
+        raise ValueError("motion_transition_contract must be a dictionary.")
+    expected_keys = {"version", "control_dt_s", "source_semantics", "prepend", "append"}
+    if set(contract) != expected_keys:
+        raise ValueError(
+            "motion_transition_contract must contain exactly "
+            f"{sorted(expected_keys)}; got {sorted(map(str, contract))}."
+        )
+
+    version = contract["version"]
+    if type(version) is not int or version != MOTION_TRANSITION_CONTRACT_VERSION:
+        raise ValueError(
+            "motion_transition_contract.version must equal integer "
+            f"{MOTION_TRANSITION_CONTRACT_VERSION}, got {version!r}."
+        )
+    control_dt = contract["control_dt_s"]
+    if (
+        isinstance(control_dt, bool)
+        or not isinstance(control_dt, numbers.Real)
+        or not math.isfinite(float(control_dt))
+        or float(control_dt) <= 0.0
+    ):
+        raise ValueError(
+            "motion_transition_contract.control_dt_s must be a finite positive real number, "
+            f"got {control_dt!r}."
+        )
+    source_semantics = contract["source_semantics"]
+    if type(source_semantics) is not str or source_semantics not in _MOTION_TRANSITION_SOURCE_SEMANTICS:
+        raise ValueError(
+            "motion_transition_contract.source_semantics must be exactly "
+            f"one of {sorted(_MOTION_TRANSITION_SOURCE_SEMANTICS)}, got {source_semantics!r}."
+        )
+
+    def canonical_phase(name: str, *, allowed_implementations: set[str]) -> dict[str, Any]:
+        phase = contract[name]
+        expected_phase_keys = {"implementation", "applied", "steps"}
+        if not isinstance(phase, dict) or set(phase) != expected_phase_keys:
+            actual = sorted(map(str, phase)) if isinstance(phase, dict) else type(phase).__name__
+            raise ValueError(
+                f"motion_transition_contract.{name} must contain exactly "
+                f"{sorted(expected_phase_keys)}; got {actual}."
+            )
+        implementation = phase["implementation"]
+        if type(implementation) is not str or implementation not in allowed_implementations:
+            raise ValueError(
+                f"motion_transition_contract.{name}.implementation must be one of "
+                f"{sorted(allowed_implementations)}, got {implementation!r}."
+            )
+        applied = phase["applied"]
+        if type(applied) is not bool:
+            raise ValueError(
+                f"motion_transition_contract.{name}.applied must be boolean, got {applied!r}."
+            )
+        steps = phase["steps"]
+        if (
+            type(steps) is not int
+            or steps == 1
+            or not 0 <= steps <= MAX_MOTION_TRANSITION_STEPS
+        ):
+            raise ValueError(
+                f"motion_transition_contract.{name}.steps must be integer 0 (inactive) or in "
+                f"[2, {MAX_MOTION_TRANSITION_STEPS}] (applied), got {steps!r}."
+            )
+        expected_applied = implementation != "none"
+        if applied != expected_applied or applied != (steps > 0):
+            raise ValueError(
+                f"motion_transition_contract.{name} is internally inconsistent: "
+                f"implementation={implementation!r}, applied={applied!r}, steps={steps}."
+            )
+        if implementation == "none" and steps != 0:
+            raise ValueError(
+                f"motion_transition_contract.{name}.steps must be zero when implementation='none'."
+            )
+        return {
+            "implementation": implementation,
+            "applied": applied,
+            "steps": steps,
+        }
+
+    prepend_allowed = {"none", "static_splice"}
+    if source_semantics == "global_multi_clip_runtime":
+        prepend_allowed = {"none", "runtime_hold"}
+    prepend = canonical_phase("prepend", allowed_implementations=prepend_allowed)
+    append = canonical_phase("append", allowed_implementations={"none", "static_splice"})
+    if source_semantics == "global_multi_clip_runtime" and append["applied"]:
+        raise ValueError(
+            "motion_transition_contract global_multi_clip_runtime semantics cannot apply an append transition."
+        )
+
+    return {
+        "version": MOTION_TRANSITION_CONTRACT_VERSION,
+        "control_dt_s": float(control_dt),
+        "source_semantics": source_semantics,
+        "prepend": prepend,
+        "append": append,
+    }
+
+
+def motion_transition_contract_sha256(contract: Any) -> str:
+    canonical = canonical_motion_transition_contract(contract)
+    payload = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 _CONTACT_PRIOR_REGION_BODY_NAMES = {
     "left_wrist": "left_wrist_yaw_link",
     "right_wrist": "right_wrist_yaw_link",
@@ -65,7 +227,8 @@ _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES = {
     region_name: (body_name,) for region_name, body_name in _CONTACT_PRIOR_REGION_BODY_NAMES.items()
 }
 _CONTACT_PRIOR_REGION_POSITION_BODY_NAMES = _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES
-_CONTACT_PRIOR_PHASE_COUNT = 2
+_CONTACT_PRIOR_PHASE_NAMES = ("before_pickup_anchor", "after_pickup_anchor")
+_CONTACT_PRIOR_PHASE_COUNT = len(_CONTACT_PRIOR_PHASE_NAMES)
 _CONTACT_PRIOR_FORCE_THRESHOLD = 1.0
 _CONTACT_PRIOR_OBJECT_POS_ERROR_THRESHOLD = 0.20
 _CONTACT_PRIOR_OBJECT_ROT_ERROR_THRESHOLD = 0.80
@@ -74,33 +237,13 @@ _CONTACT_PRIOR_CONFIDENCE_WARMUP_SAMPLES = 2048.0
 _OBJECT_CONTACT_PROXY_DISTANCE_THRESHOLD = 0.08
 _ADAPTIVE_SAMPLING_CONTACT_STAGE_PRE_EXTRA_STEPS = 10
 _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS = 30
-_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES = {
-    "left_palm": "left_wrist",
-    "right_palm": "right_wrist",
-}
-_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS = (
-    ("left_wrist", "right_wrist"),
-    (
-        "left_elbow",
-        "right_elbow",
-        "left_wrist_roll",
-        "right_wrist_roll",
-        "left_wrist_pitch",
-        "right_wrist_pitch",
-        "torso",
-    ),
+_CONTACT_WINDOW_OBSERVATION_FUNCTION_PATHS = frozenset(
+    {
+        "holosoma.managers.observation.terms.wbt.sparse_target_root_trajectory_command_contact_aware",
+        "holosoma.managers.observation.terms.wbt.drop_button",
+        "holosoma.managers.observation.terms.wbt.pickup_button",
+    }
 )
-_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_FALLBACK_FILES = {
-    "left_wrist": "left_wrist_contact_interval_steps.npy",
-    "right_wrist": "right_wrist_contact_interval_steps.npy",
-    "left_elbow": "left_elbow_contact_interval_steps.npy",
-    "right_elbow": "right_elbow_contact_interval_steps.npy",
-    "left_wrist_roll": "left_wrist_roll_contact_interval_steps.npy",
-    "right_wrist_roll": "right_wrist_roll_contact_interval_steps.npy",
-    "left_wrist_pitch": "left_wrist_pitch_contact_interval_steps.npy",
-    "right_wrist_pitch": "right_wrist_pitch_contact_interval_steps.npy",
-    "torso": "torso_contact_interval_steps.npy",
-}
 
 
 def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
@@ -193,25 +336,50 @@ def _pickup_step_and_threshold_from_rel_z(
     return pickup_step, pickup_threshold
 
 
-def _contact_aware_carry_window_from_rel_z(
+def _kinematic_lift_window_from_rel_z(
     rel_z: torch.Tensor,
     *,
-    contact_interval: tuple[int, int] | None = None,
     lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
     lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
     consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
-    release_lead_steps: int = _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
+    require_sustained_lift: bool = False,
 ) -> tuple[int, int]:
-    """Return the [start, end) carry window used by contact-aware root commands."""
+    """Return the source-motion ``[start, end)`` object lift window.
+
+    This primitive intentionally has no contact-sidecar input.  Automatic
+    pickup/drop labels use it directly so collider contacts and root-command
+    gating cannot silently change the label transition frames.
+    """
+    if rel_z.ndim != 1:
+        raise ValueError(
+            f"Kinematic button rel-z trace must be rank 1, got shape {tuple(rel_z.shape)}."
+        )
     if rel_z.numel() == 0:
         return 0, 0
+    if not bool(torch.isfinite(rel_z).all().item()):
+        raise ValueError(
+            "Kinematic button rel-z trace must contain only finite values."
+        )
 
-    pickup_step, pickup_threshold = _pickup_step_and_threshold_from_rel_z(
+    pickup_threshold = _pickup_threshold_from_rel_z(
         rel_z,
         lift_height_threshold=lift_height_threshold,
         lift_ratio_threshold=lift_ratio_threshold,
-        consecutive_steps=consecutive_steps,
     )
+    lifted_mask = rel_z >= pickup_threshold
+    pickup_step = _first_sustained_true_index(lifted_mask, consecutive_steps)
+    if pickup_step is None:
+        if require_sustained_lift:
+            raise ValueError(
+                "Kinematic button motion never reaches the lift threshold for "
+                f"{int(consecutive_steps)} consecutive frames."
+            )
+        lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
+        pickup_step = (
+            int(lifted_indices[0, 0].item())
+            if lifted_indices.numel() > 0
+            else int(torch.argmax(rel_z).item())
+        )
 
     total_steps = int(rel_z.shape[0])
     carry_start = max(0, min(int(pickup_step), total_steps))
@@ -225,6 +393,28 @@ def _contact_aware_carry_window_from_rel_z(
     )
     if lowering_step is not None:
         carry_end = min(carry_end, int(lowering_step))
+
+    carry_end = max(carry_start, min(carry_end, total_steps))
+    return carry_start, carry_end
+
+
+def _contact_aware_carry_window_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    contact_interval: tuple[int, int] | None = None,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+    release_lead_steps: int = _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
+) -> tuple[int, int]:
+    """Return the [start, end) carry window used by contact-aware root commands."""
+    carry_start, carry_end = _kinematic_lift_window_from_rel_z(
+        rel_z,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+        consecutive_steps=consecutive_steps,
+    )
+    total_steps = int(rel_z.shape[0])
 
     normalized_interval = _normalize_contact_interval_pair(contact_interval) if contact_interval is not None else None
     if normalized_interval is not None:
@@ -299,54 +489,11 @@ def _contact_aware_carry_window_from_peak_height(
     return carry_start, carry_end
 
 
-def _normalize_contact_interval_pair(raw_interval: Any) -> tuple[int, int] | None:
-    arr = np.asarray(raw_interval, dtype=np.int64).reshape(-1)
-    if arr.size < 2:
-        return None
-    start_step = int(arr[0])
-    end_step = int(arr[1])
-    if start_step < 0 or end_step <= start_step:
-        return None
-    return start_step, end_step
-
-
 def _normalize_contact_prior_region_name(raw_name: str) -> str:
     name = str(raw_name).strip()
     if not name:
         return ""
     return _CONTACT_PRIOR_REGION_ALIASES.get(name, name)
-
-
-def _canonicalize_contact_interval_region_name(raw_name: str) -> str:
-    name = str(raw_name).strip()
-    if not name:
-        return ""
-    return _normalize_contact_prior_region_name(_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES.get(name, name))
-
-
-def _select_primary_contact_interval(intervals_by_region: dict[str, Any]) -> tuple[int, int] | None:
-    normalized: dict[str, tuple[int, int]] = {}
-    for region_name, raw_interval in intervals_by_region.items():
-        canonical_name = _canonicalize_contact_interval_region_name(region_name)
-        if not canonical_name:
-            continue
-        interval = _normalize_contact_interval_pair(raw_interval)
-        if interval is None:
-            continue
-        normalized[canonical_name] = interval
-
-    for region_group in _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS:
-        group_intervals = [normalized[name] for name in region_group if name in normalized]
-        if group_intervals:
-            start_step = min(interval[0] for interval in group_intervals)
-            end_step = max(interval[1] for interval in group_intervals)
-            return start_step, end_step
-
-    if normalized:
-        start_step = min(interval[0] for interval in normalized.values())
-        end_step = max(interval[1] for interval in normalized.values())
-        return start_step, end_step
-    return None
 
 
 def _compute_contact_stage_intervals(
@@ -386,6 +533,15 @@ def _probability_mass_on_intervals(
     sample_end_step: float,
     intervals: list[tuple[float, float]],
 ) -> torch.Tensor:
+    """Integrate a discrete probability vector over continuous intervals.
+
+    This routine is part of diagnostic telemetry, but it runs on CUDA tensors
+    during collection.  The previous scalar loop called ``.item()`` once per
+    bin, turning a small reduction into thousands of device synchronizations
+    across the motion bank.  Build the complete bin/interval overlap matrix on
+    device and perform one matrix-vector reduction instead.
+    """
+
     masses = torch.zeros((len(intervals),), device=bin_probabilities.device, dtype=torch.float32)
     if bin_probabilities.numel() == 0:
         return masses
@@ -398,17 +554,24 @@ def _probability_mass_on_intervals(
     if bin_width <= 0.0:
         return masses
 
-    for bin_idx in range(num_bins):
-        prob_mass = bin_probabilities[bin_idx].to(dtype=torch.float32)
-        if float(prob_mass.item()) <= 0.0:
-            continue
-        bin_start = bin_width * float(bin_idx)
-        bin_end = bin_width * float(bin_idx + 1)
-        for interval_idx, (interval_start, interval_end) in enumerate(intervals):
-            overlap = min(bin_end, interval_end) - max(bin_start, interval_start)
-            if overlap > 0.0:
-                masses[interval_idx] += prob_mass * float(overlap / bin_width)
-    return masses
+    if not intervals:
+        return masses
+    interval_tensor = torch.as_tensor(
+        intervals,
+        device=bin_probabilities.device,
+        dtype=torch.float32,
+    )
+    bin_starts = torch.arange(
+        num_bins,
+        device=bin_probabilities.device,
+        dtype=torch.float32,
+    ) * float(bin_width)
+    bin_ends = bin_starts + float(bin_width)
+    overlap = torch.minimum(bin_ends[:, None], interval_tensor[None, :, 1]) - torch.maximum(
+        bin_starts[:, None], interval_tensor[None, :, 0]
+    )
+    overlap_weights = torch.clamp(overlap, min=0.0) / float(bin_width)
+    return torch.matmul(bin_probabilities.to(dtype=torch.float32), overlap_weights)
 
 
 #########################################################################################################
@@ -418,9 +581,8 @@ class MotionLoader:
     _OBJECT_SIZE_KEYS = (
         "object_size",
         "box_size",
-        "object_scale",
-        "box_scale",
     )
+    _OBJECT_SCALE_KEYS = ("object_scale", "box_scale")
 
     def __init__(
         self,
@@ -442,6 +604,14 @@ class MotionLoader:
         motion_file = resolve_data_file_path(motion_file)
         motion_file = resolve_rank_local_motion_path(motion_file)
         motion_path = Path(motion_file)
+
+        # Read transition lineage from the effective (possibly rank-local)
+        # object map before MotionLoader pins or filters clips.  A one-clip
+        # derivative of a global bank must retain the source bank's runtime
+        # timeline instead of being reclassified from its active clip count.
+        self.motion_transition_source = resolve_motion_transition_source_for_motion_path(
+            motion_path,
+        )
 
         logger.info(f"Loading motion file: {motion_file}")
         self.clip_ids: list[str] = []
@@ -471,10 +641,48 @@ class MotionLoader:
         body_indexes = self._get_index_of_a_in_b(robot_body_names, body_names_in_motion_data, device)
         joint_indexes = self._get_index_of_a_in_b(robot_joint_names, joint_names_in_motion_data, device)
 
-        self._joint_indexes = joint_indexes
-        self._body_indexes = body_indexes
+        # All consumers operate in simulator/robot order.  Keeping the loaded
+        # tensors in source order made every property access materialize the
+        # entire motion bank through advanced indexing.  Canonicalize once at
+        # load time instead; the identity indexes retained below also keep the
+        # static transition write-back helpers internally consistent.
+        self._canonicalize_robot_order(joint_indexes=joint_indexes, body_indexes=body_indexes)
         self.time_step_total = self._joint_pos.shape[0]
         self._apply_object_size_scale()
+
+    def _canonicalize_robot_order(
+        self,
+        *,
+        joint_indexes: torch.Tensor,
+        body_indexes: torch.Tensor,
+    ) -> None:
+        """Store all robot motion tensors in canonical simulator order.
+
+        Source clips may contain permuted or additional joints/bodies.  The
+        public properties have always exposed only the configured robot in
+        robot order, so dropping source-only columns does not change their
+        contract.  Once canonicalized, both reads and transition splices use
+        the same identity mapping rather than mixing source-order backing
+        tensors with robot-order views.
+        """
+
+        self._joint_pos = self._joint_pos.index_select(1, joint_indexes).contiguous()
+        self._joint_vel = self._joint_vel.index_select(1, joint_indexes).contiguous()
+        self._body_pos_w = self._body_pos_w.index_select(1, body_indexes).contiguous()
+        self._body_quat_w = self._body_quat_w.index_select(1, body_indexes).contiguous()
+        self._body_lin_vel_w = self._body_lin_vel_w.index_select(1, body_indexes).contiguous()
+        self._body_ang_vel_w = self._body_ang_vel_w.index_select(1, body_indexes).contiguous()
+
+        self._joint_indexes = torch.arange(
+            self._joint_pos.shape[1],
+            device=self._joint_pos.device,
+            dtype=torch.long,
+        )
+        self._body_indexes = torch.arange(
+            self._body_pos_w.shape[1],
+            device=self._body_pos_w.device,
+            dtype=torch.long,
+        )
 
     @staticmethod
     def _normalize_object_size_scale(raw_scale: list[float] | None) -> np.ndarray | None:
@@ -485,13 +693,20 @@ class MotionLoader:
             return None
         if arr.size == 1:
             value = float(arr[0])
-            return np.array([value, value, value], dtype=np.float32)
-        if arr.size == 3:
-            return arr.astype(np.float32, copy=False)
-        raise ValueError(
-            "MotionConfig.object_size_scale must have length 1 or 3. "
-            f"Got shape {arr.shape} from value {raw_scale!r}."
-        )
+            normalized = np.array([value, value, value], dtype=np.float32)
+        elif arr.size == 3:
+            normalized = arr.astype(np.float32, copy=False)
+        else:
+            raise ValueError(
+                "MotionConfig.object_size_scale must have length 1 or 3. "
+                f"Got shape {arr.shape} from value {raw_scale!r}."
+            )
+        if not np.all(np.isfinite(normalized)) or np.any(normalized <= 0.0):
+            raise ValueError(
+                "MotionConfig.object_size_scale must contain finite positive scale factors. "
+                f"Got {raw_scale!r}."
+            )
+        return normalized
 
     @staticmethod
     def _normalize_allowed_object_categories(raw_categories: list[str] | None) -> set[str]:
@@ -571,13 +786,8 @@ class MotionLoader:
         if arr.ndim == 2:
             if arr.shape == (1, 3):
                 return np.repeat(arr, repeats=length, axis=0)
-            if arr.shape == (3, 1):
-                row = arr.reshape(1, 3)
-                return np.repeat(row, repeats=length, axis=0)
             if arr.shape == (length, 1):
                 return np.repeat(arr, repeats=3, axis=1)
-            if arr.shape == (3, length):
-                return arr.transpose(1, 0)
             if arr.shape == (length, 3):
                 return arr
 
@@ -590,8 +800,23 @@ class MotionLoader:
     def _extract_object_size_np(cls, data: Any, length: int, *, source: str) -> np.ndarray:
         for key in cls._OBJECT_SIZE_KEYS:
             if key in data:
-                raw = np.asarray(data[key], dtype=np.float32)
-                return cls._normalize_object_size_array(raw, length, source=f"{source}:{key}")
+                raw = np.asarray(data[key])
+                if raw.dtype.kind != "f":
+                    raise ValueError(
+                        f"Motion field {key} in {source} must use a real floating dtype, got {raw.dtype}."
+                    )
+                normalized = cls._normalize_object_size_array(raw, length, source=f"{source}:{key}")
+                if not np.all(np.isfinite(normalized)) or np.any(normalized <= 0.0):
+                    raise ValueError(
+                        f"Motion field {key} in {source} must contain finite positive physical extents."
+                    )
+                return normalized
+        scale_keys = [key for key in cls._OBJECT_SCALE_KEYS if key in data]
+        if scale_keys:
+            raise ValueError(
+                f"Motion file {source} provides mesh scale field(s) {scale_keys} but no physical "
+                "object_size/box_size extents; scale and size are not interchangeable."
+            )
         return np.ones((length, 3), dtype=np.float32)
 
     @staticmethod
@@ -771,7 +996,7 @@ class MotionLoader:
         clip_object_names: list[str] | None = None
         clip_object_urdfs: list[str] | None = None
         try:
-            with smart_open.open(motion_file, "rb") as f, np.load(f, allow_pickle=True) as data:
+            with smart_open.open(motion_file, "rb") as f, np.load(f, allow_pickle=False) as data:
                 self.fps = data["fps"]
 
                 body_names = data["body_names"].tolist()
@@ -943,7 +1168,7 @@ class MotionLoader:
 
         for file_path in files:
             try:
-                data_file = np.load(file_path, allow_pickle=True)
+                data_file = np.load(file_path, allow_pickle=False)
             except (zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
                 late_load_failures.append((file_path, f"{type(exc).__name__}: {exc}"))
                 continue
@@ -1042,15 +1267,10 @@ class MotionLoader:
 
         if late_load_failures:
             issue_summary = self._format_motion_file_issues(late_load_failures)
-            if not clip_ids:
-                raise zipfile.BadZipFile(
-                    f"Failed to load any motion clips from {motion_dir}. Examples: {issue_summary}"
-                )
-            logger.warning(
-                "Skipped {} motion clips that failed to open in '{}'. Examples: {}",
-                len(late_load_failures),
-                motion_dir,
-                issue_summary,
+            raise zipfile.BadZipFile(
+                f"Failed to load {len(late_load_failures)} motion clip(s) from {motion_dir}; "
+                "refusing to silently change the training distribution. "
+                f"Examples: {issue_summary}"
             )
 
         self.fps = float(fps_ref) if fps_ref is not None else 30.0
@@ -1423,7 +1643,12 @@ class MotionLoader:
                 for key in self._OBJECT_SIZE_KEYS:
                     if key not in data:
                         continue
-                    raw_size = np.asarray(data[key], dtype=np.float32)
+                    raw_size = np.asarray(data[key])
+                    if raw_size.dtype.kind != "f":
+                        raise ValueError(
+                            f"Motion field {key} in {motion_file} must use a real floating dtype, "
+                            f"got {raw_size.dtype}."
+                        )
                     # Support clip-wise object size annotations: shape (num_clips, 3) or (num_clips,).
                     if (
                         clips is not None
@@ -1454,7 +1679,18 @@ class MotionLoader:
                     )
                     break
                 if object_size is None:
+                    scale_keys = [key for key in self._OBJECT_SCALE_KEYS if key in data]
+                    if scale_keys:
+                        raise ValueError(
+                            f"Motion file {motion_file} provides mesh scale field(s) {scale_keys} but no physical "
+                            "object_size/box_size extents; scale and size are not interchangeable."
+                        )
+                if object_size is None:
                     object_size = np.ones((length, 3), dtype=np.float32)
+                if not np.all(np.isfinite(object_size)) or np.any(object_size <= 0.0):
+                    raise ValueError(
+                        f"Motion object_size in {motion_file} must contain finite positive physical extents."
+                    )
 
                 self._object_pos_w = torch.tensor(object_pos_w, dtype=torch.float32, device=device)
                 object_quat_w = torch.tensor(object_quat_w, dtype=torch.float32, device=device)
@@ -1556,27 +1792,27 @@ class MotionLoader:
 
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self._joint_pos[:, self._joint_indexes]
+        return self._joint_pos
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self._joint_vel[:, self._joint_indexes]
+        return self._joint_vel
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self._body_pos_w[:, self._body_indexes]
+        return self._body_pos_w
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self._body_quat_w[:, self._body_indexes]
+        return self._body_quat_w
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self._body_lin_vel_w[:, self._body_indexes]
+        return self._body_lin_vel_w
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self._body_ang_vel_w[:, self._body_indexes]
+        return self._body_ang_vel_w
 
     @property
     def object_pos_w(self) -> torch.Tensor:
@@ -1635,33 +1871,103 @@ class AdaptiveTimestepsSampler:
         device: str,
         env_fps: int,
         clip_lengths: torch.Tensor | None = None,
+        valid_start_counts: torch.Tensor | None = None,
         adaptive_kernel_size: int = 1,
         adaptive_lambda: float = 0.8,
         adaptive_uniform_ratio: float = 0.1,
         adaptive_alpha: float = 0.001,
     ):
         self.device = device
-        self.env_fps = env_fps
+        if isinstance(env_fps, bool) or not isinstance(env_fps, numbers.Integral) or int(env_fps) <= 0:
+            raise ValueError(f"env_fps must be a positive integer, got {env_fps!r}.")
+        self.env_fps = int(env_fps)
 
         if clip_lengths is not None:
-            clip_lengths = torch.as_tensor(clip_lengths, dtype=torch.long, device=self.device).reshape(-1)
+            raw_clip_lengths = torch.as_tensor(clip_lengths, device=self.device)
+            if (
+                raw_clip_lengths.dtype == torch.bool
+                or raw_clip_lengths.is_floating_point()
+                or raw_clip_lengths.is_complex()
+            ):
+                raise ValueError(f"clip_lengths must use an integer dtype, got {raw_clip_lengths.dtype}.")
+            clip_lengths = raw_clip_lengths.to(dtype=torch.long).reshape(-1)
             if clip_lengths.numel() == 0:
                 raise ValueError("clip_lengths must contain at least one clip.")
-            self.clip_lengths = torch.clamp(clip_lengths, min=1)
+            if bool((clip_lengths < 1).any().item()):
+                raise ValueError("clip_lengths must be positive for every clip.")
+            self.clip_lengths = clip_lengths
         else:
             if motion_time_step_total is None:
                 raise ValueError("motion_time_step_total must be provided when clip_lengths is None.")
-            total_steps = max(int(motion_time_step_total), 1)
+            if (
+                isinstance(motion_time_step_total, bool)
+                or not isinstance(motion_time_step_total, numbers.Integral)
+                or int(motion_time_step_total) <= 0
+            ):
+                raise ValueError(
+                    "motion_time_step_total must be a positive integer when clip_lengths is absent, "
+                    f"got {motion_time_step_total!r}."
+                )
+            total_steps = int(motion_time_step_total)
             self.clip_lengths = torch.tensor([total_steps], dtype=torch.long, device=self.device)
 
         self.num_clips = int(self.clip_lengths.numel())
         self.motion_time_step_total = int(self.clip_lengths.max().item())
-        self.adaptive_kernel_size = adaptive_kernel_size
-        self.adaptive_lambda = adaptive_lambda
-        self.adaptive_uniform_ratio = adaptive_uniform_ratio
-        self.adaptive_alpha = adaptive_alpha
+        if valid_start_counts is None:
+            self.valid_start_counts = self.clip_lengths.clone()
+        else:
+            raw_valid_start_counts = torch.as_tensor(valid_start_counts, device=self.device)
+            if (
+                raw_valid_start_counts.dtype == torch.bool
+                or raw_valid_start_counts.is_floating_point()
+                or raw_valid_start_counts.is_complex()
+            ):
+                raise ValueError(
+                    f"valid_start_counts must use an integer dtype, got {raw_valid_start_counts.dtype}."
+                )
+            valid_start_counts = raw_valid_start_counts.to(dtype=torch.long).reshape(-1)
+            if valid_start_counts.numel() != self.num_clips:
+                raise ValueError(
+                    "valid_start_counts must have one entry per clip: "
+                    f"expected {self.num_clips}, got {valid_start_counts.numel()}."
+                )
+            if torch.any(valid_start_counts < 1) or torch.any(valid_start_counts > self.clip_lengths):
+                raise ValueError("valid_start_counts must stay within [1, clip_length] for every clip.")
+            self.valid_start_counts = valid_start_counts
+        if (
+            isinstance(adaptive_kernel_size, bool)
+            or not isinstance(adaptive_kernel_size, numbers.Integral)
+            or int(adaptive_kernel_size) <= 0
+        ):
+            raise ValueError(
+                f"adaptive_kernel_size must be a positive integer, got {adaptive_kernel_size!r}."
+            )
+        self.adaptive_kernel_size = int(adaptive_kernel_size)
+        if isinstance(adaptive_lambda, bool) or not isinstance(adaptive_lambda, numbers.Real):
+            raise ValueError(f"adaptive_lambda must be a real number, got {adaptive_lambda!r}.")
+        self.adaptive_lambda = float(adaptive_lambda)
+        if not np.isfinite(self.adaptive_lambda) or not 0.0 <= self.adaptive_lambda <= 1.0:
+            raise ValueError(f"adaptive_lambda must be finite and within [0, 1], got {adaptive_lambda!r}.")
+        if isinstance(adaptive_uniform_ratio, bool) or not isinstance(adaptive_uniform_ratio, numbers.Real):
+            raise ValueError(
+                f"adaptive_uniform_ratio must be a real number, got {adaptive_uniform_ratio!r}."
+            )
+        self.adaptive_uniform_ratio = float(adaptive_uniform_ratio)
+        if not 0.0 <= self.adaptive_uniform_ratio <= 1.0:
+            raise ValueError(
+                "adaptive_uniform_ratio must be within [0, 1], "
+                f"got {self.adaptive_uniform_ratio}."
+            )
+        if isinstance(adaptive_alpha, bool) or not isinstance(adaptive_alpha, numbers.Real):
+            raise ValueError(f"adaptive_alpha must be a real number, got {adaptive_alpha!r}.")
+        self.adaptive_alpha = float(adaptive_alpha)
+        if not np.isfinite(self.adaptive_alpha) or not 0.0 <= self.adaptive_alpha <= 1.0:
+            raise ValueError(f"adaptive_alpha must be finite and within [0, 1], got {adaptive_alpha!r}.")
 
-        self.num_bins_per_clip = torch.clamp(self.clip_lengths // max(self.env_fps, 1) + 1, min=1)
+        # A bin covers at most one second of *valid reset starts*.  Ceiling division is
+        # important here: an exact multiple of env_fps must not create an empty tail bin.
+        fps = max(self.env_fps, 1)
+        self.num_bins_per_clip = torch.clamp((self.valid_start_counts + fps - 1) // fps, min=1)
         self.max_num_bins = int(self.num_bins_per_clip.max().item())
         self.num_bins = self.max_num_bins
 
@@ -1672,6 +1978,48 @@ class AdaptiveTimestepsSampler:
         )
         self.kernel = self.kernel / self.kernel.sum()
 
+        # Sampling geometry is immutable.  Keep its padded representation on the
+        # sampler device so reset-time sampling can operate on the whole reset
+        # batch without reading one clip id / window boundary back to Python at a
+        # time.  Invalid padded entries are always masked before they contribute.
+        self.max_valid_start_count = int(self.valid_start_counts.max().item())
+        bin_axis = torch.arange(self.max_num_bins, dtype=torch.long, device=self.device)
+        step_axis = torch.arange(self.max_valid_start_count, dtype=torch.long, device=self.device)
+        self._step_axis = step_axis
+        self._valid_bin_mask = bin_axis.unsqueeze(0) < self.num_bins_per_clip.unsqueeze(1)
+        self._valid_step_mask = step_axis.unsqueeze(0) < self.valid_start_counts.unsqueeze(1)
+
+        step_bin_indices = torch.div(
+            step_axis.unsqueeze(0) * self.num_bins_per_clip.unsqueeze(1),
+            self.valid_start_counts.unsqueeze(1),
+            rounding_mode="floor",
+        )
+        self._step_bin_indices = torch.minimum(
+            step_bin_indices,
+            self.num_bins_per_clip.unsqueeze(1) - 1,
+        )
+        self._step_counts_per_bin = torch.zeros(
+            (self.num_clips, self.max_num_bins),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._step_counts_per_bin.scatter_add_(
+            1,
+            self._step_bin_indices,
+            self._valid_step_mask.to(dtype=torch.float32),
+        )
+
+        kernel_offsets = torch.arange(
+            self.adaptive_kernel_size,
+            dtype=torch.long,
+            device=self.device,
+        )
+        kernel_bin_indices = bin_axis.view(1, -1, 1) + kernel_offsets.view(1, 1, -1)
+        self._kernel_bin_indices = torch.minimum(
+            kernel_bin_indices,
+            (self.num_bins_per_clip - 1).view(-1, 1, 1),
+        )
+
         # key data: failure counts
         self.init_buffers()
         # metrics
@@ -1681,55 +2029,525 @@ class AdaptiveTimestepsSampler:
         shape = (self.num_clips, self.max_num_bins)
         self.current_bin_failed_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
         self.bin_failed_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self.current_bin_exposure_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self.bin_exposure_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
 
     def _resolve_clip_ids(self, clip_ids: torch.Tensor | None, count: int) -> torch.Tensor:
         if clip_ids is None:
             if self.num_clips != 1:
                 raise ValueError("clip_ids must be provided for multi-clip adaptive timestep sampling.")
             return torch.zeros((count,), dtype=torch.long, device=self.device)
-        clip_ids = torch.as_tensor(clip_ids, dtype=torch.long, device=self.device).reshape(-1)
+        raw_clip_ids = torch.as_tensor(clip_ids, device=self.device)
+        if (
+            raw_clip_ids.dtype == torch.bool
+            or raw_clip_ids.is_floating_point()
+            or raw_clip_ids.is_complex()
+        ):
+            raise ValueError(f"clip_ids must use an integer dtype, got {raw_clip_ids.dtype}.")
+        clip_ids = raw_clip_ids.to(dtype=torch.long).reshape(-1)
         if clip_ids.numel() != count:
             raise ValueError(f"Expected {count} clip ids, got {clip_ids.numel()}.")
-        if torch.any(clip_ids < 0) or torch.any(clip_ids >= self.num_clips):
+        if bool(((clip_ids < 0) | (clip_ids >= self.num_clips)).any().item()):
             raise ValueError(f"clip_ids must be in [0, {self.num_clips}).")
         return clip_ids
 
+    def _coerce_time_steps(
+        self,
+        time_steps: torch.Tensor,
+        *,
+        trusted: bool,
+    ) -> torch.Tensor:
+        raw_time_steps = torch.as_tensor(time_steps, device=self.device)
+        if raw_time_steps.dtype == torch.bool or raw_time_steps.is_complex():
+            raise ValueError(f"time_steps must use a real numeric dtype, got {raw_time_steps.dtype}.")
+        converted = raw_time_steps.to(dtype=torch.float32).reshape(-1)
+        if not trusted and not bool(torch.isfinite(converted).all().item()):
+            raise ValueError("time_steps must be finite.")
+        return converted
+
     def _sampling_probabilities_for_clip(self, clip_id: int) -> torch.Tensor:
         valid_bins = int(self.num_bins_per_clip[clip_id].item())
-        sampling_probabilities = self.bin_failed_count[clip_id, :valid_bins] + (
-            self.adaptive_uniform_ratio / float(valid_bins)
+        failed = self.bin_failed_count[clip_id, :valid_bins]
+        exposure = self.bin_exposure_count[clip_id, :valid_bins]
+        if not bool(torch.isfinite(failed).all().item()) or not bool(torch.isfinite(exposure).all().item()):
+            raise RuntimeError("Adaptive timestep sampler contains non-finite failure/exposure state.")
+        if bool((failed < 0.0).any().item()) or bool((exposure < 0.0).any().item()):
+            raise RuntimeError("Adaptive timestep sampler failure/exposure state must be non-negative.")
+        tolerance = 1.0e-6 * torch.maximum(torch.ones_like(exposure), exposure)
+        if bool((failed > exposure + tolerance).any().item()):
+            raise RuntimeError(
+                "Adaptive timestep sampler failure state exceeds exposure state; refusing to change "
+                "the sampling distribution silently."
+            )
+        failure_rate = torch.where(
+            exposure > 1.0e-12,
+            failed / exposure.clamp_min(1.0e-12),
+            torch.zeros_like(failed),
         )
-        sampling_probabilities = F.pad(
-            sampling_probabilities.unsqueeze(0).unsqueeze(0),
+        adaptive_scores = F.pad(
+            failure_rate.unsqueeze(0).unsqueeze(0),
             (0, self.adaptive_kernel_size - 1),
             mode="replicate",
         )
-        sampling_probabilities = F.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
-        return sampling_probabilities / sampling_probabilities.sum()
+        adaptive_scores = F.conv1d(adaptive_scores, self.kernel.view(1, 1, -1)).view(-1)
+        score_sum = adaptive_scores.sum()
+        uniform = torch.full_like(adaptive_scores, 1.0 / float(valid_bins))
+        adaptive = torch.where(
+            score_sum > 1.0e-12,
+            adaptive_scores / score_sum.clamp_min(1.0e-12),
+            uniform,
+        )
+        ratio = self.adaptive_uniform_ratio
+        return (1.0 - ratio) * adaptive + ratio * uniform
+
+    def _bin_indices_for_clip(self, clip_id: int) -> torch.Tensor:
+        """Map every valid discrete reset timestep to its adaptive bin."""
+        valid_start_count = int(self.valid_start_counts[clip_id].item())
+        num_bins = int(self.num_bins_per_clip[clip_id].item())
+        steps = torch.arange(valid_start_count, dtype=torch.long, device=self.device)
+        bin_ids = torch.div(steps * num_bins, valid_start_count, rounding_mode="floor")
+        return torch.clamp(bin_ids, max=num_bins - 1)
+
+    @staticmethod
+    def _validated_window_reweight_args(
+        window_density_boost: float,
+        window_target_probability: float | None,
+    ) -> tuple[float, float | None]:
+        if isinstance(window_density_boost, bool) or not isinstance(
+            window_density_boost, numbers.Real
+        ):
+            raise ValueError(
+                "window_density_boost must be a finite real number >= 1, "
+                f"got {window_density_boost!r}."
+            )
+        parsed_density_boost = float(window_density_boost)
+        if not np.isfinite(parsed_density_boost) or parsed_density_boost < 1.0:
+            raise ValueError(
+                "window_density_boost must be a finite real number >= 1, "
+                f"got {window_density_boost!r}."
+            )
+
+        parsed_target_probability: float | None = None
+        if window_target_probability is not None:
+            if isinstance(window_target_probability, bool) or not isinstance(
+                window_target_probability, numbers.Real
+            ):
+                raise ValueError(
+                    "window_target_probability must be a finite probability in [0, 1], "
+                    f"got {window_target_probability!r}."
+                )
+            parsed_target_probability = float(window_target_probability)
+            if (
+                not np.isfinite(parsed_target_probability)
+                or not 0.0 <= parsed_target_probability <= 1.0
+            ):
+                raise ValueError(
+                    "window_target_probability must be a finite probability in [0, 1], "
+                    f"got {window_target_probability!r}."
+                )
+        return parsed_density_boost, parsed_target_probability
+
+    def timestep_probabilities_for_clip(
+        self,
+        clip_id: int,
+        *,
+        exclude_zero: bool = False,
+        window: tuple[int, int] | None = None,
+        window_density_boost: float = 1.0,
+        window_target_probability: float | None = None,
+    ) -> torch.Tensor:
+        """Return the normalized probability of every valid discrete reset timestep.
+
+        Adaptive failure mass is first spread uniformly over the discrete timesteps in
+        each bin.  An optional contact window then reweights that density, so contact
+        bias and failure prioritization compose instead of one silently replacing the
+        other.
+        """
+        if clip_id < 0 or clip_id >= self.num_clips:
+            raise IndexError(f"clip_id must be in [0, {self.num_clips}), got {clip_id}.")
+
+        parsed_density_boost, parsed_target_probability = self._validated_window_reweight_args(
+            window_density_boost,
+            window_target_probability,
+        )
+
+        bin_ids = self._bin_indices_for_clip(clip_id)
+        bin_probabilities = self._sampling_probabilities_for_clip(clip_id)
+        bin_counts = torch.bincount(bin_ids, minlength=bin_probabilities.numel()).to(dtype=torch.float32)
+        probabilities = bin_probabilities[bin_ids] / bin_counts[bin_ids].clamp_min(1.0)
+
+        if exclude_zero and probabilities.numel() > 1:
+            probabilities[0] = 0.0
+
+        if window is not None and probabilities.numel() > 0:
+            lo = max(0, int(window[0]))
+            hi = min(int(window[1]), probabilities.numel() - 1)
+            if hi >= lo:
+                window_mask = torch.zeros_like(probabilities, dtype=torch.bool)
+                window_mask[lo : hi + 1] = True
+                base_window_mass = probabilities[window_mask].sum()
+                base_outside_mass = probabilities[~window_mask].sum()
+                if parsed_target_probability is not None:
+                    window_mass = float(base_window_mass.item())
+                    outside_mass = float(base_outside_mass.item())
+                    if window_mass > 0.0 and outside_mass > 0.0:
+                        probabilities[window_mask] *= parsed_target_probability / window_mass
+                        probabilities[~window_mask] *= (1.0 - parsed_target_probability) / outside_mass
+                    elif window_mass > 0.0:
+                        # The requested target is infeasible when every supported
+                        # timestep lies in the window. Preserve the only available
+                        # support and report an effective window mass of one.
+                        probabilities[window_mask] /= window_mass
+                    elif outside_mass > 0.0:
+                        # Symmetrically, a target above zero cannot create support
+                        # inside an empty window. Preserve the outside distribution.
+                        probabilities[~window_mask] /= outside_mass
+                else:
+                    probabilities[window_mask] *= parsed_density_boost
+
+        total = probabilities.sum()
+        if not torch.isfinite(total) or float(total.item()) <= 0.0:
+            raise RuntimeError(
+                "Adaptive timestep probability construction produced a non-finite or zero-mass distribution."
+            )
+        return probabilities / total
+
+    def timestep_probabilities_for_samples(
+        self,
+        clip_ids: torch.Tensor,
+        *,
+        exclude_zero: bool = False,
+        windows: torch.Tensor | None = None,
+        window_valid: torch.Tensor | None = None,
+        window_density_boost: float = 1.0,
+        window_target_probability: float | None = None,
+        _trusted_inputs: bool = False,
+    ) -> torch.Tensor:
+        """Build padded timestep distributions for a complete sample batch on-device.
+
+        This is mathematically equivalent to calling
+        :meth:`timestep_probabilities_for_clip` for every sample, but it avoids
+        per-clip Python iteration and CUDA scalar reads.  Columns at or beyond a
+        sample's valid-start count have exactly zero probability.
+        """
+        if _trusted_inputs:
+            clip_ids = torch.as_tensor(clip_ids, dtype=torch.long, device=self.device).reshape(-1)
+        else:
+            clip_ids = self._resolve_clip_ids(clip_ids, int(clip_ids.numel()))
+        num_samples = clip_ids.numel()
+        if num_samples == 0:
+            return torch.zeros(
+                (0, self.max_valid_start_count),
+                dtype=torch.float32,
+                device=self.device,
+            )
+
+        parsed_density_boost, parsed_target_probability = self._validated_window_reweight_args(
+            window_density_boost,
+            window_target_probability,
+        )
+
+        if windows is not None:
+            windows = torch.as_tensor(windows, dtype=torch.long, device=self.device).reshape(-1, 2)
+            if windows.shape[0] != num_samples:
+                raise ValueError("windows must have shape [num_samples, 2].")
+        if window_valid is not None:
+            window_valid = torch.as_tensor(window_valid, dtype=torch.bool, device=self.device).reshape(-1)
+            if window_valid.numel() != num_samples:
+                raise ValueError("window_valid must have one entry per sample.")
+
+        # Preserve the existing one-window-per-clip API contract, but validate it
+        # with one batched device predicate instead of reading every unique clip
+        # and its first window into Python.  Mixed validity for one clip is also
+        # rejected because accepting it would make the distribution order-dependent.
+        window_contract_valid = torch.ones((), dtype=torch.bool, device=self.device)
+        if not _trusted_inputs and windows is not None and num_samples > 1:
+            active_windows = (
+                torch.ones((num_samples,), dtype=torch.bool, device=self.device)
+                if window_valid is None
+                else window_valid
+            )
+            order = torch.argsort(clip_ids)
+            sorted_clip_ids = clip_ids[order]
+            sorted_windows = windows[order]
+            sorted_active = active_windows[order]
+            same_clip = sorted_clip_ids[1:] == sorted_clip_ids[:-1]
+            validity_mismatch = same_clip & (sorted_active[1:] != sorted_active[:-1])
+            window_mismatch = (
+                same_clip
+                & sorted_active[1:]
+                & sorted_active[:-1]
+                & torch.any(sorted_windows[1:] != sorted_windows[:-1], dim=1)
+            )
+            window_contract_valid = ~(validity_mismatch | window_mismatch).any()
+
+        valid_bin_mask = self._valid_bin_mask[clip_ids]
+        failed = self.bin_failed_count[clip_ids]
+        exposure = self.bin_exposure_count[clip_ids]
+        if not _trusted_inputs:
+            if not bool(window_contract_valid.item()):
+                raise ValueError("All samples for one clip must use the same contact window and validity.")
+            if not bool(((torch.isfinite(failed) & torch.isfinite(exposure)) | ~valid_bin_mask).all().item()):
+                raise RuntimeError("Adaptive timestep sampler contains non-finite failure/exposure state.")
+            if bool((((failed < 0.0) | (exposure < 0.0)) & valid_bin_mask).any().item()):
+                raise RuntimeError("Adaptive timestep sampler failure/exposure state must be non-negative.")
+            tolerance = 1.0e-6 * torch.maximum(torch.ones_like(exposure), exposure)
+            if bool(((failed > exposure + tolerance) & valid_bin_mask).any().item()):
+                raise RuntimeError(
+                    "Adaptive timestep sampler failure state exceeds exposure state; refusing to change "
+                    "the sampling distribution silently."
+                )
+
+        failure_rate = torch.where(
+            valid_bin_mask & (exposure > 1.0e-12),
+            failed / exposure.clamp_min(1.0e-12),
+            torch.zeros_like(failed),
+        )
+        kernel_indices = self._kernel_bin_indices[clip_ids]
+        kernel_values = torch.gather(
+            failure_rate.unsqueeze(1).expand(-1, self.max_num_bins, -1),
+            2,
+            kernel_indices,
+        )
+        adaptive_scores = (kernel_values * self.kernel.view(1, 1, -1)).sum(dim=2)
+        adaptive_scores = torch.where(valid_bin_mask, adaptive_scores, torch.zeros_like(adaptive_scores))
+        score_sum = adaptive_scores.sum(dim=1, keepdim=True)
+        uniform = valid_bin_mask.to(dtype=torch.float32) / self.num_bins_per_clip[clip_ids].to(
+            dtype=torch.float32
+        ).unsqueeze(1)
+        adaptive = torch.where(
+            score_sum > 1.0e-12,
+            adaptive_scores / score_sum.clamp_min(1.0e-12),
+            uniform,
+        )
+        bin_probabilities = (
+            (1.0 - self.adaptive_uniform_ratio) * adaptive
+            + self.adaptive_uniform_ratio * uniform
+        )
+
+        step_bin_indices = self._step_bin_indices[clip_ids]
+        step_bin_counts = torch.gather(
+            self._step_counts_per_bin[clip_ids],
+            1,
+            step_bin_indices,
+        )
+        probabilities = torch.gather(bin_probabilities, 1, step_bin_indices)
+        probabilities = probabilities / step_bin_counts.clamp_min(1.0)
+        valid_step_mask = self._valid_step_mask[clip_ids]
+        probabilities = torch.where(valid_step_mask, probabilities, torch.zeros_like(probabilities))
+
+        if exclude_zero:
+            exclude_zero_mask = (
+                self.valid_start_counts[clip_ids] > 1
+            ).unsqueeze(1) & (self._step_axis.unsqueeze(0) == 0)
+            probabilities = torch.where(exclude_zero_mask, torch.zeros_like(probabilities), probabilities)
+
+        if windows is not None:
+            active_windows = (
+                torch.ones((num_samples,), dtype=torch.bool, device=self.device)
+                if window_valid is None
+                else window_valid
+            )
+            max_step = self.valid_start_counts[clip_ids] - 1
+            lo = torch.clamp(windows[:, 0], min=0)
+            hi = torch.minimum(windows[:, 1], max_step)
+            step_axis = self._step_axis.unsqueeze(0)
+            window_mask = (
+                active_windows.unsqueeze(1)
+                & (hi >= lo).unsqueeze(1)
+                & (step_axis >= lo.unsqueeze(1))
+                & (step_axis <= hi.unsqueeze(1))
+                & valid_step_mask
+            )
+            if parsed_target_probability is None:
+                probabilities = torch.where(
+                    window_mask,
+                    probabilities * parsed_density_boost,
+                    probabilities,
+                )
+            else:
+                window_mass = torch.where(
+                    window_mask,
+                    probabilities,
+                    torch.zeros_like(probabilities),
+                ).sum(dim=1, keepdim=True)
+                outside_mass = torch.where(
+                    window_mask,
+                    torch.zeros_like(probabilities),
+                    probabilities,
+                ).sum(dim=1, keepdim=True)
+                has_window_mass = window_mass > 0.0
+                has_outside_mass = outside_mass > 0.0
+                both_supported = has_window_mass & has_outside_mass
+                window_scale = torch.where(
+                    both_supported,
+                    parsed_target_probability / window_mass.clamp_min(1.0e-12),
+                    torch.where(
+                        has_window_mass,
+                        1.0 / window_mass.clamp_min(1.0e-12),
+                        torch.ones_like(window_mass),
+                    ),
+                )
+                outside_scale = torch.where(
+                    both_supported,
+                    (1.0 - parsed_target_probability) / outside_mass.clamp_min(1.0e-12),
+                    torch.where(
+                        has_outside_mass,
+                        1.0 / outside_mass.clamp_min(1.0e-12),
+                        torch.ones_like(outside_mass),
+                    ),
+                )
+                probabilities = torch.where(
+                    window_mask,
+                    probabilities * window_scale,
+                    probabilities * outside_scale,
+                )
+
+        total = probabilities.sum(dim=1, keepdim=True)
+        if not _trusted_inputs and bool((~torch.isfinite(total) | (total <= 0.0)).any().item()):
+            raise RuntimeError(
+                "Adaptive timestep probability construction produced a non-finite or zero-mass distribution."
+            )
+        return probabilities / total
+
+    def _counts_by_bin(
+        self,
+        time_steps: torch.Tensor,
+        clip_ids: torch.Tensor | None = None,
+        *,
+        weights: torch.Tensor | None = None,
+        _trusted_clip_ids: bool = False,
+    ) -> torch.Tensor:
+        time_steps = self._coerce_time_steps(time_steps, trusted=_trusted_clip_ids)
+        if time_steps.numel() == 0:
+            return torch.zeros_like(self.current_bin_exposure_count)
+        if _trusted_clip_ids:
+            if clip_ids is None:
+                clip_ids = torch.zeros((time_steps.numel(),), dtype=torch.long, device=self.device)
+            else:
+                clip_ids = torch.as_tensor(clip_ids, dtype=torch.long, device=self.device).reshape(-1)
+                if clip_ids.numel() != time_steps.numel():
+                    raise ValueError(f"Expected {time_steps.numel()} clip ids, got {clip_ids.numel()}.")
+        else:
+            clip_ids = self._resolve_clip_ids(clip_ids, time_steps.numel())
+        valid_start_counts = self.valid_start_counts[clip_ids]
+        num_bins = self.num_bins_per_clip[clip_ids]
+        steps = torch.floor(time_steps).to(dtype=torch.long)
+        steps = torch.clamp(steps, min=0)
+        steps = torch.minimum(steps, valid_start_counts - 1)
+        bin_ids = torch.div(
+            steps * num_bins,
+            valid_start_counts,
+            rounding_mode="floor",
+        )
+        bin_ids = torch.clamp(bin_ids, min=0)
+        bin_ids = torch.minimum(bin_ids, num_bins - 1)
+        flat_ids = clip_ids * self.max_num_bins + bin_ids
+        if weights is not None:
+            weights = torch.as_tensor(weights, dtype=torch.float32, device=self.device).reshape(-1)
+            if weights.numel() != time_steps.numel():
+                raise ValueError(f"Expected {time_steps.numel()} count weights, got {weights.numel()}.")
+        counts = torch.bincount(
+            flat_ids,
+            weights=weights,
+            minlength=self.num_clips * self.max_num_bins,
+        ).to(dtype=torch.float32)
+        return counts.view(self.num_clips, self.max_num_bins)
+
+    def update_current_bin_exposure_count(
+        self,
+        time_steps: torch.Tensor,
+        clip_ids: torch.Tensor | None = None,
+        *,
+        observed: torch.Tensor | None = None,
+        _trusted_clip_ids: bool = False,
+    ) -> None:
+        """Accumulate state/action visits before the corresponding timestep is advanced or reset."""
+        time_steps = self._coerce_time_steps(time_steps, trusted=_trusted_clip_ids)
+        weights = None
+        if observed is not None:
+            observed = torch.as_tensor(observed, dtype=torch.bool, device=self.device).reshape(-1)
+            if observed.numel() != time_steps.numel():
+                raise ValueError(f"Expected {time_steps.numel()} observation flags, got {observed.numel()}.")
+            weights = observed.to(dtype=torch.float32)
+        self.current_bin_exposure_count.add_(
+            self._counts_by_bin(
+                time_steps,
+                clip_ids,
+                weights=weights,
+                _trusted_clip_ids=_trusted_clip_ids,
+            )
+        )
+
+    def update_current_bin_outcome_count(
+        self,
+        time_steps: torch.Tensor,
+        *,
+        clip_ids: torch.Tensor | None = None,
+        failed: torch.Tensor | None = None,
+        observed: torch.Tensor | None = None,
+        _trusted_clip_ids: bool = False,
+    ) -> None:
+        """Accumulate reset-time exposure and the subset caused by genuine failure."""
+        time_steps = self._coerce_time_steps(time_steps, trusted=_trusted_clip_ids)
+        if time_steps.numel() == 0:
+            return
+        if _trusted_clip_ids:
+            if clip_ids is None:
+                resolved_clip_ids = torch.zeros(time_steps.numel(), dtype=torch.long, device=self.device)
+            else:
+                resolved_clip_ids = torch.as_tensor(clip_ids, dtype=torch.long, device=self.device).reshape(-1)
+                if resolved_clip_ids.numel() != time_steps.numel():
+                    raise ValueError(f"Expected {time_steps.numel()} clip ids, got {resolved_clip_ids.numel()}.")
+        else:
+            resolved_clip_ids = self._resolve_clip_ids(clip_ids, time_steps.numel())
+        if failed is None:
+            failed = torch.ones(time_steps.numel(), dtype=torch.bool, device=self.device)
+        else:
+            failed = torch.as_tensor(failed, dtype=torch.bool, device=self.device).reshape(-1)
+            if failed.numel() != time_steps.numel():
+                raise ValueError(f"Expected {time_steps.numel()} failure flags, got {failed.numel()}.")
+        if observed is None:
+            observed = torch.ones(time_steps.numel(), dtype=torch.bool, device=self.device)
+        else:
+            observed = torch.as_tensor(observed, dtype=torch.bool, device=self.device).reshape(-1)
+            if observed.numel() != time_steps.numel():
+                raise ValueError(f"Expected {time_steps.numel()} observation flags, got {observed.numel()}.")
+        observation_weights = observed.to(dtype=torch.float32)
+        self.current_bin_exposure_count.add_(
+            self._counts_by_bin(
+                time_steps,
+                resolved_clip_ids,
+                weights=observation_weights,
+                _trusted_clip_ids=True,
+            )
+        )
+        self.current_bin_failed_count.add_(
+            self._counts_by_bin(
+                time_steps,
+                resolved_clip_ids,
+                weights=(failed & observed).to(dtype=torch.float32),
+                _trusted_clip_ids=True,
+            )
+        )
 
     def update_current_bin_failed_count(self, failed_at_time_step: torch.Tensor, clip_ids: torch.Tensor | None = None):
-        """Update the current bin failed count with terminated time steps."""
-        failed_at_time_step = torch.as_tensor(failed_at_time_step, dtype=torch.float32, device=self.device).reshape(-1)
-        if failed_at_time_step.numel() == 0:
-            self.current_bin_failed_count.zero_()
-            return
-
-        clip_ids = self._resolve_clip_ids(clip_ids, failed_at_time_step.numel())
-        clip_lengths = self.clip_lengths[clip_ids].to(dtype=torch.float32)
-        num_bins = self.num_bins_per_clip[clip_ids]
-        failed_bin = torch.floor(failed_at_time_step / clip_lengths * num_bins.to(dtype=torch.float32)).long()
-        failed_bin = torch.clamp(failed_bin, min=0)
-        failed_bin = torch.minimum(failed_bin, num_bins - 1)
-        flat_ids = clip_ids * self.max_num_bins + failed_bin
-        counts = torch.bincount(flat_ids, minlength=self.num_clips * self.max_num_bins).to(dtype=torch.float32)
-        self.current_bin_failed_count[:] = counts.view(self.num_clips, self.max_num_bins)
+        """Compatibility wrapper: every supplied failure is also one observed exposure."""
+        self.update_current_bin_outcome_count(
+            failed_at_time_step,
+            clip_ids=clip_ids,
+        )
 
     def update_bin_failed_count(self):
-        """At every rl environment step, update the failed count with the current bin failed count."""
+        """Update failure and exposure EMAs after all reset/visit events for this environment step."""
         self.bin_failed_count = (self.adaptive_alpha * self.current_bin_failed_count) + (
             1 - self.adaptive_alpha
         ) * self.bin_failed_count
+        self.bin_exposure_count = (self.adaptive_alpha * self.current_bin_exposure_count) + (
+            1 - self.adaptive_alpha
+        ) * self.bin_exposure_count
         self.current_bin_failed_count.zero_()
+        self.current_bin_exposure_count.zero_()
 
     @property
     def sampling_probabilities(self) -> torch.Tensor:
@@ -1738,32 +2556,304 @@ class AdaptiveTimestepsSampler:
         return self._sampling_probabilities_for_clip(0)
 
     def sample(self, clip_ids_or_num_samples: torch.Tensor | int) -> torch.Tensor:
+        """Compatibility API returning phases sampled on the valid-start grid."""
         if isinstance(clip_ids_or_num_samples, int):
             clip_ids = self._resolve_clip_ids(None, clip_ids_or_num_samples)
         else:
             clip_ids = self._resolve_clip_ids(clip_ids_or_num_samples, int(clip_ids_or_num_samples.numel()))
 
-        phases = torch.zeros((clip_ids.numel(),), dtype=torch.float32, device=self.device)
         if clip_ids.numel() == 0:
-            return phases
+            return torch.zeros((0,), dtype=torch.float32, device=self.device)
+        sampled_steps = self.sample_time_steps(clip_ids)
+        valid_start_counts = self.valid_start_counts[clip_ids].to(dtype=torch.float32)
+        phase_offsets = sampled_steps.to(dtype=torch.float32) + torch.rand(clip_ids.numel(), device=self.device)
+        return phase_offsets / valid_start_counts
 
-        unique_clip_ids, inverse = torch.unique(clip_ids, return_inverse=True)
-        for local_idx, clip_id_tensor in enumerate(unique_clip_ids):
-            clip_id = int(clip_id_tensor.item())
-            env_mask = inverse == local_idx
-            num_samples = int(env_mask.sum().item())
-            sampled_bins = torch.multinomial(self._sampling_probabilities_for_clip(clip_id), num_samples, replacement=True)
-            num_bins = float(self.num_bins_per_clip[clip_id].item())
-            phases[env_mask] = (sampled_bins.to(dtype=torch.float32) + torch.rand(num_samples, device=self.device)) / num_bins
-        return phases
+    def sample_time_steps(
+        self,
+        clip_ids: torch.Tensor,
+        *,
+        exclude_zero: bool = False,
+        windows: torch.Tensor | None = None,
+        window_valid: torch.Tensor | None = None,
+        window_density_boost: float = 1.0,
+        window_target_probability: float | None = None,
+    ) -> torch.Tensor:
+        """Sample valid discrete reset timesteps, optionally with contact-window bias."""
+        sampled_steps, _ = self._sample_time_steps_with_probabilities(
+            clip_ids,
+            exclude_zero=exclude_zero,
+            windows=windows,
+            window_valid=window_valid,
+            window_density_boost=window_density_boost,
+            window_target_probability=window_target_probability,
+        )
+        return sampled_steps
 
-    def get_stats(self):
+    def _sample_time_steps_with_probabilities(
+        self,
+        clip_ids: torch.Tensor,
+        *,
+        exclude_zero: bool = False,
+        windows: torch.Tensor | None = None,
+        window_valid: torch.Tensor | None = None,
+        window_density_boost: float = 1.0,
+        window_target_probability: float | None = None,
+        _trusted_inputs: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample a reset batch and retain its already-validated probability rows."""
+        probabilities = self.timestep_probabilities_for_samples(
+            clip_ids,
+            exclude_zero=exclude_zero,
+            windows=windows,
+            window_valid=window_valid,
+            window_density_boost=window_density_boost,
+            window_target_probability=window_target_probability,
+            _trusted_inputs=_trusted_inputs,
+        )
+        if probabilities.shape[0] == 0:
+            sampled_steps = torch.zeros((0,), dtype=torch.long, device=self.device)
+        else:
+            sampled_steps = torch.multinomial(probabilities, 1, replacement=True).squeeze(1)
+        return sampled_steps, probabilities
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "version": 3,
+            # These payloads also serve as in-memory canonical-boundary
+            # snapshots.  ``cpu()`` aliases CPU-resident live buffers, so each
+            # tensor must own its storage before reset/init mutates the source.
+            "clip_lengths": self.clip_lengths.detach().to("cpu").clone(),
+            "valid_start_counts": self.valid_start_counts.detach().to("cpu").clone(),
+            "num_bins_per_clip": self.num_bins_per_clip.detach().to("cpu").clone(),
+            "env_fps": int(self.env_fps),
+            "adaptive_kernel_size": int(self.adaptive_kernel_size),
+            "adaptive_lambda": float(self.adaptive_lambda),
+            "adaptive_uniform_ratio": float(self.adaptive_uniform_ratio),
+            "adaptive_alpha": float(self.adaptive_alpha),
+            "current_bin_failed_count": self.current_bin_failed_count.detach().to("cpu").clone(),
+            "bin_failed_count": self.bin_failed_count.detach().to("cpu").clone(),
+            "current_bin_exposure_count": self.current_bin_exposure_count.detach().to("cpu").clone(),
+            "bin_exposure_count": self.bin_exposure_count.detach().to("cpu").clone(),
+        }
+
+    @staticmethod
+    def _checkpoint_integer_scalar(value: Any, *, path: str, minimum: int | None = None) -> int:
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError(f"Adaptive sampler checkpoint {path} must be one integer scalar.")
+            value = value.item()
+        if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+            raise ValueError(f"Adaptive sampler checkpoint {path} must be an integer, got {value!r}.")
+        parsed = int(value)
+        if minimum is not None and parsed < minimum:
+            raise ValueError(
+                f"Adaptive sampler checkpoint {path} must be >= {minimum}, got {parsed}."
+            )
+        return parsed
+
+    @staticmethod
+    def _checkpoint_real_scalar(value: Any, *, path: str) -> float:
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError(f"Adaptive sampler checkpoint {path} must be one real scalar.")
+            value = value.item()
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError(f"Adaptive sampler checkpoint {path} must be a real number, got {value!r}.")
+        parsed = float(value)
+        if not np.isfinite(parsed):
+            raise ValueError(f"Adaptive sampler checkpoint {path} must be finite, got {value!r}.")
+        return parsed
+
+    def _checkpoint_integer_tensor(self, value: Any, *, path: str) -> torch.Tensor:
+        if value is None:
+            raise ValueError(f"Adaptive sampler checkpoint is missing {path}.")
+        restored = torch.as_tensor(value, device=self.device)
+        if restored.dtype == torch.bool or restored.is_floating_point() or restored.is_complex():
+            raise ValueError(
+                f"Adaptive sampler checkpoint {path} must use an integer dtype, got {restored.dtype}."
+            )
+        return restored.to(dtype=torch.long).reshape(-1)
+
+    def _prepare_state_dict(self, state: dict[str, Any]) -> dict[str, torch.Tensor]:
+        """Validate the complete sampler payload without mutating live buffers."""
+
+        if not isinstance(state, dict):
+            raise ValueError("Adaptive timestep sampler checkpoint state must be a dictionary.")
+        version = self._checkpoint_integer_scalar(state.get("version", 0), path="version")
+        if version not in (1, 2, 3):
+            raise ValueError(f"Unsupported adaptive timestep sampler checkpoint version: {state.get('version')!r}.")
+        geometry = {
+            "clip_lengths": self.clip_lengths,
+            "valid_start_counts": self.valid_start_counts,
+            "num_bins_per_clip": self.num_bins_per_clip,
+        }
+        for key, expected in geometry.items():
+            restored = self._checkpoint_integer_tensor(state.get(key), path=key)
+            if not torch.equal(restored, expected):
+                raise ValueError(
+                    f"Adaptive sampler checkpoint {key} does not match the current motion bank: "
+                    f"checkpoint={restored.detach().cpu().tolist()}, current={expected.detach().cpu().tolist()}."
+                )
+        checkpoint_env_fps = self._checkpoint_integer_scalar(
+            state.get("env_fps", -1),
+            path="env_fps",
+            minimum=1,
+        )
+        if checkpoint_env_fps != int(self.env_fps):
+            raise ValueError(
+                f"Adaptive sampler checkpoint env_fps={state.get('env_fps')} does not match current {self.env_fps}."
+            )
+
+        runtime_hyperparameters: dict[str, int | float] = {
+            "adaptive_kernel_size": int(self.adaptive_kernel_size),
+            "adaptive_lambda": float(self.adaptive_lambda),
+            "adaptive_uniform_ratio": float(self.adaptive_uniform_ratio),
+            "adaptive_alpha": float(self.adaptive_alpha),
+        }
+        if version >= 3:
+            checkpoint_hyperparameters: dict[str, int | float] = {
+                "adaptive_kernel_size": self._checkpoint_integer_scalar(
+                    state.get("adaptive_kernel_size"),
+                    path="adaptive_kernel_size",
+                    minimum=1,
+                ),
+                "adaptive_lambda": self._checkpoint_real_scalar(
+                    state.get("adaptive_lambda"), path="adaptive_lambda"
+                ),
+                "adaptive_uniform_ratio": self._checkpoint_real_scalar(
+                    state.get("adaptive_uniform_ratio"), path="adaptive_uniform_ratio"
+                ),
+                "adaptive_alpha": self._checkpoint_real_scalar(
+                    state.get("adaptive_alpha"), path="adaptive_alpha"
+                ),
+            }
+            hyperparameter_mismatches = [
+                f"{key}: checkpoint={checkpoint_hyperparameters[key]!r}, current={current!r}"
+                for key, current in runtime_hyperparameters.items()
+                if checkpoint_hyperparameters[key] != current
+            ]
+            if hyperparameter_mismatches:
+                raise ValueError(
+                    "Adaptive sampler checkpoint hyperparameters do not match the current sampler: "
+                    + "; ".join(hyperparameter_mismatches)
+                )
+        else:
+            # Versions 1/2 predate serialized sampler hyperparameters.  The
+            # production MotionCommand constructor used these exact defaults,
+            # so legacy states remain safe only with that historical runtime.
+            legacy_defaults: dict[str, int | float] = {
+                "adaptive_kernel_size": 1,
+                "adaptive_lambda": 0.8,
+                "adaptive_uniform_ratio": 0.1,
+                "adaptive_alpha": 0.001,
+            }
+            legacy_mismatches = [
+                f"{key}: legacy_default={legacy_defaults[key]!r}, current={current!r}"
+                for key, current in runtime_hyperparameters.items()
+                if legacy_defaults[key] != current
+            ]
+            if legacy_mismatches:
+                raise ValueError(
+                    f"Adaptive sampler checkpoint version {version} does not encode sampler "
+                    "hyperparameters and can only be restored with the historical production defaults: "
+                    + "; ".join(legacy_mismatches)
+                )
+
+        restored_buffers: dict[str, torch.Tensor] = {}
+        required_buffer_names = ["current_bin_failed_count", "bin_failed_count"]
+        if version >= 2:
+            required_buffer_names.extend(("current_bin_exposure_count", "bin_exposure_count"))
+        valid_mask = (
+            torch.arange(self.max_num_bins, device=self.device).unsqueeze(0)
+            < self.num_bins_per_clip.unsqueeze(1)
+        )
+        for key in required_buffer_names:
+            target = getattr(self, key)
+            raw_value = state.get(key)
+            if raw_value is None:
+                raise ValueError(f"Adaptive sampler checkpoint is missing {key}.")
+            restored = torch.as_tensor(raw_value, device=self.device)
+            if restored.shape != target.shape:
+                raise ValueError(
+                    f"Adaptive sampler checkpoint {key} shape {tuple(restored.shape)} does not match "
+                    f"current {tuple(target.shape)}."
+                )
+            if restored.dtype != target.dtype:
+                raise ValueError(
+                    f"Adaptive sampler checkpoint {key} dtype {restored.dtype} does not match "
+                    f"current {target.dtype}."
+                )
+            if not bool(torch.isfinite(restored).all().item()):
+                raise ValueError(f"Adaptive sampler checkpoint {key} contains NaN or infinity.")
+            if bool((restored < 0.0).any().item()):
+                raise ValueError(f"Adaptive sampler checkpoint {key} must be non-negative.")
+            if bool((restored[~valid_mask] != 0.0).any().item()):
+                raise ValueError(
+                    f"Adaptive sampler checkpoint {key} has nonzero values in padded invalid bins."
+                )
+            restored_buffers[key] = restored.detach().clone()
+
+        if version >= 2:
+            for failed_key, exposure_key in (
+                ("current_bin_failed_count", "current_bin_exposure_count"),
+                ("bin_failed_count", "bin_exposure_count"),
+            ):
+                failed = restored_buffers[failed_key]
+                exposure = restored_buffers[exposure_key]
+                tolerance = 1.0e-6 * torch.maximum(torch.ones_like(exposure), exposure)
+                if bool((failed > exposure + tolerance).any().item()):
+                    raise ValueError(
+                        f"Adaptive sampler checkpoint {failed_key} exceeds {exposure_key}; "
+                        "failure events must be a subset of observed exposures."
+                    )
+        else:
+            # Version 1 stored raw failure EMA only.  Unit exposure on valid
+            # bins preserves its relative adaptive priorities while allowing
+            # the new failure-rate sampler to resume safely.
+            restored_buffers["current_bin_exposure_count"] = restored_buffers[
+                "current_bin_failed_count"
+            ].clone()
+            legacy_exposure = torch.zeros_like(self.bin_exposure_count)
+            for clip_id in range(self.num_clips):
+                valid_bins = int(self.num_bins_per_clip[clip_id].item())
+                # v1 stored a failure-count EMA rather than a rate denominator.
+                # A clip-wise constant at least as large as every failure bin
+                # preserves the old relative priorities while satisfying the
+                # v2+ invariant that failures are a subset of exposures.
+                max_failure = restored_buffers["bin_failed_count"][
+                    clip_id, :valid_bins
+                ].max()
+                legacy_exposure[clip_id, :valid_bins] = torch.clamp(
+                    max_failure,
+                    min=1.0,
+                )
+            restored_buffers["bin_exposure_count"] = legacy_exposure
+        return restored_buffers
+
+    def validate_state_dict(self, state: dict[str, Any]) -> None:
+        """Prove that ``load_state_dict`` can apply the payload atomically."""
+
+        self._prepare_state_dict(state)
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore adaptive statistics after complete fail-closed validation."""
+
+        restored_buffers = self._prepare_state_dict(state)
+        for key, restored in restored_buffers.items():
+            getattr(self, key).copy_(restored)
+
+    def get_stats(self, probability_overrides: list[torch.Tensor] | None = None):
         # Metrics
         entropies: list[torch.Tensor] = []
         top1_probs: list[torch.Tensor] = []
         top1_bins: list[torch.Tensor] = []
         for clip_id in range(self.num_clips):
-            prob = self._sampling_probabilities_for_clip(clip_id)
+            prob = (
+                self._sampling_probabilities_for_clip(clip_id)
+                if probability_overrides is None
+                else probability_overrides[clip_id]
+            )
             if prob.numel() <= 1:
                 entropies.append(torch.zeros((), device=self.device, dtype=torch.float32))
                 top1_probs.append(torch.ones((), device=self.device, dtype=torch.float32))
@@ -1815,6 +2905,7 @@ class MotionCommand(CommandTermBase):
         self._terrain_row_stride: float = 0.0
         self._terrain_row_count: int = 0
         self._forced_clip_idx: int | None = None
+        self._forced_reset_timestep: int | None = None
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
@@ -1822,6 +2913,14 @@ class MotionCommand(CommandTermBase):
         self.manual_pickup_button: torch.Tensor | None = None
         self.manual_drop_button_override_enabled = False
         self.manual_drop_button: torch.Tensor | None = None
+        self._manual_forward_after_lift_enabled = False
+        self._manual_forward_after_lift_command_m = 0.0
+        self._manual_forward_after_lift_rel_z_delta_m = 0.0
+        self._manual_forward_after_lift_consecutive_steps = 0
+        self._manual_forward_after_lift_baseline_object_z: torch.Tensor | None = None
+        self._manual_forward_after_lift_consecutive_count: torch.Tensor | None = None
+        self._manual_forward_after_lift_triggered: torch.Tensor | None = None
+        self._manual_forward_after_lift_trigger_episode_step: torch.Tensor | None = None
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w: torch.Tensor | None = None
         self.manual_object_reset_rpy_offset: torch.Tensor | None = None
@@ -1847,7 +2946,14 @@ class MotionCommand(CommandTermBase):
         self._fixed_clip_ids: torch.Tensor | None = None
         self.object_name: str = "object"
         self.object_indices_in_simulator: torch.Tensor | None = None
+        # One authoritative active-object snapshot is shared by every WBT
+        # consumer during a control step.  In IsaacSim, repeatedly indexing
+        # AllRootStatesProxy otherwise performs CUDA-to-host index decoding for
+        # each position/quaternion/velocity property access.
+        self._simulator_object_state_snapshot: torch.Tensor | None = None
+        self._simulator_object_state_snapshot_ready = False
         self._debug_representative_clip_ids: torch.Tensor | None = None
+        self._contact_prior_active = False
         self._contact_prior_available = False
         self._contact_prior_force_body_names_by_region: dict[str, list[str]] = {}
         self._contact_prior_position_body_names_by_region: dict[str, list[str]] = {}
@@ -1862,17 +2968,60 @@ class MotionCommand(CommandTermBase):
         self._adaptive_sampling_contact_interval_root: Path | None = None
         self._adaptive_sampling_contact_window_by_clip: torch.Tensor | None = None
         self._adaptive_sampling_contact_window_valid_by_clip: torch.Tensor | None = None
+        # Python-side copy of the static contact bank.  Hot-path diagnostics
+        # use this to avoid per-clip CUDA ``.item()`` calls for indices and
+        # interval endpoints.
+        self._adaptive_sampling_contact_intervals_by_clip: dict[int, tuple[int, int]] = {}
+        # ``device`` is assigned by setup(), after CommandManager constructs
+        # every term.  Keep constructor state device-independent and publish
+        # device scalars only once setup has bound the environment device.
         self._uniform_t1_window_last_reset_available_frac = 0.0
         self._uniform_t1_window_last_reset_sample_frac = 0.0
         self._uniform_t1_window_last_reset_expected_sample_frac = 0.0
         self._uniform_t1_window_last_reset_sample_frac_valid = 0.0
         self._uniform_t1_window_last_reset_expected_sample_frac_valid = 0.0
         self._uniform_t1_window_last_reset_mean_window_len = 0.0
+        self._rank_local_shard_metadata: dict[str, Any] | None = None
+        self._rank_local_inverse_cover_weights: torch.Tensor | None = None
+        self.distributed_loss_weight = 1.0
+        self._static_default_pose_prepend_steps = 0
+        self._static_default_pose_append_steps = 0
         self._runtime_default_pose_prepend_enabled = False
         self._runtime_default_pose_prepend_steps = 0
         self._runtime_default_pose_prepend_active: torch.Tensor | None = None
         self._runtime_default_pose_prepend_step: torch.Tensor | None = None
         self._runtime_default_pose_prepend_defaults: dict[str, torch.Tensor] = {}
+
+    def _effective_initial_pose_noise_config(self) -> NoiseToInitialPoseConfig:
+        """Return the final-writer reset randomization configured for this run."""
+
+        randomization_manager = getattr(self._env, "randomization_manager", None)
+        get_state = getattr(randomization_manager, "get_state", None)
+        state = (
+            get_state("motion_relative_reset_randomizer_state")
+            if callable(get_state)
+            else None
+        )
+        if state is None:
+            return self.init_pose_cfg
+        noise_config = getattr(state, "noise_config", None)
+        if not isinstance(noise_config, NoiseToInitialPoseConfig):
+            raise TypeError(
+                "motion_relative_reset_randomizer_state must expose a "
+                "NoiseToInitialPoseConfig as noise_config."
+            )
+        return noise_config
+
+    def _initialize_uniform_t1_window_metric_state(self) -> None:
+        zeros = torch.zeros((6,), device=self.device, dtype=torch.float32).unbind()
+        (
+            self._uniform_t1_window_last_reset_available_frac,
+            self._uniform_t1_window_last_reset_sample_frac,
+            self._uniform_t1_window_last_reset_expected_sample_frac,
+            self._uniform_t1_window_last_reset_sample_frac_valid,
+            self._uniform_t1_window_last_reset_expected_sample_frac_valid,
+            self._uniform_t1_window_last_reset_mean_window_len,
+        ) = zeros
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -1882,6 +3031,17 @@ class MotionCommand(CommandTermBase):
         if clip_idx < 0 or clip_idx >= self.motion.num_clips:
             raise ValueError(f"clip_idx {clip_idx} out of range for {self.motion.num_clips} clips.")
         self._forced_clip_idx = int(clip_idx)
+
+    def set_forced_reset_timestep(self, timestep: int | None) -> None:
+        """Force an exact motion timestep on reset, primarily for controlled evaluation."""
+        if timestep is None:
+            self._forced_reset_timestep = None
+            return
+        if isinstance(timestep, bool) or not isinstance(timestep, numbers.Integral):
+            raise TypeError(f"timestep must be an integer or None, got {timestep!r}.")
+        if int(timestep) < 0:
+            raise ValueError(f"timestep must be non-negative, got {timestep}.")
+        self._forced_reset_timestep = int(timestep)
 
     def set_fixed_clip_ids_for_envs(self, env_ids, clip_ids) -> None:
         """Pin specific envs to specific clips for subsequent resets."""
@@ -1908,9 +3068,495 @@ class MotionCommand(CommandTermBase):
         self._training_total_iterations = None if total_iterations is None else int(total_iterations)
         self._refresh_current_clip_sampling_weights()
 
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        """Serialize motion-bank adaptive curriculum state for exact resume."""
+        state: dict[str, Any] = {
+            "version": 3,
+            "clip_ids": list(self.motion.clip_ids),
+            "valid_start_counts": self._valid_start_counts()
+            .to(dtype=torch.long)
+            .detach()
+            .to("cpu")
+            .clone(),
+            "clip_weighting_strategy": str(self.clip_weighting_strategy),
+            "training_iteration": self._training_iteration,
+            "distributed_loss_weight": float(self.distributed_loss_weight),
+            "contact_prior": self._get_contact_prior_checkpoint_state(),
+        }
+        if self.adaptive_timesteps_sampler is not None:
+            state["adaptive_timesteps_sampler"] = self.adaptive_timesteps_sampler.state_dict()
+        for key in ("_clip_success_counts", "_clip_total_counts", "_raw_clip_sampling_weights"):
+            value = getattr(self, key, None)
+            if isinstance(value, torch.Tensor):
+                state[key.removeprefix("_")] = value.detach().to("cpu").clone()
+        return state
+
+    @staticmethod
+    def _contact_prior_checkpoint_tensor_names() -> tuple[str, ...]:
+        return (
+            "total_count",
+            "contact_sum",
+            "force_mean",
+            "force_count",
+            "position_mean",
+            "position_count",
+        )
+
+    def _contact_prior_checkpoint_targets(self) -> dict[str, torch.Tensor | None]:
+        return {
+            "total_count": getattr(self, "_contact_prior_total_count", None),
+            "contact_sum": getattr(self, "_contact_prior_contact_sum", None),
+            "force_mean": getattr(self, "_contact_prior_force_mean", None),
+            "force_count": getattr(self, "_contact_prior_force_count", None),
+            "position_mean": getattr(self, "_contact_prior_position_mean", None),
+            "position_count": getattr(self, "_contact_prior_position_count", None),
+        }
+
+    def _contact_prior_checkpoint_schema(self) -> dict[str, Any]:
+        region_names = list(_CONTACT_PRIOR_REGION_NAMES)
+        force_names_by_region = getattr(self, "_contact_prior_force_body_names_by_region", {})
+        position_names_by_region = getattr(self, "_contact_prior_position_body_names_by_region", {})
+        return {
+            "clip_ids": list(self.motion.clip_ids),
+            "phase_names": list(_CONTACT_PRIOR_PHASE_NAMES),
+            "region_names": region_names,
+            "force_body_names_by_region": {
+                region_name: list(force_names_by_region.get(region_name, [])) for region_name in region_names
+            },
+            "position_body_names_by_region": {
+                region_name: list(position_names_by_region.get(region_name, [])) for region_name in region_names
+            },
+        }
+
+    def _validate_contact_prior_checkpoint_schema(self, schema: Any) -> None:
+        expected_schema = self._contact_prior_checkpoint_schema()
+        expected_keys = set(expected_schema)
+        if not isinstance(schema, dict) or set(schema) != expected_keys:
+            actual_keys = sorted(map(str, schema)) if isinstance(schema, dict) else type(schema).__name__
+            raise ValueError(
+                "Motion command checkpoint contact_prior.schema must contain exactly "
+                f"{sorted(expected_keys)}; got {actual_keys}."
+            )
+        for axis_name in ("clip_ids", "phase_names", "region_names"):
+            axis_values = schema[axis_name]
+            if not isinstance(axis_values, list) or not all(type(value) is str for value in axis_values):
+                raise ValueError(
+                    f"Motion command checkpoint contact_prior.schema.{axis_name} must be an ordered list of strings."
+                )
+        checkpoint_region_names = schema["region_names"]
+        for mapping_name in ("force_body_names_by_region", "position_body_names_by_region"):
+            mapping = schema[mapping_name]
+            if not isinstance(mapping, dict) or set(mapping) != set(checkpoint_region_names):
+                raise ValueError(
+                    f"Motion command checkpoint contact_prior.schema.{mapping_name} must map every declared "
+                    "region exactly once."
+                )
+            for region_name, body_names in mapping.items():
+                if type(region_name) is not str or not isinstance(body_names, list) or not all(
+                    type(body_name) is str for body_name in body_names
+                ):
+                    raise ValueError(
+                        f"Motion command checkpoint contact_prior.schema.{mapping_name} values must be "
+                        "ordered lists of body-name strings."
+                    )
+        if schema != expected_schema:
+            raise ValueError(
+                "Motion command checkpoint contact-prior clip/phase/region schema differs from the current runtime: "
+                f"checkpoint={schema!r}, current={expected_schema!r}."
+            )
+
+    def _contact_prior_runtime_flags(self) -> tuple[bool, bool]:
+        active = getattr(self, "_contact_prior_active", False)
+        available = getattr(self, "_contact_prior_available", False)
+        if type(active) is not bool or type(available) is not bool:
+            raise RuntimeError(
+                "Motion command contact-prior active/available flags must be booleans before checkpointing."
+            )
+        if available and not active:
+            raise RuntimeError("Motion command contact prior cannot be available while it is inactive.")
+        return active, available
+
+    def _contact_prior_expected_tensor_shapes(self) -> dict[str, tuple[int, ...]]:
+        num_clips = len(self.motion.clip_ids)
+        num_regions = len(_CONTACT_PRIOR_REGION_NAMES)
+        prefix = (num_clips, _CONTACT_PRIOR_PHASE_COUNT)
+        return {
+            "total_count": prefix,
+            "contact_sum": (*prefix, num_regions),
+            "force_mean": (*prefix, num_regions),
+            "force_count": (*prefix, num_regions),
+            "position_mean": (*prefix, num_regions, 3),
+            "position_count": (*prefix, num_regions),
+        }
+
+    def _get_contact_prior_checkpoint_state(self) -> dict[str, Any]:
+        """Snapshot all online contact-prior statistics without aliasing live CPU buffers."""
+
+        active, available = self._contact_prior_runtime_flags()
+        targets = self._contact_prior_checkpoint_targets()
+        expected_shapes = self._contact_prior_expected_tensor_shapes()
+        tensors: dict[str, torch.Tensor] = {}
+        for name in self._contact_prior_checkpoint_tensor_names():
+            target = targets[name]
+            if not isinstance(target, torch.Tensor):
+                raise RuntimeError(
+                    f"Motion command contact-prior tensor {name!r} is not initialized; "
+                    "checkpointing before init_buffers() cannot provide exact resume."
+                )
+            if tuple(target.shape) != expected_shapes[name] or target.dtype != torch.float32:
+                raise RuntimeError(
+                    f"Motion command live contact-prior tensor {name!r} has incompatible "
+                    f"shape/dtype {tuple(target.shape)}/{target.dtype}; expected "
+                    f"{expected_shapes[name]}/torch.float32."
+                )
+            tensors[name] = target.detach().to("cpu").clone()
+        # Validate the live snapshot through the same path used for loaded data.
+        self._validate_contact_prior_tensor_invariants(tensors)
+        return {
+            "active": active,
+            "available": available,
+            "schema": self._contact_prior_checkpoint_schema(),
+            **tensors,
+        }
+
+    def _validate_contact_prior_tensor_invariants(self, tensors: dict[str, torch.Tensor]) -> None:
+        count_names = ("total_count", "contact_sum", "force_count", "position_count")
+        for name, value in tensors.items():
+            if not bool(torch.isfinite(value).all().item()):
+                raise ValueError(f"Motion command checkpoint contact_prior.{name} contains NaN or infinity.")
+        for name in count_names:
+            value = tensors[name]
+            if bool((value < 0.0).any().item()):
+                raise ValueError(f"Motion command checkpoint contact_prior.{name} must be non-negative.")
+            if bool((value != torch.floor(value)).any().item()):
+                raise ValueError(f"Motion command checkpoint contact_prior.{name} must contain integer counts.")
+
+        total_count = tensors["total_count"].unsqueeze(-1)
+        contact_sum = tensors["contact_sum"]
+        if bool((contact_sum > total_count).any().item()):
+            raise ValueError(
+                "Motion command checkpoint contact_prior.contact_sum cannot exceed total_count."
+            )
+        for name in ("force_count", "position_count"):
+            if not torch.equal(tensors[name], contact_sum):
+                raise ValueError(
+                    f"Motion command checkpoint contact_prior.{name} must equal contact_sum; "
+                    "each mean sample must correspond to one observed contact."
+                )
+
+        force_mean = tensors["force_mean"]
+        if bool((force_mean < 0.0).any().item()):
+            raise ValueError("Motion command checkpoint contact_prior.force_mean must be non-negative.")
+        no_force_samples = tensors["force_count"] == 0.0
+        if bool((force_mean[no_force_samples] != 0.0).any().item()):
+            raise ValueError(
+                "Motion command checkpoint contact_prior.force_mean must be zero where force_count is zero."
+            )
+        no_position_samples = tensors["position_count"] == 0.0
+        if bool((tensors["position_mean"][no_position_samples] != 0.0).any().item()):
+            raise ValueError(
+                "Motion command checkpoint contact_prior.position_mean must be zero where position_count is zero."
+            )
+
+    def _prepare_contact_prior_checkpoint_state(self, state: Any) -> dict[str, torch.Tensor]:
+        if not isinstance(state, dict):
+            raise ValueError("Motion command checkpoint contact_prior must be a dictionary.")
+        expected_keys = {
+            "active",
+            "available",
+            "schema",
+            *self._contact_prior_checkpoint_tensor_names(),
+        }
+        if set(state) != expected_keys:
+            missing = sorted(map(str, expected_keys - set(state)))
+            unexpected = sorted(map(str, set(state) - expected_keys))
+            raise ValueError(
+                "Motion command checkpoint contact_prior keys differ from the exact-resume schema: "
+                f"missing={missing}, unexpected={unexpected}."
+            )
+
+        checkpoint_active = state["active"]
+        checkpoint_available = state["available"]
+        if type(checkpoint_active) is not bool or type(checkpoint_available) is not bool:
+            raise ValueError("Motion command checkpoint contact_prior active/available must be booleans.")
+        if checkpoint_available and not checkpoint_active:
+            raise ValueError("Motion command checkpoint contact_prior cannot be available while inactive.")
+        current_active, current_available = self._contact_prior_runtime_flags()
+        if (checkpoint_active, checkpoint_available) != (current_active, current_available):
+            raise ValueError(
+                "Motion command checkpoint contact-prior activation differs from the current runtime: "
+                f"checkpoint=(active={checkpoint_active}, available={checkpoint_available}), "
+                f"current=(active={current_active}, available={current_available})."
+            )
+
+        self._validate_contact_prior_checkpoint_schema(state["schema"])
+
+        targets = self._contact_prior_checkpoint_targets()
+        expected_shapes = self._contact_prior_expected_tensor_shapes()
+        restored_tensors: dict[str, torch.Tensor] = {}
+        for name in self._contact_prior_checkpoint_tensor_names():
+            target = targets[name]
+            if not isinstance(target, torch.Tensor):
+                raise ValueError(
+                    f"Current motion command contact-prior tensor {name!r} is not initialized; exact resume is impossible."
+                )
+            raw_value = state[name]
+            if not isinstance(raw_value, torch.Tensor):
+                raise ValueError(f"Motion command checkpoint contact_prior.{name} must be a tensor.")
+            restored = raw_value.detach().to(device=self.device)
+            if tuple(target.shape) != expected_shapes[name] or target.dtype != torch.float32:
+                raise ValueError(
+                    f"Current motion command contact-prior tensor {name!r} has incompatible "
+                    f"shape/dtype {tuple(target.shape)}/{target.dtype}."
+                )
+            if tuple(restored.shape) != expected_shapes[name]:
+                raise ValueError(
+                    f"Motion command checkpoint contact_prior.{name} shape {tuple(restored.shape)} does not match "
+                    f"current schema {expected_shapes[name]}."
+                )
+            if restored.dtype != target.dtype:
+                raise ValueError(
+                    f"Motion command checkpoint contact_prior.{name} dtype {restored.dtype} does not match "
+                    f"current {target.dtype}."
+                )
+            restored_tensors[name] = restored.clone()
+        self._validate_contact_prior_tensor_invariants(restored_tensors)
+        return restored_tensors
+
+    def _process_checkpoint_state(
+        self,
+        state: dict[str, Any] | None,
+        *,
+        validate_only: bool,
+    ) -> None:
+        """Validate, then optionally commit, rank-local curriculum state."""
+        if not state:
+            return
+        if not isinstance(state, dict):
+            raise ValueError("Motion command checkpoint state must be a dictionary.")
+        version = AdaptiveTimestepsSampler._checkpoint_integer_scalar(
+            state.get("version", 0),
+            path="motion_command.version",
+        )
+        if version not in (1, 2, 3):
+            raise ValueError(f"Unsupported motion command checkpoint version: {state.get('version')!r}.")
+        current_contact_prior_active, _ = self._contact_prior_runtime_flags()
+        if version < 3 and current_contact_prior_active:
+            raise ValueError(
+                f"Motion command checkpoint version {version} predates online contact-prior state, "
+                "but the current contact prior is active; exact resume is impossible."
+            )
+        raw_checkpoint_clip_ids = state.get("clip_ids", [])
+        if not isinstance(raw_checkpoint_clip_ids, list) or not all(
+            type(value) is str for value in raw_checkpoint_clip_ids
+        ):
+            raise ValueError("Motion command checkpoint clip_ids must be an ordered list of strings.")
+        checkpoint_clip_ids = list(raw_checkpoint_clip_ids)
+        if checkpoint_clip_ids != list(self.motion.clip_ids):
+            raise ValueError(
+                "Motion command checkpoint belongs to a different clip shard/order: "
+                f"checkpoint={checkpoint_clip_ids}, current={list(self.motion.clip_ids)}."
+            )
+        if self.adaptive_timesteps_sampler is not None:
+            checkpoint_valid_starts = self.adaptive_timesteps_sampler._checkpoint_integer_tensor(
+                state.get("valid_start_counts"),
+                path="motion_command.valid_start_counts",
+            )
+        else:
+            raw_valid_starts = state.get("valid_start_counts")
+            if raw_valid_starts is None:
+                raise ValueError("Motion command checkpoint is missing valid_start_counts.")
+            checkpoint_valid_starts = torch.as_tensor(raw_valid_starts, device=self.device)
+            if (
+                checkpoint_valid_starts.dtype == torch.bool
+                or checkpoint_valid_starts.is_floating_point()
+                or checkpoint_valid_starts.is_complex()
+            ):
+                raise ValueError(
+                    "Motion command checkpoint valid_start_counts must use an integer dtype, "
+                    f"got {checkpoint_valid_starts.dtype}."
+                )
+            checkpoint_valid_starts = checkpoint_valid_starts.to(dtype=torch.long).reshape(-1)
+        current_valid_starts = self._valid_start_counts().to(dtype=torch.long)
+        if not torch.equal(checkpoint_valid_starts, current_valid_starts):
+            raise ValueError(
+                "Motion command checkpoint valid reset geometry differs from the current configuration: "
+                f"checkpoint={checkpoint_valid_starts.detach().cpu().tolist()}, "
+                f"current={current_valid_starts.detach().cpu().tolist()}."
+            )
+        checkpoint_strategy = state.get("clip_weighting_strategy")
+        if type(checkpoint_strategy) is not str:
+            raise ValueError("Motion command checkpoint clip_weighting_strategy must be a string.")
+        if checkpoint_strategy != str(self.clip_weighting_strategy):
+            raise ValueError(
+                "Motion command checkpoint clip weighting strategy differs from the current configuration: "
+                f"checkpoint={checkpoint_strategy!r}, current={self.clip_weighting_strategy!r}."
+            )
+        raw_loss_weight = state.get("distributed_loss_weight", self.distributed_loss_weight)
+        if isinstance(raw_loss_weight, bool) or not isinstance(raw_loss_weight, numbers.Real):
+            raise ValueError(
+                "Motion command checkpoint distributed_loss_weight must be a real number, "
+                f"got {raw_loss_weight!r}."
+            )
+        checkpoint_loss_weight = float(raw_loss_weight)
+        if not np.isfinite(checkpoint_loss_weight) or checkpoint_loss_weight <= 0.0:
+            raise ValueError(
+                "Motion command checkpoint distributed_loss_weight must be finite and positive, "
+                f"got {checkpoint_loss_weight}."
+            )
+        if not np.isclose(checkpoint_loss_weight, self.distributed_loss_weight, rtol=1.0e-6, atol=1.0e-8):
+            raise ValueError(
+                "Motion command checkpoint rank-local loss weight differs from the current shard: "
+                f"checkpoint={checkpoint_loss_weight}, current={self.distributed_loss_weight}."
+            )
+
+        sampler_state = state.get("adaptive_timesteps_sampler")
+        if sampler_state is not None:
+            if self.adaptive_timesteps_sampler is None:
+                raise ValueError("Checkpoint contains adaptive timestep state, but adaptive sampling is disabled.")
+            self.adaptive_timesteps_sampler.validate_state_dict(sampler_state)
+        elif self.adaptive_timesteps_sampler is not None:
+            raise ValueError(
+                "Checkpoint is missing adaptive_timesteps_sampler state while adaptive sampling is enabled. "
+                "A partial curriculum restore would change the resumed sampling distribution."
+            )
+
+        tensor_targets = {
+            "clip_success_counts": self._clip_success_counts,
+            "clip_total_counts": self._clip_total_counts,
+            "raw_clip_sampling_weights": self._raw_clip_sampling_weights,
+        }
+        restored_targets: dict[str, torch.Tensor] = {}
+        for key, target in tensor_targets.items():
+            restored_value = state.get(key)
+            if restored_value is None:
+                if target is not None:
+                    raise ValueError(
+                        f"Checkpoint is missing enabled curriculum tensor {key!r}; refusing a partial restore."
+                    )
+                continue
+            if target is None:
+                raise ValueError(f"Checkpoint contains {key}, but it is not enabled in the current configuration.")
+            restored = torch.as_tensor(restored_value, device=self.device)
+            if restored.shape != target.shape:
+                raise ValueError(
+                    f"Motion command checkpoint {key} shape {tuple(restored.shape)} does not match "
+                    f"current {tuple(target.shape)}."
+                )
+            if restored.dtype != target.dtype:
+                raise ValueError(
+                    f"Motion command checkpoint {key} dtype {restored.dtype} does not match "
+                    f"current {target.dtype}."
+                )
+            if not bool(torch.isfinite(restored).all().item()):
+                raise ValueError(f"Motion command checkpoint {key} contains NaN or infinity.")
+            if bool((restored < 0.0).any().item()):
+                raise ValueError(f"Motion command checkpoint {key} must be non-negative.")
+            restored_targets[key] = restored.detach().clone()
+
+        success = restored_targets.get("clip_success_counts")
+        total = restored_targets.get("clip_total_counts")
+        if success is not None and total is not None and bool((success > total).any().item()):
+            raise ValueError(
+                "Motion command checkpoint clip_success_counts cannot exceed clip_total_counts."
+            )
+        raw_weights = restored_targets.get("raw_clip_sampling_weights")
+        if raw_weights is not None:
+            weight_sum = float(raw_weights.sum().item())
+            if weight_sum <= 0.0 or not np.isclose(weight_sum, 1.0, rtol=1.0e-5, atol=1.0e-6):
+                raise ValueError(
+                    "Motion command checkpoint raw_clip_sampling_weights must have positive unit sum, "
+                    f"got {weight_sum}."
+                )
+
+        training_iteration = state.get("training_iteration")
+        if training_iteration is not None:
+            training_iteration = AdaptiveTimestepsSampler._checkpoint_integer_scalar(
+                training_iteration,
+                path="motion_command.training_iteration",
+                minimum=0,
+            )
+
+        restored_contact_prior: dict[str, torch.Tensor] = {}
+        if version >= 3:
+            restored_contact_prior = self._prepare_contact_prior_checkpoint_state(state.get("contact_prior"))
+
+        # Every component is now known to be compatible.  Apply only after the
+        # complete payload has passed validation so a caught exception cannot
+        # leave a partially restored curriculum.
+        if validate_only:
+            return
+        if sampler_state is not None:
+            self.adaptive_timesteps_sampler.load_state_dict(sampler_state)
+        for key, restored in restored_targets.items():
+            tensor_targets[key].copy_(restored)
+        if training_iteration is not None:
+            self._training_iteration = training_iteration
+        self._refresh_current_clip_sampling_weights()
+        # Commit the six mutually constrained contact-prior buffers last.  All
+        # potentially fallible validation and curriculum refresh work has
+        # completed, so a rejected load cannot partially replace this group.
+        contact_prior_targets = self._contact_prior_checkpoint_targets()
+        for key, restored in restored_contact_prior.items():
+            target = contact_prior_targets[key]
+            assert isinstance(target, torch.Tensor)
+            target.copy_(restored)
+
+    def validate_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        """Validate curriculum state without changing the live command."""
+
+        self._process_checkpoint_state(state, validate_only=True)
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        """Restore curriculum state after strict motion-bank identity validation."""
+
+        self._process_checkpoint_state(state, validate_only=False)
+
+    def _validate_motion_control_timebase(self) -> None:
+        """Require one motion frame per environment control step.
+
+        ``MotionCommand.step`` advances the discrete motion clock exactly once
+        per control step.  A mismatched motion FPS would therefore replay the
+        reference at the wrong physical speed and put AS/contact/prepend
+        coordinates on different timebases.
+        """
+
+        def positive_finite_scalar(value: Any, *, name: str) -> float:
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    raise ValueError(f"{name} must contain exactly one scalar, got shape {tuple(value.shape)}.")
+                value = value.detach().item()
+            elif isinstance(value, np.ndarray):
+                if value.size != 1:
+                    raise ValueError(f"{name} must contain exactly one scalar, got shape {value.shape}.")
+                value = value.reshape(-1)[0]
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
+                raise ValueError(f"{name} must be a finite positive real scalar, got {value!r}.")
+            parsed = float(value)
+            if not np.isfinite(parsed) or parsed <= 0.0:
+                raise ValueError(f"{name} must be finite and positive, got {parsed!r}.")
+            return parsed
+
+        motion_fps = positive_finite_scalar(self.motion.fps, name="motion.fps")
+        control_dt = positive_finite_scalar(self._env.dt, name="env.dt")
+        control_fps = 1.0 / control_dt
+        if not np.isfinite(control_fps):
+            raise ValueError(
+                f"Environment control frequency 1/env.dt must be finite, got env.dt={control_dt!r}."
+            )
+        if not np.isclose(motion_fps, control_fps, rtol=1.0e-6, atol=1.0e-6):
+            raise ValueError(
+                "Motion FPS must match the environment control frequency because MotionCommand advances "
+                "one motion frame per control step: "
+                f"motion.fps={motion_fps}, env.dt={control_dt}, control_fps={control_fps}. "
+                "Resample the motion bank or configure simulator fps/control_decimation to match."
+            )
+
     def setup(self) -> None:
+        self._validate_reset_sampling_curriculum_config(self.motion_cfg)
         self.num_envs = self._env.num_envs
         self.device = self._env.device
+        self._initialize_uniform_t1_window_metric_state()
         self.manual_control_enabled = False
         self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
@@ -1918,6 +3564,14 @@ class MotionCommand(CommandTermBase):
         self.manual_pickup_button = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
         self.manual_drop_button_override_enabled = False
         self.manual_drop_button = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self._manual_forward_after_lift_enabled = False
+        self._manual_forward_after_lift_command_m = 0.0
+        self._manual_forward_after_lift_rel_z_delta_m = 0.0
+        self._manual_forward_after_lift_consecutive_steps = 0
+        self._manual_forward_after_lift_baseline_object_z = None
+        self._manual_forward_after_lift_consecutive_count = None
+        self._manual_forward_after_lift_triggered = None
+        self._manual_forward_after_lift_trigger_episode_step = None
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.manual_object_reset_rpy_offset = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
@@ -1994,9 +3648,28 @@ class MotionCommand(CommandTermBase):
             object_size_scale=self.motion_cfg.object_size_scale,
             allowed_object_categories=self.motion_cfg.allowed_object_categories,
         )
+        self._validate_kinematic_button_motion_object()
+        self._validate_motion_control_timebase()
+        # Rank-local AS shards may intentionally contain only one clip even
+        # though they are a partition (or duplicate-balanced cover) of a
+        # global multi-clip bank.  Load the shard metadata before choosing the
+        # default-pose transition implementation: using the local clip count
+        # alone would splice the transition into the motion tensors and change
+        # the motion clock, reward horizon, and sidecar alignment relative to
+        # an unsharded launch.
+        self._rank_local_shard_metadata = current_rank_local_shard_metadata()
         self.multi_clip = self.motion.num_clips > 1
         if self.multi_clip:
             logger.info("Multi-clip motion bank detected ({} clips).", self.motion.num_clips)
+        elif self._uses_global_multi_clip_transition_semantics():
+            transition_source = self._explicit_motion_transition_source()
+            assert transition_source is not None
+            logger.info(
+                "Motion view contains {} active clip(s) from a {}-clip transition source; "
+                "preserving global multi-clip default-pose transition semantics.",
+                self.motion.num_clips,
+                int(transition_source["source_clip_count"]),
+            )
 
         self._configure_motion_terrain_pairs()
 
@@ -2029,6 +3702,9 @@ class MotionCommand(CommandTermBase):
             self.object_indices_in_simulator = None
         self._configure_runtime_default_pose_prepend()
         self._configure_contact_prior_regions()
+        # The valid reset range depends on future-target lookahead and must be
+        # finalized before constructing the adaptive sampler.
+        self._configure_target_pose_settings()
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -2038,6 +3714,7 @@ class MotionCommand(CommandTermBase):
                 self.device,
                 int(1 / (self._env.dt)),
                 clip_lengths=self.motion.clip_lengths,
+                valid_start_counts=self._valid_start_counts().to(dtype=torch.long),
             )
             if self.multi_clip:
                 logger.info(
@@ -2046,10 +3723,6 @@ class MotionCommand(CommandTermBase):
                 )
         else:
             self.adaptive_timesteps_sampler = None
-        if self.use_adaptive_timesteps_sampler and bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
-            logger.warning(
-                "uniform_t1_window_sampling_enabled=True is ignored while use_adaptive_timesteps_sampler=True."
-            )
         self._configure_adaptive_sampling_contact_interval_bank()
 
         # 5. clip sampling configuration
@@ -2061,17 +3734,200 @@ class MotionCommand(CommandTermBase):
         self._base_clip_weights: torch.Tensor | None = None
         self._clip_success_counts: torch.Tensor | None = None
         self._clip_total_counts: torch.Tensor | None = None
+        self._configure_rank_local_clip_weighting()
+        self._validate_fixed_env_clip_sampling_distribution()
 
         # 6. metrics
         self.metrics: dict[str, torch.Tensor] = {}
 
-        self._configure_target_pose_settings()
         self._init_clip_sampling()
         self.init_buffers()
 
         # 7. visualization markers for isaacsim
         if self._env.viewer and self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM:
             self._setup_visualization_markers_for_isaacsim()
+
+    def _configure_rank_local_clip_weighting(self) -> None:
+        """Correct duplicated shard clips and expose the matching DDP loss scale.
+
+        A clip present on ``cover_count`` ranks receives local base weight
+        ``1 / cover_count``.  Because DDP gives every rank equal weight, the
+        companion rank loss scale is ``world_size * local_mass / global_count``.
+        Together these make every global clip contribute exactly ``1/global_count``.
+        """
+        if self._rank_local_shard_metadata is None:
+            self._rank_local_shard_metadata = current_rank_local_shard_metadata()
+        self._rank_local_inverse_cover_weights = None
+        self.distributed_loss_weight = 1.0
+        metadata = self._rank_local_shard_metadata
+        if metadata is None:
+            return
+        if str(self.clip_weighting_strategy) != "uniform_clip":
+            raise ValueError(
+                "Rank-local global clip correction currently requires clip_weighting_strategy='uniform_clip'; "
+                f"got {self.clip_weighting_strategy!r}. Other strategies require globally synchronized weights."
+            )
+
+        cover_counts = metadata.get("clip_cover_counts")
+        global_clip_count = int(metadata.get("global_clip_count", 0) or 0)
+        world_size = int(metadata.get("world_size", 0) or 0)
+        if not isinstance(cover_counts, dict) or global_clip_count <= 0 or world_size <= 0:
+            raise ValueError(
+                "Rank-local shard metadata predates global clip weighting correction. "
+                "Regenerate shards with scripts/prepare_as_rank_shards.py before training or inference."
+            )
+
+        metadata_clip_ids = set(str(clip_id) for clip_id in cover_counts)
+        current_clip_ids = set(self.motion.clip_ids)
+        if metadata_clip_ids != current_clip_ids:
+            raise ValueError(
+                "Rank-local shard correction metadata does not match the loaded motion clips: "
+                f"metadata_only={sorted(metadata_clip_ids - current_clip_ids)}, "
+                f"motion_only={sorted(current_clip_ids - metadata_clip_ids)}."
+            )
+        counts = torch.tensor(
+            [int(cover_counts[clip_id]) for clip_id in self.motion.clip_ids],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if torch.any(counts <= 0):
+            raise ValueError("Rank-local shard clip_cover_counts must all be positive.")
+        self._rank_local_inverse_cover_weights = counts.reciprocal()
+        local_mass = float(self._rank_local_inverse_cover_weights.sum().item())
+        expected_loss_weight = float(world_size) * local_mass / float(global_clip_count)
+        stored_loss_weight = float(metadata.get("distributed_loss_weight", expected_loss_weight))
+        if not np.isclose(stored_loss_weight, expected_loss_weight, rtol=1.0e-6, atol=1.0e-8):
+            raise ValueError(
+                "Rank-local shard distributed_loss_weight is inconsistent with clip_cover_counts: "
+                f"stored={stored_loss_weight}, expected={expected_loss_weight}."
+            )
+        self.distributed_loss_weight = expected_loss_weight
+        logger.info(
+            "Enabled rank-local global clip correction for {} local / {} global clips; DDP loss weight={:.6f}.",
+            self.motion.num_clips,
+            global_clip_count,
+            self.distributed_loss_weight,
+        )
+
+    def _validate_fixed_env_clip_sampling_distribution(self) -> None:
+        """Fail when a fixed object layout changes the requested clip objective.
+
+        A per-environment object URDF cannot be changed at episode reset, so
+        object-bearing clips are pinned to compatible environments.  The
+        resulting empirical clip frequencies are therefore the actual training
+        distribution; ``_init_clip_sampling`` cannot repair them with a sampler.
+        Require that finite layout to represent the requested uniform-clip
+        (and rank-local inverse-cover) distribution exactly.
+        """
+
+        fixed_clip_ids = self._fixed_clip_ids
+        if fixed_clip_ids is None or int(self.motion.num_clips) <= 1:
+            return
+        if bool(getattr(self._env, "is_evaluating", False)):
+            return
+
+        strategy = str(self.clip_weighting_strategy)
+        if strategy != "uniform_clip":
+            raise ValueError(
+                "Fixed env-to-clip assignment cannot honor clip_weighting_strategy="
+                f"{strategy!r}: fixed object assets bypass clip resampling. Use "
+                "clip_weighting_strategy='uniform_clip' or a simulator layout whose "
+                "object asset can be changed safely at reset."
+            )
+
+        counts = torch.bincount(
+            fixed_clip_ids.to(device=self.device, dtype=torch.long),
+            minlength=int(self.motion.num_clips),
+        ).to(device=self.device, dtype=torch.float64)
+        if counts.numel() != int(self.motion.num_clips) or torch.any(counts <= 0):
+            raise ValueError(
+                "Fixed env-to-clip assignment leaves one or more motion clips unrepresented; "
+                f"num_envs={int(fixed_clip_ids.numel())}, num_clips={int(self.motion.num_clips)}, "
+                f"counts={counts.detach().cpu().tolist()}. Increase per-rank environments or "
+                "change the rank-local shard topology."
+            )
+
+        target_weights = self._rank_local_inverse_cover_weights
+        if target_weights is None:
+            target_weights = torch.ones_like(counts)
+        else:
+            target_weights = target_weights.to(device=self.device, dtype=torch.float64)
+        if (
+            target_weights.numel() != counts.numel()
+            or not torch.isfinite(target_weights).all()
+            or torch.any(target_weights <= 0)
+        ):
+            raise ValueError("Fixed clip assignment received invalid rank-local target weights.")
+
+        actual_probabilities = counts / counts.sum()
+        target_probabilities = target_weights / target_weights.sum()
+        if not torch.allclose(actual_probabilities, target_probabilities, rtol=0.0, atol=1.0e-12):
+            raise ValueError(
+                "Fixed env-to-clip assignment cannot exactly represent the scientific clip "
+                "distribution on this rank. The per-rank environment count/object cycle must "
+                "be compatible with the local clip weights; otherwise DDP optimizes a topology-"
+                "dependent objective. "
+                f"counts={counts.detach().cpu().tolist()}, "
+                f"target_probabilities={target_probabilities.detach().cpu().tolist()}."
+            )
+
+    def _uses_global_multi_clip_transition_semantics(self) -> bool:
+        """Keep sharded launches transition-equivalent to the global bank."""
+
+        transition_source = self._explicit_motion_transition_source()
+        if transition_source is not None:
+            return transition_source["source_semantics"] == "global_multi_clip_runtime"
+        if self.multi_clip:
+            return True
+        metadata = self._rank_local_shard_metadata
+        if metadata is None:
+            return False
+        try:
+            global_clip_count = int(metadata.get("global_clip_count", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return global_clip_count > 1
+
+    def _explicit_motion_transition_source(self) -> dict[str, Any] | None:
+        """Resolve and cross-check explicit timeline lineage, if present.
+
+        New rank shards bind the same record in their object-map root and in
+        ``rank_local_shard``.  Either both copies agree or scientific startup
+        fails; legacy artifacts with neither copy retain the old inference.
+        """
+
+        loader_source = getattr(self.motion, "motion_transition_source", None)
+        metadata = self._rank_local_shard_metadata
+        rank_source = (
+            metadata.get(MOTION_TRANSITION_SOURCE_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
+        if loader_source is None and rank_source is None:
+            return None
+        if isinstance(metadata, dict) and (loader_source is None or rank_source is None):
+            raise ValueError(
+                "Rank-local transition provenance is only partially present; regenerate the "
+                "content-addressed shards."
+            )
+        active_clip_count = int(self.motion.num_clips)
+        normalized_loader = canonical_motion_transition_source(
+            loader_source,
+            active_clip_count=active_clip_count,
+            role=f"MotionLoader.{MOTION_TRANSITION_SOURCE_KEY}",
+        )
+        if rank_source is not None:
+            normalized_rank = canonical_motion_transition_source(
+                rank_source,
+                active_clip_count=active_clip_count,
+                role=f"rank_local_shard.{MOTION_TRANSITION_SOURCE_KEY}",
+            )
+            if normalized_rank != normalized_loader:
+                raise ValueError(
+                    "MotionLoader and rank-local shard transition provenance disagree: "
+                    f"loader={normalized_loader}, rank={normalized_rank}."
+                )
+        return normalized_loader
 
     @staticmethod
     def _normalize_path_key(path: str) -> str:
@@ -2423,6 +4279,7 @@ class MotionCommand(CommandTermBase):
         return True
 
     def _configure_contact_prior_regions(self) -> None:
+        self._contact_prior_active = False
         self._contact_prior_available = False
         self._contact_prior_force_body_names_by_region = {region: [] for region in _CONTACT_PRIOR_REGION_NAMES}
         self._contact_prior_position_body_names_by_region = {region: [] for region in _CONTACT_PRIOR_REGION_NAMES}
@@ -2431,7 +4288,8 @@ class MotionCommand(CommandTermBase):
         }
         if not self.motion.has_object:
             return
-        if not self._should_enable_online_contact_prior():
+        self._contact_prior_active = bool(self._should_enable_online_contact_prior())
+        if not self._contact_prior_active:
             logger.info("Online contact prior disabled: no contact-prior observation term is configured.")
             return
 
@@ -2496,6 +4354,29 @@ class MotionCommand(CommandTermBase):
                     return True
         return False
 
+    def _has_contact_window_observation_consumer(self) -> bool:
+        """Return whether a configured observation term consumes exported contact windows.
+
+        Contact-aware command/button observations are independent of adaptive reset
+        sampling.  In particular, evaluation commonly disables the sampler while it
+        must retain the observation semantics saved by training.
+        """
+
+        observation_manager = getattr(getattr(self, "_env", None), "observation_manager", None)
+        cfg = getattr(observation_manager, "cfg", None)
+        groups = getattr(cfg, "groups", {}) or {}
+        for group_cfg in groups.values():
+            terms = getattr(group_cfg, "terms", {}) or {}
+            for term_cfg in terms.values():
+                func = getattr(term_cfg, "func", "")
+                if isinstance(func, str):
+                    func_path = func.replace(":", ".")
+                else:
+                    func_path = f"{getattr(func, '__module__', '')}.{getattr(func, '__name__', '')}"
+                if func_path in _CONTACT_WINDOW_OBSERVATION_FUNCTION_PATHS:
+                    return True
+        return False
+
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self.object_indices_in_simulator is None:
             raise RuntimeError(
@@ -2511,9 +4392,117 @@ class MotionCommand(CommandTermBase):
         active_object_ids = self._clip_object_ids[self.clip_ids[env_ids_tensor]]
         return self._object_indices_matrix[active_object_ids, env_ids_tensor]
 
+    def _read_active_simulator_object_states(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        all_envs: bool = False,
+    ) -> torch.Tensor:
+        """Read each environment's active object exactly once from the backend."""
+
+        simulator = self._env.simulator
+        simulator_type_getter = getattr(simulator, "get_simulator_type", None)
+        simulator_type = simulator_type_getter() if callable(simulator_type_getter) else None
+
+        # AllRootStatesProxy must reverse-decode flat CUDA indices.  A
+        # single-object IsaacSim WBT task already knows both the object name and
+        # env rows, so route directly through the state adapter instead.
+        state_adapter = getattr(simulator, "_state_adapter", None)
+        direct_getter = getattr(state_adapter, "get_object_states", None)
+        if (
+            not getattr(self, "_multi_object_enabled", False)
+            and simulator_type == SimulatorType.ISAACSIM
+            and callable(direct_getter)
+        ):
+            states = direct_getter(self.object_name, env_ids)
+        else:
+            active_indices = (
+                self._get_active_object_indices()
+                if all_envs
+                else self._get_active_object_indices(env_ids)
+            )
+            states = simulator.all_root_states[active_indices, :13]
+
+        if states.ndim != 2 or states.shape != (env_ids.numel(), 13):
+            raise RuntimeError(
+                "Simulator active-object state read must return shape "
+                f"({env_ids.numel()}, 13), got {tuple(states.shape)}."
+            )
+        return states
+
+    def refresh_simulator_object_state_snapshot(self, env_ids: torch.Tensor | None = None) -> None:
+        """Refresh the shared active-object snapshot after simulator tensor refresh.
+
+        ``env_ids=None`` is the normal once-per-control-step refresh.  Reset
+        synchronization passes a subset, preserving survivor rows while making
+        the freshly written/reset rows authoritative immediately.
+        """
+
+        if not self.motion.has_object:
+            return
+        full_refresh = env_ids is None
+        env_ids_tensor = self._ensure_index_tensor(env_ids)
+        if env_ids_tensor.numel() == 0:
+            return
+        states = self._read_active_simulator_object_states(env_ids_tensor, all_envs=full_refresh)
+        snapshot = getattr(self, "_simulator_object_state_snapshot", None)
+        if snapshot is None or snapshot.shape != (self.num_envs, 13):
+            snapshot = torch.empty(
+                (self.num_envs, 13),
+                device=self.device,
+                dtype=states.dtype,
+            )
+            self._simulator_object_state_snapshot = snapshot
+            self._simulator_object_state_snapshot_ready = False
+        if env_ids is None:
+            snapshot.copy_(states)
+            self._simulator_object_state_snapshot_ready = True
+        else:
+            snapshot[env_ids_tensor] = states
+
+    def _update_simulator_object_state_snapshot(
+        self,
+        env_ids: torch.Tensor,
+        active_states: torch.Tensor,
+    ) -> None:
+        """Update reset/write rows without an unnecessary backend round trip."""
+
+        snapshot = getattr(self, "_simulator_object_state_snapshot", None)
+        if snapshot is None or snapshot.shape != (self.num_envs, 13):
+            snapshot = torch.empty(
+                (self.num_envs, 13),
+                device=self.device,
+                dtype=active_states.dtype,
+            )
+            self._simulator_object_state_snapshot = snapshot
+            self._simulator_object_state_snapshot_ready = False
+        snapshot[env_ids] = active_states[:, :13].to(device=snapshot.device, dtype=snapshot.dtype)
+
+    @property
+    def simulator_object_state_snapshot(self) -> torch.Tensor:
+        """Return the current active-object state shared by WBT consumers."""
+
+        if not self.motion.has_object:
+            states = torch.zeros((self.num_envs, 13), device=self.device, dtype=torch.float32)
+            states[:, 6] = 1.0
+            return states
+        if not getattr(self, "_simulator_object_state_snapshot_ready", False):
+            self.refresh_simulator_object_state_snapshot()
+        snapshot = getattr(self, "_simulator_object_state_snapshot", None)
+        if snapshot is None:
+            raise RuntimeError("Simulator object snapshot refresh did not initialize its buffer.")
+        return snapshot
+
     def _set_simulator_object_states(self, env_ids: torch.Tensor, active_states: torch.Tensor) -> None:
+        env_ids = self._ensure_index_tensor(env_ids)
+        if active_states.ndim != 2 or active_states.shape != (env_ids.numel(), 13):
+            raise ValueError(
+                "Active simulator object states must have shape "
+                f"({env_ids.numel()}, 13), got {tuple(active_states.shape)}."
+            )
         if not self._multi_object_enabled or self._clip_object_ids is None:
             self._env.simulator.set_actor_states([self.object_name], env_ids, active_states)
+            self._update_simulator_object_state_snapshot(env_ids, active_states)
             return
 
         active_object_ids = self._clip_object_ids[self.clip_ids[env_ids]]
@@ -2528,6 +4517,7 @@ class MotionCommand(CommandTermBase):
             all_states.append(states)
         stacked_states = torch.cat(all_states, dim=0)
         self._env.simulator.set_actor_states(self._sim_object_names, env_ids, stacked_states)
+        self._update_simulator_object_state_snapshot(env_ids, active_states)
 
     def _apply_manual_object_reset_overrides(
         self,
@@ -2695,31 +4685,88 @@ class MotionCommand(CommandTermBase):
         dof_pos = self._env.default_dof_pos[env_ids].clone()
         dof_vel = torch.zeros_like(dof_pos)
 
-        root_pos = self.body_pos_w[env_ids, 0].clone()
+        root_pos = self._motion_body_pos_w(env_ids)[:, 0].clone()
         root_pos[:, 2] = self._init_root_pos[2]
 
         init_root_quat = self._init_root_rot.unsqueeze(0).expand(env_ids.numel(), -1)
         init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
-        _, _, motion_yaw = get_euler_xyz(self.body_quat_w[env_ids, 0], w_last=True)
+        _, _, motion_yaw = get_euler_xyz(self._motion_body_quat_w(env_ids)[:, 0], w_last=True)
         root_rot = quat_from_euler_xyz(init_roll, init_pitch, motion_yaw)
 
         root_lin_vel = self._init_root_lin_vel.unsqueeze(0).expand(env_ids.numel(), -1).clone()
         root_ang_vel = self._init_root_ang_vel.unsqueeze(0).expand(env_ids.numel(), -1).clone()
         return dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel
 
-    def _update_adaptive_timestep_failure_stats_before_resample(self, env_ids: torch.Tensor) -> None:
-        if not self.use_adaptive_timesteps_sampler:
-            return
-        episode_failed = self._env.termination_manager.terminated[env_ids]
-        if not torch.any(episode_failed):
-            return
+    def _adaptive_failure_mask_for_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Return genuine failure terms, excluding successful motion completion."""
+        manager = self._env.termination_manager
+        device = self.time_steps.device
+        failed = torch.zeros(env_ids.numel(), device=device, dtype=torch.bool)
+        found_failure_term = False
+        terms = getattr(getattr(manager, "cfg", None), "terms", {})
+        items = terms.items() if hasattr(terms, "items") else ()
+        get_last_term_result = getattr(manager, "get_last_term_result", lambda _name: None)
+        for term_name, term_cfg in items:
+            if bool(getattr(term_cfg, "is_timeout", False)) or str(term_name) == "motion_ends":
+                continue
+            result = get_last_term_result(str(term_name))
+            if result is None:
+                continue
+            failed |= result[env_ids].to(device=device, dtype=torch.bool)
+            found_failure_term = True
+        if found_failure_term:
+            return failed
 
-        # Must use the previous episode's clip ids before reset samples replacement clips.
-        failed_at_time_step = self.time_steps[env_ids][episode_failed]
-        failed_clip_ids = self.clip_ids[env_ids][episode_failed]
-        self.adaptive_timesteps_sampler.update_current_bin_failed_count(
-            failed_at_time_step,
-            clip_ids=failed_clip_ids,
+        # Compatibility fallback for lightweight/custom termination managers.
+        failed = manager.terminated[env_ids].to(device=device, dtype=torch.bool).clone()
+        motion_ends = get_last_term_result("motion_ends")
+        if motion_ends is not None:
+            failed &= ~motion_ends[env_ids].to(device=device, dtype=torch.bool)
+        return failed
+
+    def _motion_completed_mask_for_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+        device = self.time_steps.device
+        completed = self.motion_end_mask()[env_ids].to(device=device, dtype=torch.bool)
+        get_last_term_result = getattr(self._env.termination_manager, "get_last_term_result", lambda _name: None)
+        motion_ends = get_last_term_result("motion_ends")
+        if motion_ends is not None:
+            completed |= motion_ends[env_ids].to(device=device, dtype=torch.bool)
+        return completed
+
+    def _base_reset_has_previous_action_mask(self, env_ids: torch.Tensor) -> torch.Tensor:
+        episode_lengths = self._env.episode_length_buf[env_ids]
+        pending_lengths = getattr(self._env, "_pending_episode_lengths", None)
+        if not isinstance(pending_lengths, torch.Tensor):
+            return torch.zeros(env_ids.numel(), device=self.time_steps.device, dtype=torch.bool)
+        return (episode_lengths == 0) & (pending_lengths[env_ids] > 0)
+
+    def _update_adaptive_timestep_failure_stats_before_resample(self, env_ids: torch.Tensor) -> None:
+        """Record the old state/action visit and reset outcome before clip/time replacement."""
+        if not self.use_adaptive_timesteps_sampler or bool(getattr(self._env, "is_evaluating", False)):
+            return
+        previous_action = self._base_reset_has_previous_action_mask(env_ids)
+
+        # BaseTask has already zeroed episode_length_buf, but clip_ids/time_steps
+        # still describe the state on which the terminating action was taken.
+        failed = self._adaptive_failure_mask_for_env_ids(env_ids)
+        self.adaptive_timesteps_sampler.update_current_bin_outcome_count(
+            self.time_steps[env_ids],
+            clip_ids=self.clip_ids[env_ids],
+            failed=failed,
+            observed=previous_action,
+            _trusted_clip_ids=True,
+        )
+
+    def _record_adaptive_timestep_exposure_before_advance(self) -> None:
+        """Record visits for envs that were not reset before MotionCommand.step()."""
+        if not self.use_adaptive_timesteps_sampler or bool(getattr(self._env, "is_evaluating", False)):
+            return
+        visited = self._env.episode_length_buf > 0
+        self.adaptive_timesteps_sampler.update_current_bin_exposure_count(
+            self.time_steps,
+            clip_ids=self.clip_ids,
+            observed=visited,
+            _trusted_clip_ids=True,
         )
 
     def reset(self, env_ids: torch.Tensor | None) -> None:
@@ -2781,25 +4828,59 @@ class MotionCommand(CommandTermBase):
                         0, self._terrain_row_count, (env_ids.numel(),), device=self.device
                     )
 
-        # 0. Sample the time steps
-        if self.use_adaptive_timesteps_sampler:
-            phase = self.adaptive_timesteps_sampler.sample(self.clip_ids[env_ids])
-        else:
-            phase = torch.rand(env_ids.numel(), device=self.device)
-
-        if self._env.is_evaluating:
-            phase = torch.zeros_like(phase)
-
+        # 0. Sample the time steps.  start_at_timestep_zero_prob is applied below
+        # as an explicit delta-at-zero mixture, so the base reset distribution
+        # samples nonzero timesteps whenever the clip has one.
         clip_lengths = self._current_clip_lengths(env_ids)
         start_margin = self._min_start_margin_steps()
         valid_starts = torch.clamp(clip_lengths - start_margin, min=1)
-        self.time_steps[env_ids] = (phase * valid_starts).long()
-        if self._uniform_t1_window_sampling_active() and not self._env.is_evaluating:
+        adaptive_reset_probabilities: torch.Tensor | None = None
+        if self._forced_reset_timestep is not None:
+            forced_timestep = torch.full_like(valid_starts, self._forced_reset_timestep)
+            max_valid = torch.clamp(clip_lengths - 2, min=0)
+            if torch.any(forced_timestep > max_valid):
+                invalid_lengths = clip_lengths[forced_timestep > max_valid].detach().cpu().tolist()
+                raise ValueError(
+                    "Forced reset timestep must be at most clip_length - 2 for every selected clip: "
+                    f"timestep={self._forced_reset_timestep}, invalid_clip_lengths={invalid_lengths}."
+                )
+            self.time_steps[env_ids] = forced_timestep
+        elif self._env.is_evaluating:
+            self.time_steps[env_ids] = 0
+        elif self.use_adaptive_timesteps_sampler:
+            clip_ids = self.clip_ids[env_ids]
+            windows = None
+            window_valid = None
+            if self._uniform_t1_window_sampling_active():
+                window_valid, lo, hi, _, _, _ = self._uniform_t1_window_bounds(clip_ids, valid_starts)
+                windows = torch.stack((lo, hi), dim=-1)
+            sampling_kwargs = {
+                "exclude_zero": True,
+                "windows": windows,
+                "window_valid": window_valid,
+                "window_density_boost": float(self.motion_cfg.uniform_t1_window_density_boost),
+                "window_target_probability": self._uniform_t1_window_conditional_target_probability(),
+            }
+            sampled_steps, probabilities = (
+                self.adaptive_timesteps_sampler._sample_time_steps_with_probabilities(
+                    clip_ids,
+                    **sampling_kwargs,
+                    _trusted_inputs=True,
+                )
+            )
+            if self._uniform_t1_window_sampling_active():
+                adaptive_reset_probabilities = probabilities
+            self.time_steps[env_ids] = sampled_steps
+        elif self._uniform_t1_window_sampling_active():
             self.time_steps[env_ids] = self._sample_uniform_t1_window_time_steps(env_ids, valid_starts)
+        else:
+            nonzero_counts = torch.clamp(valid_starts - 1, min=1)
+            sampled = (torch.rand(env_ids.numel(), device=self.device) * nonzero_counts).long() + 1
+            self.time_steps[env_ids] = torch.where(valid_starts > 1, sampled, torch.zeros_like(sampled))
 
         # Handle start_at_timestep_zero_prob.
         base_prob = self._current_start_at_timestep_zero_prob()
-        if base_prob > 0.0:
+        if self._forced_reset_timestep is None and base_prob > 0.0:
             probs = torch.full((env_ids.numel(),), base_prob, device=self.device, dtype=torch.float32)
             probs = torch.clamp(probs, 0.0, 1.0)
             subset = self.time_steps[env_ids]
@@ -2811,34 +4892,41 @@ class MotionCommand(CommandTermBase):
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         max_valid = torch.clamp(clip_lengths - 2, min=0)
         self.time_steps[env_ids] = torch.minimum(self.time_steps[env_ids], max_valid)
-        if self._uniform_t1_window_sampling_active():
-            self._record_uniform_t1_window_reset_metrics(env_ids, valid_starts)
+        if bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
+            self._record_uniform_t1_window_reset_metrics(
+                env_ids,
+                valid_starts,
+                adaptive_reset_probabilities=adaptive_reset_probabilities,
+            )
 
         if self.motion_cfg.align_motion_to_init_yaw:
             self._update_motion_alignment(env_ids)
         self._clear_runtime_default_pose_prepend(env_ids)
 
         # 1. Get the reference root/body poses
-        root_pos = self.body_pos_w[env_ids, 0].clone()
-        root_rot = self.body_quat_w[env_ids, 0].clone()  # xyzw
-        root_lin_vel = self.body_lin_vel_w[env_ids, 0].clone()
-        root_ang_vel = self.body_ang_vel_w[env_ids, 0].clone()
+        root_pos = self._motion_body_pos_w(env_ids)[:, 0].clone()
+        root_rot = self._motion_body_quat_w(env_ids)[:, 0].clone()  # xyzw
+        root_lin_vel = self._motion_body_lin_vel_w(env_ids)[:, 0].clone()
+        root_ang_vel = self._motion_body_ang_vel_w(env_ids)[:, 0].clone()
 
-        dof_pos = self.joint_pos[env_ids].clone()
-        dof_vel = self.joint_vel[env_ids].clone()
+        dof_pos = self._motion_joint_pos(env_ids).clone()
+        dof_vel = self._motion_joint_vel(env_ids).clone()
         runtime_prepend_mask = self._runtime_default_pose_prepend_reset_mask(env_ids)
 
         if self._reset_to_default_pose:
             dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel = self._default_pose_reset_targets(env_ids)
-        elif torch.any(runtime_prepend_mask):
-            prepend_env_ids = env_ids[runtime_prepend_mask]
-            prepend_targets = self._default_pose_reset_targets(prepend_env_ids)
-            dof_pos[runtime_prepend_mask] = prepend_targets[0]
-            dof_vel[runtime_prepend_mask] = prepend_targets[1]
-            root_pos[runtime_prepend_mask] = prepend_targets[2]
-            root_rot[runtime_prepend_mask] = prepend_targets[3]
-            root_lin_vel[runtime_prepend_mask] = prepend_targets[4]
-            root_ang_vel[runtime_prepend_mask] = prepend_targets[5]
+        elif self._runtime_default_pose_prepend_enabled:
+            # Reset batches are sparse.  Compute their deterministic default
+            # targets once and select on device instead of synchronizing the
+            # CUDA mask to Python and compacting it through boolean indexing.
+            prepend_targets = self._default_pose_reset_targets(env_ids)
+            scalar_mask = runtime_prepend_mask[:, None]
+            dof_pos = torch.where(scalar_mask, prepend_targets[0], dof_pos)
+            dof_vel = torch.where(scalar_mask, prepend_targets[1], dof_vel)
+            root_pos = torch.where(scalar_mask, prepend_targets[2], root_pos)
+            root_rot = torch.where(scalar_mask, prepend_targets[3], root_rot)
+            root_lin_vel = torch.where(scalar_mask, prepend_targets[4], root_lin_vel)
+            root_ang_vel = torch.where(scalar_mask, prepend_targets[5], root_ang_vel)
 
         soft_joint_pos_limits = self._env.simulator.dof_pos_limits  # type: ignore[attr-defined]  # (num_dofs, 2)
         mujoco_reset_noise_enabled = os.environ.get("HOLOSOMA_MUJOCO_RESET_NOISE", "0").strip().lower() in (
@@ -2861,41 +4949,45 @@ class MotionCommand(CommandTermBase):
             reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
             reset_noise_scale_3 = reset_noise_scale.expand(-1, 3)
 
-            dof_pos_noise = self.init_pose_cfg.dof_pos * self.init_pose_cfg.overall_noise_scale
+            init_pose_cfg = self._effective_initial_pose_noise_config()
+            dof_pos_noise = init_pose_cfg.dof_pos * init_pose_cfg.overall_noise_scale
+            dof_vel_noise = init_pose_cfg.dof_vel * init_pose_cfg.overall_noise_scale
             root_pos_noise = (
                 torch.tensor(
-                    self.init_pose_cfg.root_pos,
+                    init_pose_cfg.root_pos,
                     device=self.device,
                 )
-                * self.init_pose_cfg.overall_noise_scale
+                * init_pose_cfg.overall_noise_scale
             )
             root_rot_noise_rpy = (
                 torch.tensor(
-                    self.init_pose_cfg.root_rot,
+                    init_pose_cfg.root_rot,
                     device=self.device,
                 )
-                * self.init_pose_cfg.overall_noise_scale
+                * init_pose_cfg.overall_noise_scale
             )
             root_vel_noise = (
                 torch.tensor(
-                    self.init_pose_cfg.root_lin_vel,
+                    init_pose_cfg.root_lin_vel,
                     device=self.device,
                 )
-                * self.init_pose_cfg.overall_noise_scale
+                * init_pose_cfg.overall_noise_scale
             )
             root_ang_vel_noise_rpy = (
                 torch.tensor(
-                    self.init_pose_cfg.root_ang_vel,
+                    init_pose_cfg.root_ang_vel,
                     device=self.device,
                 )
-                * self.init_pose_cfg.overall_noise_scale
+                * init_pose_cfg.overall_noise_scale
             )
 
             target_dof_pos = dof_pos + (
                 torch.rand(dof_pos.shape, device=self.device) - 0.5
             ) * 2 * dof_pos_noise * reset_noise_scale
             target_dof_pos = torch.clip(target_dof_pos, soft_joint_pos_limits[:, 0], soft_joint_pos_limits[:, 1])
-            target_dof_vel = dof_vel
+            target_dof_vel = dof_vel + (
+                torch.rand(dof_vel.shape, device=self.device) - 0.5
+            ) * 2 * dof_vel_noise * reset_noise_scale
 
             target_root_pos = root_pos + (
                 torch.rand(root_pos.shape, device=self.device) - 0.5
@@ -2932,18 +5024,18 @@ class MotionCommand(CommandTermBase):
 
         # 4. Set the object states in simulator
         if self.motion.has_object:
-            obj_pos = self.object_pos_w[env_ids]
-            obj_ori = self.object_quat_w[env_ids]
-            obj_lin_vel = self.object_lin_vel_w[env_ids]
+            obj_pos = self._motion_object_pos_w(env_ids)
+            obj_ori = self._motion_object_quat_w(env_ids)
+            obj_lin_vel = self._motion_object_lin_vel_w(env_ids)
 
             if disable_reset_noise:
                 target_obj_pos = obj_pos
             else:
                 obj_pos_noise = torch.tensor(
-                    [self.init_pose_cfg.object_pos],
+                    [init_pose_cfg.object_pos],
                     device=self.device,
                 )
-                obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale
+                obj_pos_noise = obj_pos_noise * init_pose_cfg.overall_noise_scale
                 target_obj_pos = obj_pos + (
                     (torch.rand(obj_pos.shape, device=self.device) - 0.5)
                     * 2
@@ -2966,16 +5058,104 @@ class MotionCommand(CommandTermBase):
                 object_pos_w=target_obj_pos,
             )
 
-        if torch.any(runtime_prepend_mask):
-            self._activate_runtime_default_pose_prepend(env_ids[runtime_prepend_mask])
+        if (
+            self._runtime_default_pose_prepend_enabled
+            and self._runtime_default_pose_prepend_active is not None
+            and self._runtime_default_pose_prepend_step is not None
+        ):
+            # `_clear_runtime_default_pose_prepend` already zeroed the selected
+            # clocks, so assigning the device mask directly is equivalent to
+            # activating its compacted IDs without a host-visible branch.
+            self._runtime_default_pose_prepend_active[env_ids] = runtime_prepend_mask
 
         self._update_future_target_poses()
+
+    def _has_standard_episodic_motion_end_contract(self) -> bool:
+        """Return whether the standard termination manager owns clip completion.
+
+        This deliberately accepts only the exact built-in manager, term name,
+        configuration, and resolved function.  Custom managers and wrappers
+        retain the rollover fallback because their call/reset ordering cannot
+        be proven here.
+        """
+
+        manager = getattr(self._env, "termination_manager", None)
+        if manager is None or manager.__class__ is not TerminationManager:
+            return False
+
+        terms = getattr(getattr(manager, "cfg", None), "terms", None)
+        if not isinstance(terms, dict):
+            return False
+        term_cfg = terms.get("motion_ends")
+        if term_cfg is None:
+            return False
+        if getattr(term_cfg, "func", None) != _STANDARD_MOTION_END_TERM_PATH:
+            return False
+        if getattr(term_cfg, "is_timeout", None) is not False:
+            return False
+
+        term_names = getattr(manager, "_term_names", None)
+        term_funcs = getattr(manager, "_term_funcs", None)
+        term_instances = getattr(manager, "_term_instances", None)
+        if not isinstance(term_names, list) or term_names.count("motion_ends") != 1:
+            return False
+        if not isinstance(term_funcs, dict) or not isinstance(term_instances, dict):
+            return False
+        if "motion_ends" in term_instances:
+            return False
+
+        # The standard term imports MotionCommand, so importing it at module
+        # scope would create a cycle.  A real TerminationManager has already
+        # resolved the configured term; absence from sys.modules fails closed.
+        standard_module = sys.modules.get("holosoma.managers.termination.terms.wbt")
+        standard_motion_ends = getattr(standard_module, "motion_ends", None)
+        return standard_motion_ends is not None and term_funcs.get("motion_ends") is standard_motion_ends
+
+    def _termination_owns_clip_rollover(self) -> bool:
+        """Fail closed unless episodic motion-end reset is currently active."""
+
+        if bool(getattr(self, "_disable_clip_end_reset", True)):
+            return False
+        if not self._has_standard_episodic_motion_end_contract():
+            return False
+        if os.environ.get("HOLOSOMA_DISABLE_AUTO_RESET", "0").lower() in _ENABLED_ENV_FLAG_VALUES:
+            return False
+        return (
+            os.environ.get("HOLOSOMA_DISABLE_MOTION_END_RESET", "0").lower() not in _ENABLED_ENV_FLAG_VALUES
+        )
+
+    def _handle_clip_rollover(self) -> None:
+        """Apply the continuous-clip fallback when termination does not own it."""
+
+        if self._termination_owns_clip_rollover():
+            # BaseTask evaluated motion_ends before resetting and entering this
+            # command step.  The standard term fires at clip_length - 2, so no
+            # surviving row can reach clip_length after this step's +1 advance.
+            return
+
+        current_clip_lengths = self._current_clip_lengths()
+        ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
+        if ended_env_ids.numel() == 0:
+            return
+        if self._disable_clip_end_reset:
+            self.time_steps[ended_env_ids] = torch.clamp(current_clip_lengths[ended_env_ids] - 1, min=0)
+            return
+
+        self.reset(ended_env_ids)
+        sim = self._env.simulator
+        sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
+        sim.set_dof_state_tensor_robots(ended_env_ids)
+        sim.refresh_sim_tensors()
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
         timing = getattr(self._env, "step_timing", None)
         if not getattr(timing, "enabled", False):
             timing = None
+
+        # BaseTask resets terminated envs before this hook. Their old visits
+        # were recorded inside reset(); only still-active envs are exposed here.
+        self._record_adaptive_timestep_exposure_before_advance()
 
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
         with (timing.record("post/tasks/motion/time_advance") if timing is not None else nullcontext()):
@@ -2986,14 +5166,15 @@ class MotionCommand(CommandTermBase):
                 and self._runtime_default_pose_prepend_step is not None
             ):
                 active_mask = self._runtime_default_pose_prepend_active
-                if torch.any(active_mask):
-                    advance_mask = advance_mask & ~active_mask
-                    last_step_mask = active_mask & (
-                        self._runtime_default_pose_prepend_step >= (self._runtime_default_pose_prepend_steps - 1)
-                    )
-                    keep_warmup_mask = active_mask & ~last_step_mask
-                    self._runtime_default_pose_prepend_step[keep_warmup_mask] += 1
-                    self._runtime_default_pose_prepend_active[last_step_mask] = False
+                advance_mask = advance_mask & ~active_mask
+                last_step_mask = active_mask & (
+                    self._runtime_default_pose_prepend_step >= (self._runtime_default_pose_prepend_steps - 1)
+                )
+                keep_warmup_mask = active_mask & ~last_step_mask
+                self._runtime_default_pose_prepend_step.add_(
+                    keep_warmup_mask.to(dtype=self._runtime_default_pose_prepend_step.dtype)
+                )
+                self._runtime_default_pose_prepend_active.logical_and_(~last_step_mask)
 
             # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
             freeze_prob = self._current_freeze_at_timestep_zero_prob()
@@ -3009,17 +5190,13 @@ class MotionCommand(CommandTermBase):
         # Match BeyondMimic-style clip rollover: once a clip ends, reset only the
         # motion/object state for those envs instead of terminating the episode.
         with (timing.record("post/tasks/motion/clip_rollover") if timing is not None else nullcontext()):
-            current_clip_lengths = self._current_clip_lengths()
-            ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
-            if ended_env_ids.numel() > 0:
-                if self._disable_clip_end_reset:
-                    self.time_steps[ended_env_ids] = torch.clamp(current_clip_lengths[ended_env_ids] - 1, min=0)
-                else:
-                    self.reset(ended_env_ids)
-                    sim = self._env.simulator
-                    sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
-                    sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
-                    sim.refresh_sim_tensors()
+            self._handle_clip_rollover()
+
+        # Evaluation-only two-phase sparse-root command.  The object snapshot
+        # was refreshed after physics and before this command hook, so a newly
+        # triggered value is visible in the observation computed immediately
+        # after this method returns.  Training never enters this branch.
+        self._update_manual_forward_after_lift()
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
@@ -3078,6 +5255,121 @@ class MotionCommand(CommandTermBase):
         with (timing.record("post/tasks/motion/contact_prior") if timing is not None else nullcontext()):
             self._update_contact_prior_state()
 
+    def configure_manual_forward_after_lift(
+        self,
+        *,
+        command_m: float,
+        rel_z_delta_m: float,
+        consecutive_steps: int,
+    ) -> None:
+        """Hold a zero manual root command, then switch after a stable lift.
+
+        This is intentionally configured at runtime by the single-environment
+        evaluation recorder.  It does not alter the training configuration or
+        add to the reference root command: manual mode replaces the actor's
+        sparse-root command with zero until the object has remained above its
+        initial world-z by ``rel_z_delta_m`` for ``consecutive_steps`` control
+        steps, then replaces it with ``[command_m, 0, 0]``.
+        """
+
+        command = float(command_m)
+        lift_delta = float(rel_z_delta_m)
+        stable_steps = int(consecutive_steps)
+        if not np.isfinite(command):
+            raise ValueError(f"command_m must be finite, got {command_m!r}.")
+        if not np.isfinite(lift_delta) or lift_delta <= 0.0:
+            raise ValueError(f"rel_z_delta_m must be finite and positive, got {rel_z_delta_m!r}.")
+        if isinstance(consecutive_steps, bool) or stable_steps <= 0 or stable_steps != consecutive_steps:
+            raise ValueError(f"consecutive_steps must be a positive integer, got {consecutive_steps!r}.")
+        if not self.motion.has_object:
+            raise RuntimeError("manual forward-after-lift requires an object motion.")
+        if self.manual_xy_rel is None or self.manual_yaw_rel is None or self.manual_drop_button is None:
+            raise RuntimeError("MotionCommand manual-control tensors are not initialized.")
+
+        current_object_z = self.simulator_object_state_snapshot[:, 2].detach().clone()
+        if current_object_z.shape != (self.num_envs,):
+            raise RuntimeError(
+                "Active-object z snapshot must contain exactly one value per environment, "
+                f"got {tuple(current_object_z.shape)}."
+            )
+
+        self.manual_control_enabled = True
+        self.manual_xy_rel.zero_()
+        self.manual_yaw_rel.zero_()
+        self.manual_drop_button_override_enabled = True
+        self.manual_drop_button.zero_()
+
+        self._manual_forward_after_lift_enabled = True
+        self._manual_forward_after_lift_command_m = command
+        self._manual_forward_after_lift_rel_z_delta_m = lift_delta
+        self._manual_forward_after_lift_consecutive_steps = stable_steps
+        self._manual_forward_after_lift_baseline_object_z = current_object_z
+        self._manual_forward_after_lift_consecutive_count = torch.zeros(
+            (self.num_envs,),
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._manual_forward_after_lift_triggered = torch.zeros(
+            (self.num_envs,),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        self._manual_forward_after_lift_trigger_episode_step = torch.full(
+            (self.num_envs,),
+            -1,
+            device=self.device,
+            dtype=torch.long,
+        )
+
+    def _update_manual_forward_after_lift(self) -> None:
+        if not self._manual_forward_after_lift_enabled:
+            return
+        baseline = self._manual_forward_after_lift_baseline_object_z
+        counter = self._manual_forward_after_lift_consecutive_count
+        triggered = self._manual_forward_after_lift_triggered
+        trigger_step = self._manual_forward_after_lift_trigger_episode_step
+        if baseline is None or counter is None or triggered is None or trigger_step is None:
+            raise RuntimeError("manual forward-after-lift state is incomplete.")
+        if self.manual_xy_rel is None:
+            raise RuntimeError("manual_xy_rel is unavailable during forward-after-lift evaluation.")
+
+        object_z = self.simulator_object_state_snapshot[:, 2]
+        above_threshold = (object_z - baseline) >= self._manual_forward_after_lift_rel_z_delta_m
+        waiting = ~triggered
+        counter.copy_(torch.where(waiting & above_threshold, counter + 1, torch.zeros_like(counter)))
+        newly_triggered = waiting & (counter >= self._manual_forward_after_lift_consecutive_steps)
+        if torch.any(newly_triggered):
+            self.manual_xy_rel[newly_triggered, 0] = self._manual_forward_after_lift_command_m
+            self.manual_xy_rel[newly_triggered, 1] = 0.0
+            triggered.logical_or_(newly_triggered)
+            trigger_step[newly_triggered] = self._env.episode_length_buf[newly_triggered].to(dtype=torch.long)
+
+    def get_manual_forward_after_lift_status(self, env_id: int = 0) -> dict[str, Any] | None:
+        """Return a compact audit record for the evaluation recorder."""
+
+        if not self._manual_forward_after_lift_enabled:
+            return None
+        if env_id < 0 or env_id >= self.num_envs:
+            raise IndexError(f"env_id {env_id} is outside [0, {self.num_envs}).")
+        baseline = self._manual_forward_after_lift_baseline_object_z
+        counter = self._manual_forward_after_lift_consecutive_count
+        triggered = self._manual_forward_after_lift_triggered
+        trigger_step = self._manual_forward_after_lift_trigger_episode_step
+        if baseline is None or counter is None or triggered is None or trigger_step is None:
+            raise RuntimeError("manual forward-after-lift state is incomplete.")
+        object_z = self.simulator_object_state_snapshot[env_id, 2]
+        return {
+            "phase": "forward" if bool(triggered[env_id].item()) else "pickup_zero",
+            "configured_forward_command_m": float(self._manual_forward_after_lift_command_m),
+            "active_forward_command_m": float(self.manual_xy_rel[env_id, 0].item()),
+            "rel_z_delta_m": float(object_z.item() - baseline[env_id].item()),
+            "trigger_rel_z_delta_m": float(self._manual_forward_after_lift_rel_z_delta_m),
+            "consecutive_count": int(counter[env_id].item()),
+            "required_consecutive_steps": int(self._manual_forward_after_lift_consecutive_steps),
+            "triggered": bool(triggered[env_id].item()),
+            "trigger_episode_step": int(trigger_step[env_id].item()),
+        }
+
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
         return self.motion.clip_lengths[clip_ids]
@@ -3122,106 +5414,142 @@ class MotionCommand(CommandTermBase):
             return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         return self._runtime_default_pose_prepend_active
 
-    def _runtime_default_pose_prepend_active_env_ids(self) -> torch.Tensor:
-        if not self._runtime_default_pose_prepend_enabled or self._runtime_default_pose_prepend_active is None:
-            return torch.zeros((0,), device=self.device, dtype=torch.long)
-        return torch.nonzero(self._runtime_default_pose_prepend_active, as_tuple=False).flatten()
-
-    def _runtime_default_pose_prepend_alpha(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def _runtime_default_pose_prepend_alpha(
+        self,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         assert self._runtime_default_pose_prepend_step is not None
-        alpha = self._runtime_default_pose_prepend_step[env_ids].to(dtype=torch.float32)
+        step = self._runtime_default_pose_prepend_step
+        if env_ids is not None:
+            step = step[env_ids]
+        alpha = step.to(dtype=torch.float32)
         return alpha / float(self._runtime_default_pose_prepend_steps)
 
-    def _blend_runtime_default_pose_prepend_lerp(self, current: torch.Tensor, key: str) -> torch.Tensor:
-        env_ids = self._runtime_default_pose_prepend_active_env_ids()
-        if env_ids.numel() == 0:
+    def _blend_runtime_default_pose_prepend_lerp(
+        self,
+        current: torch.Tensor,
+        key: str,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._runtime_default_pose_prepend_enabled:
             return current
         defaults = self._runtime_default_pose_prepend_defaults.get(key)
         if defaults is None:
             return current
-        clip_ids = self.clip_ids[env_ids]
+        assert self._runtime_default_pose_prepend_active is not None
+        clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
+        active = (
+            self._runtime_default_pose_prepend_active
+            if env_ids is None
+            else self._runtime_default_pose_prepend_active[env_ids]
+        )
         alpha = self._runtime_default_pose_prepend_alpha(env_ids)
         alpha_view = alpha.view(-1, *([1] * (current.ndim - 1)))
-        blended = current.clone()
-        blended[env_ids] = defaults[clip_ids] + alpha_view * (current[env_ids] - defaults[clip_ids])
-        return blended
+        active_view = active.view(-1, *([1] * (current.ndim - 1)))
+        starts = defaults[clip_ids]
+        blended = starts + alpha_view * (current - starts)
+        return torch.where(active_view, blended, current)
 
-    def _blend_runtime_default_pose_prepend_quat(self, current: torch.Tensor, key: str) -> torch.Tensor:
-        env_ids = self._runtime_default_pose_prepend_active_env_ids()
-        if env_ids.numel() == 0:
+    def _blend_runtime_default_pose_prepend_quat(
+        self,
+        current: torch.Tensor,
+        key: str,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._runtime_default_pose_prepend_enabled:
             return current
         defaults = self._runtime_default_pose_prepend_defaults.get(key)
         if defaults is None:
             return current
-        clip_ids = self.clip_ids[env_ids]
+        assert self._runtime_default_pose_prepend_active is not None
+        clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
+        active = (
+            self._runtime_default_pose_prepend_active
+            if env_ids is None
+            else self._runtime_default_pose_prepend_active[env_ids]
+        )
         start = defaults[clip_ids]
-        end = current[env_ids]
         alpha = self._runtime_default_pose_prepend_alpha(env_ids)
 
         if current.ndim == 2:
-            blended_env = slerp(start, end, alpha.unsqueeze(-1))
+            blended = slerp(start, current, alpha.unsqueeze(-1))
         elif current.ndim == 3:
             alpha_flat = alpha.unsqueeze(1).expand(-1, start.shape[1]).reshape(-1, 1)
-            blended_env = slerp(start.reshape(-1, 4), end.reshape(-1, 4), alpha_flat).view_as(start)
+            blended = slerp(
+                start.reshape(-1, 4),
+                current.reshape(-1, 4),
+                alpha_flat,
+            ).view_as(start)
         else:
             raise ValueError(f"Unsupported quaternion tensor rank {current.ndim}.")
 
-        blended = current.clone()
-        blended[env_ids] = blended_env
-        return blended
+        active_view = active.view(-1, *([1] * (current.ndim - 1)))
+        return torch.where(active_view, blended, current)
 
-    def _raw_motion_joint_pos(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_joint_pos(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         joint_pos = self.motion.joint_pos[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(joint_pos, "joint_pos")
+        return self._blend_runtime_default_pose_prepend_lerp(joint_pos, "joint_pos", env_ids)
 
-    def _raw_motion_joint_vel(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_joint_vel(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         joint_vel = self.motion.joint_vel[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(joint_vel, "joint_vel")
+        return self._blend_runtime_default_pose_prepend_lerp(joint_vel, "joint_vel", env_ids)
 
-    def _raw_motion_body_pos_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_body_pos_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         body_pos = self.motion.body_pos_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(body_pos, "body_pos")
+        return self._blend_runtime_default_pose_prepend_lerp(body_pos, "body_pos", env_ids)
 
-    def _raw_motion_body_quat_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_body_quat_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         body_quat = self.motion.body_quat_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_quat(body_quat, "body_quat")
+        return self._blend_runtime_default_pose_prepend_quat(body_quat, "body_quat", env_ids)
 
-    def _raw_motion_body_lin_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_body_lin_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         body_lin_vel = self.motion.body_lin_vel_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(body_lin_vel, "body_lin_vel")
+        return self._blend_runtime_default_pose_prepend_lerp(body_lin_vel, "body_lin_vel", env_ids)
 
-    def _raw_motion_body_ang_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
+    def _raw_motion_body_ang_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         body_ang_vel = self.motion.body_ang_vel_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(body_ang_vel, "body_ang_vel")
+        return self._blend_runtime_default_pose_prepend_lerp(body_ang_vel, "body_ang_vel", env_ids)
 
-    def _raw_motion_object_pos_w(self) -> torch.Tensor:
+    def _raw_motion_object_pos_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if not self.motion.has_object:
-            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        motion_idx = self._get_motion_indices(self.time_steps)
+            count = self.num_envs if env_ids is None else env_ids.numel()
+            return torch.zeros(count, 3, device=self.device, dtype=torch.float32)
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         object_pos = self.motion.object_pos_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(object_pos, "object_pos")
+        return self._blend_runtime_default_pose_prepend_lerp(object_pos, "object_pos", env_ids)
 
-    def _raw_motion_object_quat_w(self) -> torch.Tensor:
+    def _raw_motion_object_quat_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if not self.motion.has_object:
-            quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
+            count = self.num_envs if env_ids is None else env_ids.numel()
+            quat = torch.zeros(count, 4, device=self.device, dtype=torch.float32)
             quat[:, 3] = 1.0
             return quat
-        motion_idx = self._get_motion_indices(self.time_steps)
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         object_quat = self.motion.object_quat_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_quat(object_quat, "object_quat")
+        return self._blend_runtime_default_pose_prepend_quat(object_quat, "object_quat", env_ids)
 
-    def _raw_motion_object_lin_vel_w(self) -> torch.Tensor:
+    def _raw_motion_object_lin_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if not self.motion.has_object:
-            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        motion_idx = self._get_motion_indices(self.time_steps)
+            count = self.num_envs if env_ids is None else env_ids.numel()
+            return torch.zeros(count, 3, device=self.device, dtype=torch.float32)
+        steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        motion_idx = self._get_motion_indices(steps, env_ids)
         object_lin_vel = self.motion.object_lin_vel_w[motion_idx]
-        return self._blend_runtime_default_pose_prepend_lerp(object_lin_vel, "object_lin_vel")
+        return self._blend_runtime_default_pose_prepend_lerp(object_lin_vel, "object_lin_vel", env_ids)
 
     @property
     def current_clip_lengths(self) -> torch.Tensor:
@@ -3375,6 +5703,9 @@ class MotionCommand(CommandTermBase):
         else:
             raise ValueError(f"Unknown clip_weighting_strategy '{strategy}'.")
 
+        if self._rank_local_inverse_cover_weights is not None:
+            weights = weights * self._rank_local_inverse_cover_weights
+
         weights = weights / weights.sum()
         self._raw_clip_sampling_weights = weights
 
@@ -3438,13 +5769,20 @@ class MotionCommand(CommandTermBase):
             return
 
         episode_lengths = self._env.episode_length_buf[env_ids]
-        valid_mask = episode_lengths > 0
+        base_reset = self._base_reset_has_previous_action_mask(env_ids)
+        completed = self._motion_completed_mask_for_env_ids(env_ids)
+        # Direct MotionCommand.reset() during clip rollover keeps a positive
+        # episode length; BaseTask resets have already zeroed it and are
+        # identified through _pending_episode_lengths.
+        clip_rollover = (episode_lengths > 0) & completed
+        valid_mask = base_reset | clip_rollover
         if not torch.any(valid_mask):
             return
 
         valid_env_ids = env_ids[valid_mask]
         clip_ids = self.clip_ids[valid_env_ids]
-        successes = self.motion_end_mask()[valid_env_ids].to(dtype=torch.float32)
+        failed = self._adaptive_failure_mask_for_env_ids(env_ids)[valid_mask]
+        successes = (completed[valid_mask] & ~failed).to(dtype=torch.float32)
 
         ones = torch.ones_like(successes)
         self._clip_total_counts.index_add_(0, clip_ids, ones)
@@ -3482,7 +5820,105 @@ class MotionCommand(CommandTermBase):
 
     @staticmethod
     def _clamp01(value: float) -> float:
+        if not np.isfinite(value):
+            raise ValueError(f"Probability value must be finite, got {value!r}.")
         return float(max(0.0, min(1.0, value)))
+
+    @staticmethod
+    def _validate_reset_sampling_curriculum_config(motion_cfg: Any) -> None:
+        """Fail setup when reset/T1 curriculum values would be ignored or sanitized."""
+
+        def probability(name: str, value: Any, *, optional: bool = False) -> float | None:
+            if value is None and optional:
+                return None
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                raise ValueError(f"{name} must be a real probability, got {value!r}.")
+            parsed = float(value)
+            if not np.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+                raise ValueError(f"{name} must be finite and within [0, 1], got {value!r}.")
+            return parsed
+
+        def schedule(prefix: str) -> None:
+            probability(prefix, getattr(motion_cfg, prefix))
+            end_name = f"{prefix}_end"
+            start_iter_name = f"{prefix}_start_iter"
+            end_iter_name = f"{prefix}_end_iter"
+            end_value = getattr(motion_cfg, end_name)
+            start_iter = getattr(motion_cfg, start_iter_name)
+            end_iter = getattr(motion_cfg, end_iter_name)
+            provided = (end_value is not None, start_iter is not None, end_iter is not None)
+            if any(provided) and not all(provided):
+                raise ValueError(
+                    f"{prefix} schedule must set {end_name}, {start_iter_name}, and {end_iter_name} together; "
+                    f"got end={end_value!r}, start_iter={start_iter!r}, end_iter={end_iter!r}."
+                )
+            if not all(provided):
+                return
+            probability(end_name, end_value)
+            for name, value in ((start_iter_name, start_iter), (end_iter_name, end_iter)):
+                if isinstance(value, bool) or not isinstance(value, numbers.Integral) or int(value) < 0:
+                    raise ValueError(f"{name} must be a non-negative integer, got {value!r}.")
+            if int(end_iter) < int(start_iter):
+                raise ValueError(
+                    f"{end_iter_name} must be >= {start_iter_name}, got {end_iter} < {start_iter}."
+                )
+
+        schedule("start_at_timestep_zero_prob")
+        schedule("freeze_at_timestep_zero_prob")
+
+        enabled = getattr(motion_cfg, "uniform_t1_window_sampling_enabled")
+        if type(enabled) is not bool:
+            raise ValueError(
+                "uniform_t1_window_sampling_enabled must be a boolean, "
+                f"got {enabled!r}."
+            )
+        half_width = getattr(motion_cfg, "uniform_t1_window_half_width_steps")
+        if (
+            isinstance(half_width, bool)
+            or not isinstance(half_width, numbers.Integral)
+            or int(half_width) < 0
+        ):
+            raise ValueError(
+                "uniform_t1_window_half_width_steps must be a non-negative integer, "
+                f"got {half_width!r}."
+            )
+        density_boost = getattr(motion_cfg, "uniform_t1_window_density_boost")
+        if isinstance(density_boost, bool) or not isinstance(density_boost, numbers.Real):
+            raise ValueError(
+                "uniform_t1_window_density_boost must be a real number, "
+                f"got {density_boost!r}."
+            )
+        density_boost = float(density_boost)
+        if not np.isfinite(density_boost) or density_boost < 1.0:
+            raise ValueError(
+                "uniform_t1_window_density_boost must be finite and >= 1, "
+                f"got {density_boost!r}."
+            )
+        target = probability(
+            "uniform_t1_window_target_sample_frac",
+            getattr(motion_cfg, "uniform_t1_window_target_sample_frac"),
+            optional=True,
+        )
+        if not enabled and (target is not None or density_boost != 1.0):
+            raise ValueError(
+                "uniform_t1_window target/density settings would be ignored because "
+                "uniform_t1_window_sampling_enabled=False."
+            )
+        if enabled and target is not None:
+            zero_start_probabilities = [float(motion_cfg.start_at_timestep_zero_prob)]
+            if motion_cfg.start_at_timestep_zero_prob_end is not None:
+                zero_start_probabilities.append(
+                    float(motion_cfg.start_at_timestep_zero_prob_end)
+                )
+            minimum_nonzero_mass = 1.0 - max(zero_start_probabilities)
+            if target > minimum_nonzero_mass + 1.0e-12:
+                raise ValueError(
+                    "uniform_t1_window_target_sample_frac cannot be realized by the configured "
+                    "start-at-zero mixture: the T1 window contains only nonzero reset timesteps, "
+                    f"target={target}, minimum_nonzero_reset_mass={minimum_nonzero_mass}. "
+                    "Lower the target or the maximum start_at_timestep_zero_prob (including its "
+                    "scheduled end value)."
+                )
 
     def _iteration_curriculum_progress(self, start_iter: int | None, end_iter: int | None) -> float | None:
         if start_iter is None or end_iter is None or self._training_iteration is None:
@@ -3523,7 +5959,24 @@ class MotionCommand(CommandTermBase):
         )
 
     def _uniform_t1_window_sampling_active(self) -> bool:
-        return bool(self.motion_cfg.uniform_t1_window_sampling_enabled) and not self.use_adaptive_timesteps_sampler
+        return bool(self.motion_cfg.uniform_t1_window_sampling_enabled)
+
+    def _uniform_t1_window_conditional_target_probability(self) -> float | None:
+        """Convert an overall target mass into the nonzero branch target mass."""
+        target_frac = self.motion_cfg.uniform_t1_window_target_sample_frac
+        if target_frac is None:
+            return None
+        nonzero_prob = max(0.0, 1.0 - self._current_start_at_timestep_zero_prob())
+        target_frac = self._clamp01(float(target_frac))
+        if target_frac > nonzero_prob + 1.0e-8:
+            raise RuntimeError(
+                "uniform_t1_window_target_sample_frac exceeds the live nonzero reset mass: "
+                f"target={target_frac}, nonzero_reset_mass={nonzero_prob}. Refusing to silently "
+                "clip the requested scientific reset distribution."
+            )
+        if nonzero_prob <= 1.0e-12:
+            return 0.0
+        return self._clamp01(target_frac / nonzero_prob)
 
     def _uniform_t1_window_bounds(
         self,
@@ -3556,16 +6009,11 @@ class MotionCommand(CommandTermBase):
         return window_valid, lo, hi, window_len, outside_len, total_nonzero_len
 
     def _uniform_t1_window_probability(self, window_len: torch.Tensor, outside_len: torch.Tensor) -> torch.Tensor:
-        target_frac = self.motion_cfg.uniform_t1_window_target_sample_frac
-        if target_frac is not None:
-            target = self._clamp01(float(target_frac))
-            nonzero_prob = max(0.0, 1.0 - self._current_start_at_timestep_zero_prob())
-            if nonzero_prob <= 1.0e-6:
-                return torch.zeros_like(window_len, dtype=torch.float32)
-            target_nonzero_window_prob = self._clamp01(target / nonzero_prob)
+        conditional_target = self._uniform_t1_window_conditional_target_probability()
+        if conditional_target is not None:
             target_prob = torch.full_like(
                 window_len,
-                target_nonzero_window_prob,
+                conditional_target,
                 dtype=torch.float32,
             )
             target_prob = torch.where(window_len > 0, target_prob, torch.zeros_like(target_prob))
@@ -3615,7 +6063,66 @@ class MotionCommand(CommandTermBase):
         weighted_sample = torch.where(choose_window, window_sample, outside_sample)
         return torch.where(window_valid, weighted_sample, fallback_sample)
 
-    def _record_uniform_t1_window_reset_metrics(self, env_ids: torch.Tensor, valid_starts: torch.Tensor) -> None:
+    def _effective_adaptive_timestep_probabilities_for_clip(self, clip_idx: int) -> torch.Tensor:
+        """Return the reset distribution after contact bias and zero-start mixing."""
+        if self.adaptive_timesteps_sampler is None:
+            raise RuntimeError("Adaptive timestep probabilities requested while the sampler is disabled.")
+        valid_start_count = int(self.adaptive_timesteps_sampler.valid_start_counts[clip_idx].item())
+        window: tuple[int, int] | None = None
+        if self._uniform_t1_window_sampling_active():
+            clip_ids = torch.tensor([clip_idx], device=self.device, dtype=torch.long)
+            valid_starts = torch.tensor([valid_start_count], device=self.device, dtype=torch.long)
+            window_valid, lo, hi, _, _, _ = self._uniform_t1_window_bounds(clip_ids, valid_starts)
+            if bool(window_valid[0].item()):
+                window = (int(lo[0].item()), int(hi[0].item()))
+
+        probabilities = self.adaptive_timesteps_sampler.timestep_probabilities_for_clip(
+            clip_idx,
+            exclude_zero=True,
+            window=window,
+            window_density_boost=float(self.motion_cfg.uniform_t1_window_density_boost),
+            window_target_probability=self._uniform_t1_window_conditional_target_probability(),
+        )
+        if self._env.is_evaluating:
+            probabilities.zero_()
+            probabilities[0] = 1.0
+            return probabilities
+        zero_prob = self._current_start_at_timestep_zero_prob()
+        probabilities *= 1.0 - zero_prob
+        probabilities[0] += zero_prob
+        return probabilities
+
+    def _effective_adaptive_probability_views(
+        self,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Build timestep and bin probability views once for telemetry."""
+
+        timestep_probabilities_by_clip: list[torch.Tensor] = []
+        probabilities_by_clip: list[torch.Tensor] = []
+        for clip_idx in range(self.motion.num_clips):
+            timestep_probabilities = self._effective_adaptive_timestep_probabilities_for_clip(clip_idx)
+            timestep_probabilities_by_clip.append(timestep_probabilities)
+            bin_ids = self.adaptive_timesteps_sampler._bin_indices_for_clip(clip_idx)
+            bin_probabilities = torch.zeros(
+                int(self.adaptive_timesteps_sampler.num_bins_per_clip[clip_idx].item()),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            bin_probabilities.index_add_(0, bin_ids, timestep_probabilities)
+            probabilities_by_clip.append(bin_probabilities)
+        return timestep_probabilities_by_clip, probabilities_by_clip
+
+    def _effective_adaptive_bin_probabilities(self) -> list[torch.Tensor]:
+        _, probabilities_by_clip = self._effective_adaptive_probability_views()
+        return probabilities_by_clip
+
+    def _record_uniform_t1_window_reset_metrics(
+        self,
+        env_ids: torch.Tensor,
+        valid_starts: torch.Tensor,
+        *,
+        adaptive_reset_probabilities: torch.Tensor | None = None,
+    ) -> None:
         if not bool(self.motion_cfg.uniform_t1_window_sampling_enabled) or env_ids.numel() == 0:
             return
 
@@ -3623,26 +6130,62 @@ class MotionCommand(CommandTermBase):
         window_valid, lo, hi, window_len, outside_len, _ = self._uniform_t1_window_bounds(clip_ids, valid_starts)
         sampled_steps = self.time_steps[env_ids]
         sampled_window = window_valid & (sampled_steps >= lo) & (sampled_steps <= hi)
-        p_window = self._uniform_t1_window_probability(window_len, outside_len)
         nonzero_prob = max(0.0, 1.0 - self._current_start_at_timestep_zero_prob())
-
-        self._uniform_t1_window_last_reset_available_frac = float(window_valid.to(dtype=torch.float32).mean().item())
-        self._uniform_t1_window_last_reset_sample_frac = float(sampled_window.to(dtype=torch.float32).mean().item())
-        self._uniform_t1_window_last_reset_expected_sample_frac = float((p_window * nonzero_prob).mean().item())
-        if torch.any(window_valid):
-            self._uniform_t1_window_last_reset_sample_frac_valid = float(
-                sampled_window[window_valid].to(dtype=torch.float32).mean().item()
-            )
-            self._uniform_t1_window_last_reset_expected_sample_frac_valid = float(
-                (p_window[window_valid] * nonzero_prob).mean().item()
-            )
-            self._uniform_t1_window_last_reset_mean_window_len = float(
-                window_len[window_valid].to(dtype=torch.float32).mean().item()
-            )
+        if self.use_adaptive_timesteps_sampler:
+            if self._env.is_evaluating:
+                expected_window_prob = torch.zeros_like(window_len, dtype=torch.float32)
+            else:
+                probabilities = adaptive_reset_probabilities
+                if probabilities is None:
+                    windows = torch.stack((lo, hi), dim=-1)
+                    probabilities = self.adaptive_timesteps_sampler.timestep_probabilities_for_samples(
+                        clip_ids,
+                        exclude_zero=True,
+                        windows=windows,
+                        window_valid=window_valid,
+                        window_density_boost=float(self.motion_cfg.uniform_t1_window_density_boost),
+                        window_target_probability=self._uniform_t1_window_conditional_target_probability(),
+                        _trusted_inputs=True,
+                    )
+                if probabilities.shape != (env_ids.numel(), self.adaptive_timesteps_sampler.max_valid_start_count):
+                    raise RuntimeError(
+                        "Adaptive reset telemetry received probability rows with incompatible geometry."
+                    )
+                step_axis = self.adaptive_timesteps_sampler._step_axis.unsqueeze(0)
+                telemetry_window_mask = (
+                    window_valid.unsqueeze(1)
+                    & (step_axis >= lo.unsqueeze(1))
+                    & (step_axis <= hi.unsqueeze(1))
+                )
+                expected_window_prob = torch.where(
+                    telemetry_window_mask,
+                    probabilities,
+                    torch.zeros_like(probabilities),
+                ).sum(dim=1) * nonzero_prob
         else:
-            self._uniform_t1_window_last_reset_sample_frac_valid = 0.0
-            self._uniform_t1_window_last_reset_expected_sample_frac_valid = 0.0
-            self._uniform_t1_window_last_reset_mean_window_len = 0.0
+            p_window = self._uniform_t1_window_probability(window_len, outside_len)
+            expected_window_prob = p_window * nonzero_prob
+
+        window_valid_float = window_valid.to(dtype=torch.float32)
+        valid_count = window_valid_float.sum().clamp_min(1.0)
+        telemetry_values = torch.stack(
+            (
+                window_valid_float.mean(),
+                sampled_window.to(dtype=torch.float32).mean(),
+                expected_window_prob.mean(),
+                (sampled_window.to(dtype=torch.float32) * window_valid_float).sum() / valid_count,
+                (expected_window_prob * window_valid_float).sum() / valid_count,
+                (window_len.to(dtype=torch.float32) * window_valid_float).sum() / valid_count,
+            )
+        )
+        (
+            self._uniform_t1_window_last_reset_available_frac,
+            self._uniform_t1_window_last_reset_sample_frac,
+            self._uniform_t1_window_last_reset_expected_sample_frac,
+            self._uniform_t1_window_last_reset_sample_frac_valid,
+            self._uniform_t1_window_last_reset_expected_sample_frac_valid,
+            self._uniform_t1_window_last_reset_mean_window_len,
+        ) = telemetry_values
 
     def _current_freeze_at_timestep_zero_prob(self) -> float:
         return self._scheduled_reset_prob(
@@ -3794,25 +6337,109 @@ class MotionCommand(CommandTermBase):
         carry_end = carry_window_by_clip[clip_ids, 1]
         return (time_steps >= carry_start) & (time_steps < carry_end)
 
+    def _get_contact_aware_button_window_by_clip(self) -> torch.Tensor:
+        """Return the configured source-clock pickup/drop transition window."""
+        self._validate_kinematic_button_motion_object()
+        button_window_mode = getattr(
+            getattr(self, "motion_cfg", None),
+            "contact_aware_button_window_mode",
+            "contact_interval",
+        )
+        if button_window_mode not in {"contact_interval", "kinematic_lift"}:
+            raise ValueError(
+                "Unsupported contact_aware_button_window_mode="
+                f"{button_window_mode!r}. Expected 'contact_interval' or "
+                "'kinematic_lift'."
+            )
+
+        if button_window_mode == "kinematic_lift":
+            cache_name = "_contact_aware_button_window_by_clip_kinematic_lift_v1"
+            cached = getattr(self, cache_name, None)
+            if cached is not None:
+                return cached
+
+            result = torch.zeros(
+                (self.motion.num_clips, 2),
+                device=self.device,
+                dtype=torch.long,
+            )
+            result[:, 1] = torch.clamp(self.motion.clip_lengths, min=0)
+            if self.motion.has_object:
+                clip_offsets = self.motion.clip_offsets
+                clip_lengths = self.motion.clip_lengths
+                root_pos_w = self.motion.body_pos_w[:, 0]
+                object_pos_w = self.motion.object_pos_w
+                for clip_idx in range(self.motion.num_clips):
+                    clip_start = int(clip_offsets[clip_idx].item())
+                    clip_length = int(clip_lengths[clip_idx].item())
+                    if clip_length <= 0:
+                        continue
+                    clip_end = clip_start + clip_length
+                    rel_z = (
+                        object_pos_w[clip_start:clip_end, 2]
+                        - root_pos_w[clip_start:clip_end, 2]
+                    )
+                    lift_start, lift_end = _kinematic_lift_window_from_rel_z(
+                        rel_z,
+                        lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                        lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                        consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                        require_sustained_lift=True,
+                    )
+                    result[clip_idx, 0] = lift_start
+                    result[clip_idx, 1] = lift_end
+            setattr(self, cache_name, result)
+            return result
+
+        # Legacy mode: exported contact t1/t2 override the configured root
+        # carry window per valid clip.  This remains the default so old
+        # checkpoints keep their serialized behavior.
+        fallback = self._get_contact_aware_carry_window_by_clip()
+        contact_windows = getattr(self, "_adaptive_sampling_contact_window_by_clip", None)
+        contact_valid = getattr(self, "_adaptive_sampling_contact_window_valid_by_clip", None)
+        if contact_windows is None or contact_valid is None or not torch.any(contact_valid):
+            return fallback
+        result = fallback.clone()
+        result[contact_valid] = contact_windows[contact_valid]
+        return result
+
+    def _validate_kinematic_button_motion_object(self) -> None:
+        """Fail before kinematic button training can degrade to constant zeros."""
+
+        button_window_mode = getattr(
+            getattr(self, "motion_cfg", None),
+            "contact_aware_button_window_mode",
+            "contact_interval",
+        )
+        if button_window_mode == "kinematic_lift" and not bool(
+            getattr(getattr(self, "motion", None), "has_object", False)
+        ):
+            raise ValueError(
+                "contact_aware_button_window_mode='kinematic_lift' requires a motion "
+                "with an object trajectory; pickup/drop labels cannot be constant-zero fallbacks."
+            )
+
     def get_contact_aware_drop_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        self._validate_kinematic_button_motion_object()
         env_ids_t = self._ensure_index_tensor(env_ids)
         if not self.motion.has_object:
             return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
 
         clip_ids = self.clip_ids[env_ids_t]
         time_steps = self.time_steps[env_ids_t]
-        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_window_by_clip = self._get_contact_aware_button_window_by_clip()
         carry_end = carry_window_by_clip[clip_ids, 1]
         return time_steps >= carry_end
 
     def get_contact_aware_pickup_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        self._validate_kinematic_button_motion_object()
         env_ids_t = self._ensure_index_tensor(env_ids)
         if not self.motion.has_object:
             return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
 
         clip_ids = self.clip_ids[env_ids_t]
         time_steps = self.time_steps[env_ids_t]
-        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_window_by_clip = self._get_contact_aware_button_window_by_clip()
         carry_start = carry_window_by_clip[clip_ids, 0]
         return time_steps < carry_start
 
@@ -3850,14 +6477,13 @@ class MotionCommand(CommandTermBase):
         # picked at reset time.
         clip_pickup_steps = self._get_clip_pickup_steps_by_clip()[self.clip_ids[env_ids]]
         already_picked_mask = self.time_steps[env_ids] >= clip_pickup_steps
-        if not torch.any(already_picked_mask):
-            return
-
-        prime_env_ids = env_ids[already_picked_mask]
-        self.pickup_anchor_set[prime_env_ids] = True
-        self.pickup_consecutive_counter[prime_env_ids] = _RUNTIME_PICKUP_CONSECUTIVE_STEPS
-        self.pickup_anchor_root_pos_w[prime_env_ids] = root_pos_w[already_picked_mask]
-        self.pickup_anchor_root_quat_w[prime_env_ids] = root_quat_w[already_picked_mask]
+        # Keep the reset path device-only too.  The anchor poses above already
+        # contain the supplied reset root for every selected row, so only the
+        # latch and counter differ for clips that start after pickup.
+        self.pickup_anchor_set[env_ids] = already_picked_mask
+        self.pickup_consecutive_counter[env_ids] = already_picked_mask.to(
+            dtype=self.pickup_consecutive_counter.dtype
+        ) * _RUNTIME_PICKUP_CONSECUTIVE_STEPS
 
     def _update_pickup_anchor_state(self) -> None:
         if (
@@ -3875,20 +6501,24 @@ class MotionCommand(CommandTermBase):
         # command so runtime anchor latching stays in the same coordinate frame.
         clip_pickup_thresholds = self._get_clip_pickup_thresholds_by_clip()[self.clip_ids]
         lifted = current_rel_z >= clip_pickup_thresholds
-        self.pickup_consecutive_counter = torch.where(
-            lifted,
-            self.pickup_consecutive_counter + 1,
-            torch.zeros_like(self.pickup_consecutive_counter),
+        self.pickup_consecutive_counter.copy_(
+            torch.where(
+                lifted,
+                self.pickup_consecutive_counter + 1,
+                torch.zeros_like(self.pickup_consecutive_counter),
+            )
         )
         newly_picked = (~self.pickup_anchor_set) & (
             self.pickup_consecutive_counter >= _RUNTIME_PICKUP_CONSECUTIVE_STEPS
         )
-        if not newly_picked.any():
-            return
-
-        self.pickup_anchor_set[newly_picked] = True
-        self.pickup_anchor_root_pos_w[newly_picked] = self.robot_root_pos_w[newly_picked]
-        self.pickup_anchor_root_quat_w[newly_picked] = self.robot_root_quat_w[newly_picked]
+        update_pos_mask = newly_picked.unsqueeze(-1)
+        self.pickup_anchor_root_pos_w.copy_(
+            torch.where(update_pos_mask, self.robot_root_pos_w, self.pickup_anchor_root_pos_w)
+        )
+        self.pickup_anchor_root_quat_w.copy_(
+            torch.where(update_pos_mask, self.robot_root_quat_w, self.pickup_anchor_root_quat_w)
+        )
+        self.pickup_anchor_set.logical_or_(newly_picked)
 
     def _update_contact_prior_state(self) -> None:
         if (
@@ -4058,39 +6688,57 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self._raw_motion_joint_pos()
+        return self._motion_joint_pos()
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self._raw_motion_joint_vel()
+        return self._motion_joint_vel()
+
+    def _motion_joint_pos(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        return self._raw_motion_joint_pos(env_ids)
+
+    def _motion_joint_vel(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        return self._raw_motion_joint_vel(env_ids)
+
+    def _motion_body_pos_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        pos = self._raw_motion_body_pos_w(env_ids)[:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos, env_ids)
+        return pos + self._get_env_offsets(env_ids)[:, None, :]
+
+    def _motion_body_quat_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        quat = self._raw_motion_body_quat_w(env_ids)[:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat, env_ids)
+        return quat
+
+    def _motion_body_lin_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        vel = self._raw_motion_body_lin_vel_w(env_ids)[:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel, env_ids)
+        return vel
+
+    def _motion_body_ang_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        vel = self._raw_motion_body_ang_vel_w(env_ids)[:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel, env_ids)
+        return vel
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        pos = self._raw_motion_body_pos_w()[:, self.tracked_body_indexes]
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_pos(pos)
-        return pos + self._get_env_offsets()[:, None, :]
+        return self._motion_body_pos_w()
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        quat = self._raw_motion_body_quat_w()[:, self.tracked_body_indexes]
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_quat(quat)
-        return quat
+        return self._motion_body_quat_w()
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        vel = self._raw_motion_body_lin_vel_w()[:, self.tracked_body_indexes]
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_vec(vel)
-        return vel
+        return self._motion_body_lin_vel_w()
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        vel = self._raw_motion_body_ang_vel_w()[:, self.tracked_body_indexes]
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_vec(vel)
-        return vel
+        return self._motion_body_ang_vel_w()
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
@@ -4196,34 +6844,46 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Object from motion data
     #########################################################################################
+    def _motion_object_pos_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        count = self.num_envs if env_ids is None else env_ids.numel()
+        if not self.motion.has_object:
+            return torch.zeros(count, 3, device=self.device, dtype=torch.float32)
+        pos = self._raw_motion_object_pos_w(env_ids)
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos, env_ids)
+        return pos + self._get_env_offsets(env_ids)
+
+    def _motion_object_quat_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        count = self.num_envs if env_ids is None else env_ids.numel()
+        if not self.motion.has_object:
+            quat = torch.zeros(count, 4, device=self.device, dtype=torch.float32)
+            quat[:, 3] = 1.0
+            return quat
+        quat = self._raw_motion_object_quat_w(env_ids)
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat, env_ids)
+        return quat
+
+    def _motion_object_lin_vel_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        count = self.num_envs if env_ids is None else env_ids.numel()
+        if not self.motion.has_object:
+            return torch.zeros(count, 3, device=self.device, dtype=torch.float32)
+        vel = self._raw_motion_object_lin_vel_w(env_ids)
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel, env_ids)
+        return vel
+
     @property
     def object_pos_w(self) -> torch.Tensor:
-        if not self.motion.has_object:
-            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        pos = self._raw_motion_object_pos_w()
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_pos(pos)
-        return pos + self._get_env_offsets()
+        return self._motion_object_pos_w()
 
     @property
     def object_quat_w(self) -> torch.Tensor:
-        if not self.motion.has_object:
-            quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
-            quat[:, 3] = 1.0
-            return quat
-        quat = self._raw_motion_object_quat_w()
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_quat(quat)
-        return quat
+        return self._motion_object_quat_w()
 
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
-        if not self.motion.has_object:
-            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        vel = self._raw_motion_object_lin_vel_w()
-        if self.motion_cfg.align_motion_to_init_yaw:
-            return self._apply_motion_alignment_vec(vel)
-        return vel
+        return self._motion_object_lin_vel_w()
 
     @property
     def object_size(self) -> torch.Tensor:
@@ -4239,8 +6899,7 @@ class MotionCommand(CommandTermBase):
     def simulator_object_pos_w(self) -> torch.Tensor:
         if not self.motion.has_object:
             return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        indices = self._get_active_object_indices()
-        return self._env.simulator.all_root_states[indices][:, :3]
+        return self.simulator_object_state_snapshot[:, :3]
 
     @property
     def simulator_object_quat_w(self) -> torch.Tensor:
@@ -4248,28 +6907,35 @@ class MotionCommand(CommandTermBase):
             quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
             quat[:, 3] = 1.0
             return quat
-        indices = self._get_active_object_indices()
-        return self._env.simulator.all_root_states[indices][:, 3:7]
+        return self.simulator_object_state_snapshot[:, 3:7]
 
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
         if not self.motion.has_object:
             return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        indices = self._get_active_object_indices()
-        return self._env.simulator.all_root_states[indices][:, 7:10]
+        return self.simulator_object_state_snapshot[:, 7:10]
 
     @property
     def simulator_object_ang_vel_w(self) -> torch.Tensor:
         if not self.motion.has_object:
             return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        indices = self._get_active_object_indices()
-        return self._env.simulator.all_root_states[indices][:, 10:13]
+        return self.simulator_object_state_snapshot[:, 10:13]
 
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
     #########################################################################################
 
     def init_buffers(self):
+        if self.motion.has_object:
+            self._simulator_object_state_snapshot = torch.empty(
+                (self.num_envs, 13),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._simulator_object_state_snapshot_ready = False
+        else:
+            self._simulator_object_state_snapshot = None
+            self._simulator_object_state_snapshot_ready = True
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         if self._fixed_clip_ids is not None and int(self._fixed_clip_ids.numel()) == int(self.num_envs):
@@ -4370,22 +7036,34 @@ class MotionCommand(CommandTermBase):
         aligned_root_pos = quat_apply(align_quat, motion_root_pos, w_last=True)
         self._align_pos[env_ids] = desired_root_pos - aligned_root_pos
 
-    def _apply_motion_alignment_pos(self, pos: torch.Tensor) -> torch.Tensor:
-        align_quat = self._align_quat
-        align_pos = self._align_pos
+    def _apply_motion_alignment_pos(
+        self,
+        pos: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        align_quat = self._align_quat if env_ids is None else self._align_quat[env_ids]
+        align_pos = self._align_pos if env_ids is None else self._align_pos[env_ids]
         if pos.ndim == 3:
             align_quat = align_quat[:, None, :].expand(-1, pos.shape[1], -1)
             align_pos = align_pos[:, None, :]
         return quat_apply(align_quat, pos, w_last=True) + align_pos
 
-    def _apply_motion_alignment_vec(self, vec: torch.Tensor) -> torch.Tensor:
-        align_quat = self._align_quat
+    def _apply_motion_alignment_vec(
+        self,
+        vec: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        align_quat = self._align_quat if env_ids is None else self._align_quat[env_ids]
         if vec.ndim == 3:
             align_quat = align_quat[:, None, :].expand(-1, vec.shape[1], -1)
         return quat_apply(align_quat, vec, w_last=True)
 
-    def _apply_motion_alignment_quat(self, quat: torch.Tensor) -> torch.Tensor:
-        align_quat = self._align_quat
+    def _apply_motion_alignment_quat(
+        self,
+        quat: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        align_quat = self._align_quat if env_ids is None else self._align_quat[env_ids]
         if quat.ndim == 3:
             align_quat = align_quat[:, None, :].expand(-1, quat.shape[1], -1)
         return quat_mul(align_quat, quat, w_last=True)
@@ -4400,27 +7078,26 @@ class MotionCommand(CommandTermBase):
         try:
             resolved = Path(resolve_data_file_path(root_str)).resolve()
         except Exception as exc:
-            logger.warning(
-                "Failed to resolve adaptive-sampling contact interval root '{}': {}",
-                root_str,
-                exc,
-            )
-            return None
+            raise FileNotFoundError(
+                f"Failed to resolve configured adaptive-sampling contact interval root '{root_str}': {exc}"
+            ) from exc
         if not resolved.is_dir():
-            logger.warning(
-                "Adaptive-sampling contact interval root '{}' does not exist; contact-window sampling and stage metrics will be skipped.",
-                resolved,
+            raise FileNotFoundError(
+                "Configured adaptive-sampling contact interval root does not exist or is not a directory: "
+                f"'{resolved}'."
             )
-            return None
         return resolved
 
     @staticmethod
     def _infer_clip_id_from_contact_export_dir_name(dir_name: str) -> str:
-        if "_" not in dir_name:
-            return dir_name.strip()
-        return dir_name.split("_", 1)[1].strip()
+        return _infer_contact_export_clip_id(dir_name)
 
-    def _load_adaptive_sampling_contact_window_from_dir(self, clip_dir: Path) -> tuple[int, int] | None:
+    def _load_adaptive_sampling_contact_window_from_dir(
+        self,
+        clip_dir: Path,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, int] | None:
         intervals_by_region: dict[str, Any] = {}
         contact_intervals_path = clip_dir / "contact_intervals.json"
         if contact_intervals_path.is_file():
@@ -4438,14 +7115,48 @@ class MotionCommand(CommandTermBase):
                 if not interval_path.is_file():
                     continue
                 try:
-                    intervals_by_region[region_name] = np.asarray(np.load(interval_path), dtype=np.int64).reshape(-1)
+                    intervals_by_region[region_name] = np.load(
+                        interval_path,
+                        allow_pickle=False,
+                    )
                 except Exception as exc:
                     logger.warning("Skipping invalid adaptive contact interval '{}': {}", interval_path, exc)
 
-        return _select_primary_contact_interval(intervals_by_region)
+        interval = _select_primary_contact_interval(intervals_by_region)
+        if interval is None:
+            return None
+
+        interval = _convert_contact_interval_timebase(
+            interval,
+            metadata=metadata,
+            motion_fps=float(getattr(getattr(self, "motion", None), "fps", 1.0)),
+        )
+
+        # Contact exports index physical rollout steps.  A multi-clip runtime
+        # prepend holds motion time at zero for the warmup, so convert the
+        # exported interval back to the motion-time coordinates used by AS,
+        # button observations, and random-start sampling.  Single-clip
+        # prepends are spliced into the motion itself and therefore need no
+        # conversion.
+        compensation_enabled = bool(
+            getattr(self.motion_cfg, "contact_interval_runtime_prepend_compensation", False)
+        )
+        runtime_prepend_offset = (
+            int(self._runtime_default_pose_prepend_steps)
+            if compensation_enabled and bool(self._runtime_default_pose_prepend_enabled)
+            else 0
+        )
+        if runtime_prepend_offset <= 0:
+            return interval
+        start_step = max(0, int(interval[0]) - runtime_prepend_offset)
+        end_step = int(interval[1]) - runtime_prepend_offset
+        if end_step <= start_step:
+            return None
+        return start_step, end_step
 
     def _configure_adaptive_sampling_contact_interval_bank(self) -> None:
         self._adaptive_sampling_contact_interval_root = None
+        self._adaptive_sampling_contact_intervals_by_clip = {}
         self._adaptive_sampling_contact_window_by_clip = torch.full(
             (self.motion.num_clips, 2),
             -1,
@@ -4458,44 +7169,125 @@ class MotionCommand(CommandTermBase):
             dtype=torch.bool,
         )
 
-        needs_contact_windows = self.use_adaptive_timesteps_sampler or bool(
-            self.motion_cfg.uniform_t1_window_sampling_enabled
+        configured_root = str(
+            getattr(self.motion_cfg, "adaptive_sampling_contact_interval_root", None) or ""
+        ).strip()
+        observation_consumer = self._has_contact_window_observation_consumer()
+        needs_contact_windows = (
+            self.use_adaptive_timesteps_sampler
+            or bool(self.motion_cfg.uniform_t1_window_sampling_enabled)
+            or bool(configured_root and observation_consumer)
         )
         if not needs_contact_windows or not self.motion.has_object:
             return
 
         contact_root = self._resolve_adaptive_sampling_contact_interval_root()
         if contact_root is None:
+            if bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
+                raise ValueError(
+                    "uniform_t1_window_sampling_enabled=True requires a non-empty "
+                    "adaptive_sampling_contact_interval_root."
+                )
             return
 
         clip_name_to_index = {clip_name: idx for idx, clip_name in enumerate(self.motion.clip_ids)}
         loaded_count = 0
+        clip_source_dirs: dict[int, Path] = {}
         for clip_dir in sorted(contact_root.iterdir()):
             if not clip_dir.is_dir():
                 continue
             metadata_path = clip_dir / "metadata.json"
+            metadata: dict[str, Any] = {}
             clip_id = ""
             if metadata_path.is_file():
                 try:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 except Exception as exc:
+                    inferred_clip_id = _resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        clip_name_to_index,
+                    )
+                    if inferred_clip_id in clip_name_to_index:
+                        raise ValueError(
+                            "Adaptive contact metadata is invalid for an active clip: "
+                            f"clip={inferred_clip_id!r}, path={metadata_path}: {exc}"
+                        ) from exc
                     logger.warning("Skipping invalid adaptive contact metadata '{}': {}", metadata_path, exc)
+                    continue
+                if not isinstance(metadata, dict):
+                    inferred_clip_id = _resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        clip_name_to_index,
+                    )
+                    if inferred_clip_id in clip_name_to_index:
+                        raise ValueError(
+                            "Adaptive contact metadata for an active clip must be a JSON object: "
+                            f"clip={inferred_clip_id!r}, path='{metadata_path}'."
+                        )
+                    logger.warning(
+                        "Skipping non-object adaptive contact metadata for inactive directory '{}'.",
+                        metadata_path,
+                    )
                     continue
                 clip_id = str(metadata.get("clip_id", "")).strip()
             if not clip_id:
-                clip_id = self._infer_clip_id_from_contact_export_dir_name(clip_dir.name)
+                clip_id = _resolve_contact_export_clip_id(clip_dir.name, clip_name_to_index)
             clip_index = clip_name_to_index.get(clip_id)
             if clip_index is None:
                 continue
-            if bool(self._adaptive_sampling_contact_window_valid_by_clip[clip_index].item()):
-                continue
-            interval = self._load_adaptive_sampling_contact_window_from_dir(clip_dir)
+            previous_source = clip_source_dirs.get(clip_index)
+            if previous_source is not None:
+                raise RuntimeError(
+                    "Multiple adaptive contact directories resolve to the same active clip: "
+                    f"clip={clip_id!r}, first={previous_source}, second={clip_dir}."
+                )
+            clip_source_dirs[clip_index] = clip_dir
+            interval = self._load_adaptive_sampling_contact_window_from_dir(
+                clip_dir,
+                metadata=metadata,
+            )
             if interval is None:
                 continue
+            clip_length = int(self.motion.clip_lengths[clip_index].item())
+            if interval[0] < 0 or interval[0] >= clip_length or interval[1] <= interval[0] or interval[1] > clip_length:
+                raise ValueError(
+                    "Adaptive contact interval is outside the active motion-time range after runtime-prepend "
+                    f"conversion: clip={clip_id!r}, interval={interval}, clip_length={clip_length}."
+                )
             self._adaptive_sampling_contact_window_by_clip[clip_index, 0] = int(interval[0])
             self._adaptive_sampling_contact_window_by_clip[clip_index, 1] = int(interval[1])
             self._adaptive_sampling_contact_window_valid_by_clip[clip_index] = True
+            self._adaptive_sampling_contact_intervals_by_clip[clip_index] = (
+                int(interval[0]),
+                int(interval[1]),
+            )
             loaded_count += 1
+
+        require_complete_coverage = os.environ.get(
+            "HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        # A configured export root is part of the policy input contract when a
+        # contact-aware observation consumes these windows.  Falling back to a
+        # kinematic window for only the missing clips (or for the entire bank)
+        # would change the meaning of a saved actor input across train/eval or
+        # checkpoint resume.  Keep the no-root legacy fallback, and keep partial
+        # banks available for sampler/metrics-only users, but make an explicitly
+        # configured observation bank complete by construction.
+        require_complete_coverage = require_complete_coverage or bool(
+            configured_root and observation_consumer
+        )
+        if require_complete_coverage and loaded_count != self.motion.num_clips:
+            missing_clip_ids = [
+                str(self.motion.clip_ids[index])
+                for index in range(self.motion.num_clips)
+                if not bool(self._adaptive_sampling_contact_window_valid_by_clip[index].item())
+            ]
+            raise RuntimeError(
+                "Complete adaptive contact-interval coverage is required, but valid motion-time windows were "
+                f"loaded for only {loaded_count}/{self.motion.num_clips} clips. "
+                f"missing_preview={missing_clip_ids[:20]}."
+            )
 
         if loaded_count > 0:
             self._adaptive_sampling_contact_interval_root = contact_root
@@ -4506,10 +7298,13 @@ class MotionCommand(CommandTermBase):
                 contact_root,
             )
         else:
-            logger.warning(
-                "No matching adaptive-sampling contact windows were found in '{}'; contact-window sampling and stage metrics will be skipped.",
-                contact_root,
-            )
+            message = f"No matching adaptive-sampling contact windows were found in '{contact_root}'."
+            if bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
+                raise RuntimeError(
+                    message
+                    + " uniform_t1_window_sampling_enabled=True cannot be honored without matching windows."
+                )
+            logger.warning("{} Contact-window stage metrics will be skipped.", message)
 
     def _current_adaptive_sampling_clip_weights(self) -> torch.Tensor:
         if self.motion.num_clips <= 1:
@@ -4533,36 +7328,40 @@ class MotionCommand(CommandTermBase):
             dtype=torch.float32,
         )
 
-    def _compute_adaptive_sampling_contact_stage_metrics(self) -> dict[str, torch.Tensor]:
+    def _compute_adaptive_sampling_contact_stage_metrics(
+        self,
+        timestep_probability_overrides: list[torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
         if self.adaptive_timesteps_sampler is None:
             return {}
         if self._adaptive_sampling_contact_window_by_clip is None or self._adaptive_sampling_contact_window_valid_by_clip is None:
             return {}
-
-        valid_mask = self._adaptive_sampling_contact_window_valid_by_clip
-        if not torch.any(valid_mask):
+        valid_clip_indices = tuple(self._adaptive_sampling_contact_intervals_by_clip)
+        if not valid_clip_indices:
             return {}
 
+        valid_mask = self._adaptive_sampling_contact_window_valid_by_clip
         clip_weights = self._current_adaptive_sampling_clip_weights()
-        valid_clip_prob_mass = clip_weights[valid_mask].sum()
+        valid_clip_index_tensor = torch.as_tensor(
+            valid_clip_indices,
+            device=self.device,
+            dtype=torch.long,
+        )
+        valid_clip_prob_mass = clip_weights[valid_clip_index_tensor].sum()
         if float(valid_clip_prob_mass.item()) <= 0.0:
             return {}
 
         stage_prob_masses = torch.zeros((5,), device=self.device, dtype=torch.float32)
         after_t2_prob_mass = torch.zeros((), device=self.device, dtype=torch.float32)
-        valid_start_counts = self._valid_start_counts()
-
-        valid_clip_indices = torch.nonzero(valid_mask, as_tuple=False).reshape(-1)
-        for clip_idx_tensor in valid_clip_indices:
-            clip_idx = int(clip_idx_tensor.item())
+        for clip_idx in valid_clip_indices:
             clip_weight = clip_weights[clip_idx].to(dtype=torch.float32)
-            if float(clip_weight.item()) <= 0.0:
-                continue
-
-            sampling_probabilities = self.adaptive_timesteps_sampler._sampling_probabilities_for_clip(clip_idx)
-            sample_end_step = float(valid_start_counts[clip_idx].item())
-            t1 = int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 0].item())
-            t2 = int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 1].item())
+            sampling_probabilities = (
+                self._effective_adaptive_timestep_probabilities_for_clip(clip_idx)
+                if timestep_probability_overrides is None
+                else timestep_probability_overrides[clip_idx]
+            )
+            sample_end_step = float(sampling_probabilities.numel())
+            t1, t2 = self._adaptive_sampling_contact_intervals_by_clip[clip_idx]
             stage_intervals, after_t2_interval = _compute_contact_stage_intervals(
                 t1=t1,
                 t2=t2,
@@ -4599,48 +7398,251 @@ class MotionCommand(CommandTermBase):
             "contact_interval_stage_t2m30_to_t2_prob_mass": stage_prob_masses[4],
         }
 
-    def update_metrics(self):
-        """Update the metrics. After action, before step() is called."""
-        # Human (robot) tracking metrics.
-        self.metrics["motion/error_ref_pos"] = torch.norm(self.ref_pos_w - self.robot_ref_pos_w, dim=-1)
-        self.metrics["motion/error_ref_rot"] = quat_error_magnitude(self.ref_quat_w, self.robot_ref_quat_w)
-        self.metrics["motion/error_ref_lin_vel"] = torch.norm(self.ref_lin_vel_w - self.robot_ref_lin_vel_w, dim=-1)
-        self.metrics["motion/error_ref_ang_vel"] = torch.norm(self.ref_ang_vel_w - self.robot_ref_ang_vel_w, dim=-1)
+    def _clip_start_object_pos_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        start_steps = torch.zeros_like(self.time_steps)
+        motion_idx = self._get_motion_indices(start_steps)
+        pos = self.motion.object_pos_w[motion_idx]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._get_env_offsets()
 
-        self.metrics["motion/error_body_pos"] = torch.norm(
-            self.body_pos_relative_w - self.robot_body_pos_w, dim=-1
-        ).mean(dim=-1)
+    def _clip_start_root_pos_w(self) -> torch.Tensor:
+        start_steps = torch.zeros_like(self.time_steps)
+        motion_idx = self._get_motion_indices(start_steps)
+        pos = self.motion.body_pos_w[motion_idx, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._get_env_offsets()
 
-        self.metrics["motion/error_body_rot"] = quat_error_magnitude(
-            self.body_quat_relative_w, self.robot_body_quat_w
-        ).mean(dim=-1)
+    def _object_contact_force_magnitude_for_bodies(self, body_names: tuple[str, ...]) -> torch.Tensor:
+        zeros = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        simulator_body_names = set(getattr(self._env.simulator, "body_names", []) or [])
+        selected_names = [name for name in body_names if name in simulator_body_names]
+        if not selected_names:
+            return zeros
 
-        self.metrics["motion/error_body_lin_vel"] = torch.norm(
-            self.body_lin_vel_w - self.robot_body_lin_vel_w, dim=-1
-        ).mean(dim=-1)
-        self.metrics["motion/error_body_ang_vel"] = torch.norm(
-            self.body_ang_vel_w - self.robot_body_ang_vel_w, dim=-1
-        ).mean(dim=-1)
+        try:
+            force_history = self.get_body_object_contact_force_history(selected_names)
+        except Exception:
+            return zeros
+        if not isinstance(force_history, torch.Tensor) or force_history.ndim != 4 or force_history.shape[2] == 0:
+            return zeros
+        current_forces = force_history[:, 0].to(device=self.device, dtype=torch.float32)
+        return torch.amax(torch.linalg.norm(current_forces, dim=-1), dim=1)
 
-        self.metrics["motion/error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
-        self.metrics["motion/error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
+    def _update_empty_lift_diagnostic_metrics(self, zeros: torch.Tensor) -> None:
+        for key in (
+            "lift/object_z",
+            "lift/ref_object_z",
+            "lift/root_z",
+            "lift/object_minus_root_z",
+            "lift/object_z_delta_from_clip_start",
+            "lift/ref_object_z_delta_from_clip_start",
+            "lift/root_z_delta_from_clip_start",
+            "lift/object_minus_root_z_delta_from_clip_start",
+            "lift/left_wrist_object_force",
+            "lift/right_wrist_object_force",
+            "lift/left_hand_object_force",
+            "lift/right_hand_object_force",
+            "lift/max_hand_object_force",
+            "lift/hand_contact_frac",
+            "lift/world_lift_frac",
+            "lift/world_lift_with_hand_contact_frac",
+            "lift/relative_lift_false_positive_frac",
+            "lift/object_contact_getter_available",
+            "lift/hand_contact_body_available",
+        ):
+            self.metrics[key] = zeros
 
-        # Object co-tracking metrics (separate from human tracking metrics).
+    def _update_lift_diagnostic_metrics(self) -> None:
+        sim_object_pos = self.simulator_object_pos_w
+        ref_object_pos = self.object_pos_w
+        robot_root_pos = self.robot_root_pos_w
+        clip_start_object_pos = self._clip_start_object_pos_w()
+        clip_start_root_pos = self._clip_start_root_pos_w()
+
+        object_z = sim_object_pos[:, 2]
+        ref_object_z = ref_object_pos[:, 2]
+        root_z = robot_root_pos[:, 2]
+        object_minus_root_z = object_z - root_z
+        object_z_delta = object_z - clip_start_object_pos[:, 2]
+        ref_object_z_delta = ref_object_z - clip_start_object_pos[:, 2]
+        root_z_delta = root_z - clip_start_root_pos[:, 2]
+        object_minus_root_z_delta = object_minus_root_z - (
+            clip_start_object_pos[:, 2] - clip_start_root_pos[:, 2]
+        )
+
+        left_wrist_force = self._object_contact_force_magnitude_for_bodies(("left_wrist_yaw_link",))
+        right_wrist_force = self._object_contact_force_magnitude_for_bodies(("right_wrist_yaw_link",))
+        left_hand_force = self._object_contact_force_magnitude_for_bodies(("left_wrist_yaw_link", "left_rubber_hand"))
+        right_hand_force = self._object_contact_force_magnitude_for_bodies(
+            ("right_wrist_yaw_link", "right_rubber_hand")
+        )
+        max_hand_force = torch.maximum(left_hand_force, right_hand_force)
+
+        world_lift = object_z_delta > _LIFT_DIAGNOSTIC_OBJECT_LIFT_HEIGHT_THRESHOLD
+        hand_contact = max_hand_force > _LIFT_DIAGNOSTIC_MIN_CONTACT_FORCE
+        relative_lift = object_minus_root_z_delta > _LIFT_DIAGNOSTIC_OBJECT_LIFT_HEIGHT_THRESHOLD
+        false_positive = (
+            relative_lift
+            & (object_z_delta <= _LIFT_DIAGNOSTIC_FALSE_POSITIVE_MAX_WORLD_LIFT)
+            & (root_z_delta < -_LIFT_DIAGNOSTIC_FALSE_POSITIVE_MIN_ROOT_DROP)
+        )
+
+        simulator_body_names = set(getattr(self._env.simulator, "body_names", []) or [])
+        hand_body_available = any(
+            name in simulator_body_names
+            for name in ("left_wrist_yaw_link", "right_wrist_yaw_link", "left_rubber_hand", "right_rubber_hand")
+        )
+        hand_body_available_tensor = torch.full_like(object_z, 1.0 if hand_body_available else 0.0)
+        getter_available_tensor = torch.full_like(
+            object_z,
+            1.0 if getattr(self._env.simulator, "get_object_contact_force_history", None) is not None else 0.0,
+        )
+
+        # These three values can be views into simulator/motion storage.  The
+        # logging meter retains references until the PPO iteration boundary;
+        # snapshot them so later simulator updates cannot rewrite earlier
+        # diagnostic samples in place.
+        self.metrics["lift/object_z"] = object_z.clone()
+        self.metrics["lift/ref_object_z"] = ref_object_z.clone()
+        self.metrics["lift/root_z"] = root_z.clone()
+        self.metrics["lift/object_minus_root_z"] = object_minus_root_z
+        self.metrics["lift/object_z_delta_from_clip_start"] = object_z_delta
+        self.metrics["lift/ref_object_z_delta_from_clip_start"] = ref_object_z_delta
+        self.metrics["lift/root_z_delta_from_clip_start"] = root_z_delta
+        self.metrics["lift/object_minus_root_z_delta_from_clip_start"] = object_minus_root_z_delta
+        self.metrics["lift/left_wrist_object_force"] = left_wrist_force
+        self.metrics["lift/right_wrist_object_force"] = right_wrist_force
+        self.metrics["lift/left_hand_object_force"] = left_hand_force
+        self.metrics["lift/right_hand_object_force"] = right_hand_force
+        self.metrics["lift/max_hand_object_force"] = max_hand_force
+        self.metrics["lift/hand_contact_frac"] = hand_contact.to(dtype=torch.float32)
+        self.metrics["lift/world_lift_frac"] = world_lift.to(dtype=torch.float32)
+        self.metrics["lift/world_lift_with_hand_contact_frac"] = (world_lift & hand_contact).to(dtype=torch.float32)
+        self.metrics["lift/relative_lift_false_positive_frac"] = false_positive.to(dtype=torch.float32)
+        self.metrics["lift/object_contact_getter_available"] = getter_available_tensor
+        self.metrics["lift/hand_contact_body_available"] = hand_body_available_tensor
+
+    @staticmethod
+    def supported_live_metric_keys() -> frozenset[str]:
+        """Metrics that an enabled curriculum may request at every environment step."""
+
+        return _CURRICULUM_LIVE_TRACKING_ERROR_KEYS
+
+    def _update_tracking_error_metrics(self, metric_keys: frozenset[str] | None = None) -> None:
+        """Refresh selected tracking errors using the same expressions as a full metrics update."""
+
+        requested = _CURRICULUM_LIVE_TRACKING_ERROR_KEYS if metric_keys is None else metric_keys
+
+        if "motion/error_ref_pos" in requested:
+            self.metrics["motion/error_ref_pos"] = torch.norm(self.ref_pos_w - self.robot_ref_pos_w, dim=-1)
+        if "motion/error_ref_rot" in requested:
+            self.metrics["motion/error_ref_rot"] = quat_error_magnitude(self.ref_quat_w, self.robot_ref_quat_w)
+        if "motion/error_ref_lin_vel" in requested:
+            self.metrics["motion/error_ref_lin_vel"] = torch.norm(
+                self.ref_lin_vel_w - self.robot_ref_lin_vel_w,
+                dim=-1,
+            )
+        if "motion/error_ref_ang_vel" in requested:
+            self.metrics["motion/error_ref_ang_vel"] = torch.norm(
+                self.ref_ang_vel_w - self.robot_ref_ang_vel_w,
+                dim=-1,
+            )
+
+        if "motion/error_body_pos" in requested:
+            self.metrics["motion/error_body_pos"] = torch.norm(
+                self.body_pos_relative_w - self.robot_body_pos_w,
+                dim=-1,
+            ).mean(dim=-1)
+        if "motion/error_body_rot" in requested:
+            self.metrics["motion/error_body_rot"] = quat_error_magnitude(
+                self.body_quat_relative_w,
+                self.robot_body_quat_w,
+            ).mean(dim=-1)
+        if "motion/error_body_lin_vel" in requested:
+            self.metrics["motion/error_body_lin_vel"] = torch.norm(
+                self.body_lin_vel_w - self.robot_body_lin_vel_w,
+                dim=-1,
+            ).mean(dim=-1)
+        if "motion/error_body_ang_vel" in requested:
+            self.metrics["motion/error_body_ang_vel"] = torch.norm(
+                self.body_ang_vel_w - self.robot_body_ang_vel_w,
+                dim=-1,
+            ).mean(dim=-1)
+
+        if "motion/error_joint_pos" in requested:
+            self.metrics["motion/error_joint_pos"] = torch.norm(
+                self.joint_pos - self.robot_joint_pos,
+                dim=-1,
+            )
+        if "motion/error_joint_vel" in requested:
+            self.metrics["motion/error_joint_vel"] = torch.norm(
+                self.joint_vel - self.robot_joint_vel,
+                dim=-1,
+            )
+
+        object_metric_keys = requested.intersection(
+            {
+                "motion/error_object_ref_pos",
+                "motion/error_object_ref_rot",
+                "motion/error_object_ref_lin_vel",
+            }
+        )
+        if not object_metric_keys:
+            return
         if self.motion.has_object:
-            self.metrics["motion/error_object_ref_pos"] = torch.norm(
-                self.object_pos_w - self.simulator_object_pos_w, dim=-1
+            if "motion/error_object_ref_pos" in object_metric_keys:
+                self.metrics["motion/error_object_ref_pos"] = torch.norm(
+                    self.object_pos_w - self.simulator_object_pos_w,
+                    dim=-1,
+                )
+            if "motion/error_object_ref_rot" in object_metric_keys:
+                self.metrics["motion/error_object_ref_rot"] = quat_error_magnitude(
+                    self.object_quat_w,
+                    self.simulator_object_quat_w,
+                )
+            if "motion/error_object_ref_lin_vel" in object_metric_keys:
+                self.metrics["motion/error_object_ref_lin_vel"] = torch.norm(
+                    self.object_lin_vel_w - self.simulator_object_lin_vel_w,
+                    dim=-1,
+                )
+            return
+
+        # Allocate on every call.  Logging meters retain tensor references, so
+        # mutating a cached zero buffer would rewrite samples from earlier steps.
+        zeros = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        for metric_key in object_metric_keys:
+            self.metrics[metric_key] = zeros
+
+    def update_live_metrics(self, metric_keys) -> None:
+        """Refresh only curriculum-consumed tracking metrics before reset handling."""
+
+        requested = frozenset(str(metric_key) for metric_key in metric_keys)
+        unsupported = requested - _CURRICULUM_LIVE_TRACKING_ERROR_KEYS
+        if unsupported:
+            raise ValueError(
+                "Unsupported live motion metric key(s): "
+                f"{sorted(unsupported)}. Supported keys are "
+                f"{sorted(_CURRICULUM_LIVE_TRACKING_ERROR_KEYS)}."
             )
-            self.metrics["motion/error_object_ref_rot"] = quat_error_magnitude(
-                self.object_quat_w, self.simulator_object_quat_w
-            )
-            self.metrics["motion/error_object_ref_lin_vel"] = torch.norm(
-                self.object_lin_vel_w - self.simulator_object_lin_vel_w, dim=-1
-            )
+        self._update_tracking_error_metrics(requested)
+
+    def update_metrics(self):
+        """Update full tracking and diagnostic telemetry after an environment action."""
+
+        self._update_tracking_error_metrics()
+
+        # Lift/contact metrics are diagnostics only.  Keep them out of the
+        # per-step curriculum path because they query motion starts and contact
+        # history repeatedly.
+        if self.motion.has_object:
+            self._update_lift_diagnostic_metrics()
         else:
             zeros = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
-            self.metrics["motion/error_object_ref_pos"] = zeros
-            self.metrics["motion/error_object_ref_rot"] = zeros
-            self.metrics["motion/error_object_ref_lin_vel"] = zeros
+            self._update_empty_lift_diagnostic_metrics(zeros)
 
         self.metrics["motion/reset_start_at_timestep_zero_prob"] = torch.full(
             (self.num_envs,),
@@ -4666,12 +7668,18 @@ class MotionCommand(CommandTermBase):
                 "last_reset_mean_window_len": self._uniform_t1_window_last_reset_mean_window_len,
             }
             for metric_name, metric_value in uniform_t1_stats.items():
-                self.metrics[f"motion/reset_uniform_t1_window_{metric_name}"] = torch.full(
-                    (self.num_envs,),
-                    float(metric_value),
-                    device=self.device,
-                    dtype=torch.float32,
-                )
+                if isinstance(metric_value, torch.Tensor):
+                    self.metrics[f"motion/reset_uniform_t1_window_{metric_name}"] = metric_value.to(
+                        device=self.device,
+                        dtype=torch.float32,
+                    ).expand(self.num_envs)
+                else:
+                    self.metrics[f"motion/reset_uniform_t1_window_{metric_name}"] = torch.full(
+                        (self.num_envs,),
+                        float(metric_value),
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
         self.metrics["motion/reset_freeze_at_timestep_zero_prob"] = torch.full(
             (self.num_envs,),
             float(self._current_freeze_at_timestep_zero_prob()),
@@ -4701,7 +7709,11 @@ class MotionCommand(CommandTermBase):
             )
 
         if self.use_adaptive_timesteps_sampler:
-            self.adaptive_timesteps_sampler.get_stats()
+            (
+                timestep_probabilities_by_clip,
+                bin_probabilities_by_clip,
+            ) = self._effective_adaptive_probability_views()
+            self.adaptive_timesteps_sampler.get_stats(bin_probabilities_by_clip)
             self.metrics["motion/adaptive_timesteps_sampler_entropy"] = self.adaptive_timesteps_sampler.metrics[
                 "sampling_entropy"
             ]
@@ -4711,7 +7723,9 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/adaptive_timesteps_sampler_top1_bin"] = self.adaptive_timesteps_sampler.metrics[
                 "sampling_top1_bin"
             ]
-            for metric_name, metric_value in self._compute_adaptive_sampling_contact_stage_metrics().items():
+            for metric_name, metric_value in self._compute_adaptive_sampling_contact_stage_metrics(
+                timestep_probabilities_by_clip
+            ).items():
                 self.metrics[f"motion/adaptive_timesteps_sampler_{metric_name}"] = metric_value
 
     #########################################################################################
@@ -4948,9 +7962,17 @@ class MotionCommand(CommandTermBase):
 
     def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
         """Shared path for optionally inserting default-pose interpolation before/after the clip."""
-        if self.multi_clip:
+        applied_steps_attr = (
+            "_static_default_pose_prepend_steps"
+            if prepend
+            else "_static_default_pose_append_steps"
+        )
+        setattr(self, applied_steps_attr, 0)
+        if self._uses_global_multi_clip_transition_semantics():
             if prepend:
-                logger.warning("Skipping default pose transitions for multi-clip motion banks.")
+                logger.warning(
+                    "Skipping in-place default pose transitions for global multi-clip motion semantics."
+                )
             return
         enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append
         if not enabled:
@@ -4965,6 +7987,15 @@ class MotionCommand(CommandTermBase):
             return
 
         num_steps = round(duration / self._env.dt)
+        if num_steps > MAX_MOTION_TRANSITION_STEPS:
+            raise ValueError(
+                "Default-pose {} transition requires {} steps, exceeding the deployment-safe maximum {}. "
+                "Reduce the duration or increase the control timestep.".format(
+                    "prepend" if prepend else "append",
+                    num_steps,
+                    MAX_MOTION_TRANSITION_STEPS,
+                )
+            )
         if num_steps <= 1:
             logger.warning(
                 "Default pose {} duration {}s is too short for dt {}; skipping augmentation.",
@@ -4980,6 +8011,7 @@ class MotionCommand(CommandTermBase):
         log_str = f"{action} {num_steps} interpolated frames ({duration}s) from default pose to motion"
         try:
             self._add_transition_to_motion(default_state, num_steps, prepend=prepend)
+            setattr(self, applied_steps_attr, int(num_steps))
             logger.info(log_str)
         except Exception as exc:
             logger.error(f"Failed to {action} default pose transition: {exc}")
@@ -4996,7 +8028,7 @@ class MotionCommand(CommandTermBase):
         self._runtime_default_pose_prepend_active = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self._runtime_default_pose_prepend_step = torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
 
-        if not self.multi_clip or not self.motion_cfg.enable_default_pose_prepend:
+        if not self._uses_global_multi_clip_transition_semantics() or not self.motion_cfg.enable_default_pose_prepend:
             return
 
         duration = self.motion_cfg.default_pose_prepend_duration_s
@@ -5008,6 +8040,14 @@ class MotionCommand(CommandTermBase):
             return
 
         num_steps = round(duration / self._env.dt)
+        if num_steps > MAX_MOTION_TRANSITION_STEPS:
+            raise ValueError(
+                "Runtime default-pose prepend requires {} steps, exceeding the deployment-safe maximum {}. "
+                "Reduce the duration or increase the control timestep.".format(
+                    num_steps,
+                    MAX_MOTION_TRANSITION_STEPS,
+                )
+            )
         if num_steps <= 1:
             logger.warning(
                 "Runtime default pose prepend duration {}s is too short for dt {}; disabling multi-clip prepend.",
@@ -5042,6 +8082,44 @@ class MotionCommand(CommandTermBase):
             num_steps,
             duration,
         )
+
+    def get_motion_transition_contract(self) -> dict[str, Any]:
+        """Return the exact transition sequence that shaped this training environment."""
+
+        global_multi_clip = self._uses_global_multi_clip_transition_semantics()
+        if global_multi_clip:
+            prepend_steps = (
+                int(self._runtime_default_pose_prepend_steps)
+                if bool(self._runtime_default_pose_prepend_enabled)
+                else 0
+            )
+            prepend_implementation = "runtime_hold" if prepend_steps > 0 else "none"
+            append_steps = 0
+            append_implementation = "none"
+            source_semantics = "global_multi_clip_runtime"
+        else:
+            prepend_steps = int(getattr(self, "_static_default_pose_prepend_steps", 0) or 0)
+            append_steps = int(getattr(self, "_static_default_pose_append_steps", 0) or 0)
+            prepend_implementation = "static_splice" if prepend_steps > 0 else "none"
+            append_implementation = "static_splice" if append_steps > 0 else "none"
+            source_semantics = "single_clip_static"
+
+        contract = {
+            "version": MOTION_TRANSITION_CONTRACT_VERSION,
+            "control_dt_s": float(self._env.dt),
+            "source_semantics": source_semantics,
+            "prepend": {
+                "implementation": prepend_implementation,
+                "applied": prepend_steps > 0,
+                "steps": prepend_steps,
+            },
+            "append": {
+                "implementation": append_implementation,
+                "applied": append_steps > 0,
+                "steps": append_steps,
+            },
+        }
+        return canonical_motion_transition_contract(contract)
 
     def _build_default_pose_state_robot_order(self, motion_idx: int) -> dict[str, torch.Tensor]:
         """Build the robot default standing pose anchored to a specific motion frame."""

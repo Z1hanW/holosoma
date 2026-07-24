@@ -109,6 +109,21 @@ actor_obs_w_object = ObsGroupCfg(
     terms=actor_obs_w_object_terms,
 )
 
+# Privileged teacher-only variant.  The base linear velocity is available from
+# simulator state and is intentionally not added to any student proprioception
+# group.  Keep it as the final term so its three dimensions have an explicit,
+# stable checkpoint contract without changing the legacy teacher layout.
+actor_obs_w_object_teacher_linvel_terms = actor_obs_w_object_terms.copy()
+actor_obs_w_object_teacher_linvel_terms["base_lin_vel"] = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+    scale=1.0,
+    noise=0.0,
+)
+actor_obs_w_object_teacher_linvel = replace(
+    actor_obs_w_object,
+    terms=actor_obs_w_object_teacher_linvel_terms,
+)
+
 actor_obs_w_object_legacy_terms = actor_obs_shared.terms.copy()
 actor_obs_w_object_legacy_terms.update(
     {
@@ -293,7 +308,7 @@ critic_obs_w_object_terms.update(
             noise=0.0,
         ),
         "obj_lin_vel_b": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b",
+            func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b_v2",
             scale=1.0,
             noise=0.0,
         ),
@@ -584,6 +599,14 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     },
 )
 
+g1_29dof_wbt_observation_w_object_teacher_linvel = replace(
+    g1_29dof_wbt_observation_w_object,
+    groups={
+        **g1_29dof_wbt_observation_w_object.groups,
+        "actor_obs": actor_obs_w_object_teacher_linvel,
+    },
+)
+
 g1_29dof_wbt_observation_w_object_legacy = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_w_object_legacy,
@@ -721,6 +744,7 @@ object_distill_drop_terms = {
 }
 
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
+    reuse_exact_base_terms=True,
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
         "actor_obs": replace(actor_obs_w_object, history_length=1),
@@ -832,6 +856,17 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=1,
             terms=object_distill_action_terms,
         ),
+    },
+)
+
+# Compatibility preset for distilling a teacher trained with privileged
+# base_lin_vel.  Only the teacher query group changes; all student actor groups
+# remain byte-for-byte equivalent to the ordinary sparse-root configuration.
+g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups,
+        "actor_obs": replace(actor_obs_w_object_teacher_linvel, history_length=1),
     },
 )
 
@@ -1074,8 +1109,10 @@ __all__ = [
     "g1_29dof_wbt_observation_terrain_transformer",
     "g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object",
+    "g1_29dof_wbt_observation_w_object_teacher_linvel",
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",
 ]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import numbers
 import os
 from copy import deepcopy
 
@@ -51,19 +53,71 @@ class PPOActor(nn.Module):
 
         self.actor_module = BaseModule(obs_dim_dict, module_config_dict, history_length)
 
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        self.min_noise_std = module_config_dict.min_noise_std
-        self.min_mean_noise_std = module_config_dict.min_mean_noise_std
+        if (
+            isinstance(init_noise_std, bool)
+            or not isinstance(init_noise_std, numbers.Real)
+            or not math.isfinite(float(init_noise_std))
+            or float(init_noise_std) <= 0.0
+        ):
+            raise ValueError(f"init_noise_std must be finite and > 0.0, got {init_noise_std!r}.")
+
+        noise_constraints = {}
+        for name in ("min_noise_std", "min_mean_noise_std", "max_noise_std"):
+            value = getattr(module_config_dict, name)
+            if value is None:
+                noise_constraints[name] = None
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, numbers.Real)
+                or not math.isfinite(float(value))
+                or float(value) <= 0.0
+            ):
+                raise ValueError(f"{name} must be finite and > 0.0 when set, got {value!r}.")
+            noise_constraints[name] = float(value)
+
+        self.std = nn.Parameter(float(init_noise_std) * torch.ones(num_actions))
+        self.min_noise_std = noise_constraints["min_noise_std"]
+        self.min_mean_noise_std = noise_constraints["min_mean_noise_std"]
+        self.max_noise_std = noise_constraints["max_noise_std"]
+        if self.min_noise_std is not None and self.min_mean_noise_std is not None:
+            raise ValueError(
+                "min_noise_std and min_mean_noise_std are mutually exclusive; configure one floor semantics."
+            )
+        if (
+            self.max_noise_std is not None
+            and self.min_noise_std is not None
+            and self.max_noise_std < self.min_noise_std
+        ):
+            raise ValueError(
+                "max_noise_std must be >= min_noise_std, "
+                f"got {self.max_noise_std} < {self.min_noise_std}."
+            )
+        if (
+            self.max_noise_std is not None
+            and self.min_mean_noise_std is not None
+            and self.max_noise_std < self.min_mean_noise_std
+        ):
+            raise ValueError(
+                "max_noise_std must be >= min_mean_noise_std, "
+                f"got {self.max_noise_std} < {self.min_mean_noise_std}."
+            )
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
         print(f"Actor Module: {self.actor_module.module}")
 
     def _process_module_config(self, module_config_dict, num_actions):
-        for idx, output_dim in enumerate(module_config_dict.output_dim):
+        # Config presets are module-level objects and ``dataclasses.replace``
+        # keeps nested mutable lists shared unless they are copied explicitly.
+        # Resolving ``robot_action_dim`` in place therefore contaminates later
+        # actor/teacher construction in the same Python process (potentially
+        # with a different robot action dimension).
+        processed_config = deepcopy(module_config_dict)
+        for idx, output_dim in enumerate(processed_config.output_dim):
             if output_dim == "robot_action_dim":
-                module_config_dict.output_dim[idx] = num_actions
-        return module_config_dict
+                processed_config.output_dim[idx] = num_actions
+        return processed_config
 
     @property
     def actor(self):
@@ -96,15 +150,22 @@ class PPOActor(nn.Module):
         return self.distribution.entropy().sum(dim=-1)
 
     def _safe_std(self) -> torch.Tensor:
-        """Return a numerically safe standard deviation tensor for Normal policy."""
-        std = torch.nan_to_num(
-            self.std,
-            nan=1.0,
-            posinf=10.0,
-            neginf=0.0,
-        )
-        # Always keep scale strictly positive for torch.distributions.Normal.
-        return torch.clamp(std, min=1e-6)
+        """Project finite policy noise onto the configured positive domain.
+
+        Non-finite values deliberately survive this projection.  PPO validates
+        trainable state at synchronized boundaries; replacing NaN/Inf here
+        would hide a corrupt parameter behind finite actions and zero gradients.
+        """
+        std = self.std
+        finite_mask = torch.isfinite(std)
+        # Keep finite scale values strictly positive for Normal while leaving
+        # every NaN/+Inf/-Inf entry unchanged for the fail-closed boundary.
+        projected = torch.clamp(std, min=1e-6)
+        if self.min_noise_std is not None:
+            projected = torch.clamp(projected, min=self.min_noise_std)
+        if self.max_noise_std is not None:
+            projected = torch.clamp(projected, max=self.max_noise_std)
+        return torch.where(finite_mask, projected, std)
 
     @staticmethod
     def _expand_std_like(std: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -115,10 +176,10 @@ class PPOActor(nn.Module):
 
     @staticmethod
     def _sanitize_scale(scale: torch.Tensor) -> torch.Tensor:
-        """Guarantee a valid Normal scale tensor (finite and strictly positive)."""
-        scale = torch.nan_to_num(scale, nan=1e-3, posinf=10.0, neginf=1e-3)
-        scale = torch.abs(scale)
-        return torch.clamp(scale, min=1e-6)
+        """Project finite scale values positive without concealing NaN/Inf."""
+        finite_mask = torch.isfinite(scale)
+        projected = torch.clamp(torch.abs(scale), min=1e-6)
+        return torch.where(finite_mask, projected, scale)
 
     def update_distribution(self, actor_obs, extra_input: torch.Tensor | None = None):
         _debug_actor_log(
@@ -128,18 +189,32 @@ class PPOActor(nn.Module):
         )
         mean = self.actor(actor_obs, extra_input=extra_input)
         _debug_actor_log("update_distribution actor forward finished mean={}", tuple(mean.shape))
-        mean = torch.nan_to_num(mean, nan=0.0, posinf=1e3, neginf=-1e3)
-        _debug_actor_log("update_distribution nan_to_num finished")
+        # Preserve a non-finite policy output.  Replacing it here can turn a
+        # corrupt observation, activation, parameter, or running buffer into
+        # apparently valid actions and gradients.  PPO performs a single
+        # synchronized finite verdict immediately before env.step instead.
         safe_std = self._safe_std()
         if self.min_noise_std:
-            clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
-            scale = self._sanitize_scale(self._expand_std_like(clamped_std, mean))
+            scale = self._sanitize_scale(self._expand_std_like(safe_std, mean))
             self.distribution = Normal(mean, scale)
         elif self.min_mean_noise_std:
-            current_mean = safe_std.mean()
-            if current_mean < self.min_mean_noise_std:
-                scale_up = self.min_mean_noise_std / (current_mean + 1e-6)
-                clamped_std = safe_std * scale_up
+            if bool(torch.isfinite(safe_std).all().item()):
+                current_mean = safe_std.mean()
+                if current_mean < self.min_mean_noise_std:
+                    if self.max_noise_std is not None:
+                        # Move each component toward the hard ceiling by the same
+                        # interpolation factor.  This reaches the requested mean
+                        # while preserving every component's upper bound.
+                        alpha = (self.min_mean_noise_std - current_mean) / (
+                            self.max_noise_std - current_mean
+                        )
+                        alpha = torch.clamp(alpha, min=0.0, max=1.0)
+                        clamped_std = safe_std + alpha * (self.max_noise_std - safe_std)
+                    else:
+                        scale_up = self.min_mean_noise_std / current_mean
+                        clamped_std = safe_std * scale_up
+                else:
+                    clamped_std = safe_std
             else:
                 clamped_std = safe_std
             scale = self._sanitize_scale(self._expand_std_like(clamped_std, mean))
@@ -150,10 +225,15 @@ class PPOActor(nn.Module):
         _debug_actor_log("update_distribution normal built loc={} scale={}", tuple(mean.shape), tuple(scale.shape))
 
     def _sanitize_distribution(self):
-        # Defensive guard: rebuild distribution with sanitized scale if any corruption remains.
+        """Rebuild with a positive finite scale without concealing corruption.
+
+        The historical implementation also applied ``nan_to_num`` to loc.
+        That made a broken policy look finite.  Non-finite loc/scale values
+        must survive until the caller's synchronized fail-closed boundary.
+        """
         if self.distribution is not None:
             _debug_actor_log("sanitize_distribution begin")
-            loc = torch.nan_to_num(self.distribution.loc, nan=0.0, posinf=1e3, neginf=-1e3)
+            loc = self.distribution.loc
             scale = self._sanitize_scale(self.distribution.scale)
             self.distribution = Normal(loc, scale)
             _debug_actor_log("sanitize_distribution finished")
@@ -301,14 +381,37 @@ class PPOActorEncoder(PPOActor):
             if self.encoder_input_name
             else None
         )
-        depth_token = self._get_perception_obs(actor_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
         perception_encoder = getattr(self.actor_module, "perception_encoder", None)
         if self.perception_encoder_type == "time_gru":
-            if self.perception_time_gru is None:
-                raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
-            depth_token = self.perception_time_gru.step(depth_token)
-        elif perception_encoder is not None:
-            depth_token = perception_encoder(depth_token)
+            # Recurrent PPO precomputes the complete [T, B] GRU sequence and
+            # supplies its flattened embedding during optimization.  Consume
+            # that embedding before even looking up raw perception so the
+            # sequence path neither requires an omitted side input nor mutates
+            # the live rollout hidden state.
+            external_extra = (
+                policy_state_dict.get("extra_actor_input")
+                if policy_state_dict is not None
+                else None
+            )
+            if external_extra is not None:
+                depth_token = external_extra
+            else:
+                depth_token = self._get_perception_obs(
+                    actor_obs,
+                    policy_state_dict,
+                    source="TerrainTransformerObsTokenEncoder",
+                )
+                if self.perception_time_gru is None:
+                    raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
+                depth_token = self.perception_time_gru.step(depth_token)
+        else:
+            depth_token = self._get_perception_obs(
+                actor_obs,
+                policy_state_dict,
+                source="TerrainTransformerObsTokenEncoder",
+            )
+            if perception_encoder is not None:
+                depth_token = perception_encoder(depth_token)
         if hasattr(depth_token, "is_inference") and depth_token.is_inference():
             depth_token = depth_token.clone()
 
@@ -553,14 +656,32 @@ class PPOCriticEncoder(PPOCritic):
             if self.encoder_input_name
             else None
         )
-        depth_token = self._get_perception_obs(critic_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
         perception_encoder = getattr(self.critic_module, "perception_encoder", None)
         if self.perception_encoder_type == "time_gru":
-            if self.perception_time_gru is None:
-                raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
-            depth_token = self.perception_time_gru.step(depth_token)
-        elif perception_encoder is not None:
-            depth_token = perception_encoder(depth_token)
+            external_extra = (
+                policy_state_dict.get("extra_critic_input")
+                if policy_state_dict is not None
+                else None
+            )
+            if external_extra is not None:
+                depth_token = external_extra
+            else:
+                depth_token = self._get_perception_obs(
+                    critic_obs,
+                    policy_state_dict,
+                    source="TerrainTransformerObsTokenEncoder",
+                )
+                if self.perception_time_gru is None:
+                    raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
+                depth_token = self.perception_time_gru.step(depth_token)
+        else:
+            depth_token = self._get_perception_obs(
+                critic_obs,
+                policy_state_dict,
+                source="TerrainTransformerObsTokenEncoder",
+            )
+            if perception_encoder is not None:
+                depth_token = perception_encoder(depth_token)
         if hasattr(depth_token, "is_inference") and depth_token.is_inference():
             depth_token = depth_token.clone()
 

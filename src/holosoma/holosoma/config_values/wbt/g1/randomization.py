@@ -70,15 +70,15 @@ object_state_dr_at_setup = {
     "randomize_object_rigid_body_material_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_material_startup",
         params={
-            "static_friction_range": [0.1, 0.6],
-            "dynamic_friction_range": [0.1, 0.6],
+            "static_friction_range": [0.1, 0.7],
+            "dynamic_friction_ratio_range": [0.7, 0.99],
             "restitution_range": [0.0, 1.0],
         },
     ),
     "randomize_object_rigid_body_mass_inertia_scale_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_mass_inertia_scale_startup",
         params={
-            "mass_scale_distribution_params": [0.5, 1.5],
+            "mass_scale_distribution_params": [0.33, 3.0],
         },
     ),
 }
@@ -237,9 +237,73 @@ g1_29dof_wbt_randomization_w_object_with_action_delay = RandomizationManagerCfg(
     },
 )
 
+# Privileged-teacher preset: nominal simulator dynamics and actuator semantics,
+# with diversity concentrated on recoverable simulator states.  In particular,
+# this intentionally contains no action delay, PD/KD/RFI or motor-strength
+# perturbation, rigid-body property randomization, camera/depth noise, or joint
+# calibration bias.  MotionCommand consumes the reset state below at its final
+# simulator-state write so the joint perturbation cannot be overwritten.
+teacher_state_robust_setup_terms = {
+    "motion_relative_reset_randomizer_state": RandomizationTermCfg(
+        func=(
+            "holosoma.managers.randomization.terms.locomotion:"
+            "MotionRelativeResetRandomizerState"
+        ),
+        params={
+            "overall_noise_scale": 1.0,
+            "dof_pos": 0.20,
+            "dof_vel": 0.35,
+            "root_pos": [0.08, 0.08, 0.025],
+            "root_rot": [0.15, 0.15, 0.30],
+            "root_lin_vel": [0.20, 0.20, 0.10],
+            "root_ang_vel": [0.25, 0.25, 0.35],
+            # Keep z exact so an otherwise valid motion object cannot spawn
+            # below the support surface.
+            "object_pos": [0.08, 0.08, 0.0],
+        },
+    ),
+    "push_randomizer_state": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
+        params={
+            # The privileged teacher must remain competent on the external-
+            # disturbance states visited by the student.  Match the student's
+            # push distribution exactly while continuing to exclude actuator,
+            # dynamics, calibration, and perception sim-to-real terms.
+            "push_interval_s": [0.5, 2.0],
+            "max_push_vel": [0.7, 0.7, 0.25, 0.7, 0.7, 1.0],
+            "enabled": True,
+        },
+    ),
+}
+
+teacher_state_robust_reset_terms = {
+    "push_randomizer_state": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState"
+    ),
+    "randomize_push_schedule": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_push_schedule",
+    ),
+}
+
+teacher_state_robust_step_terms = {
+    "push_randomizer_state": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState"
+    ),
+    "apply_pushes": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:apply_pushes",
+    ),
+}
+
+g1_29dof_wbt_randomization_w_object_teacher_state_robust = RandomizationManagerCfg(
+    setup_terms=teacher_state_robust_setup_terms,
+    reset_terms=teacher_state_robust_reset_terms,
+    step_terms=teacher_state_robust_step_terms,
+)
+
 __all__ = [
     "g1_29dof_wbt_randomization",
     "g1_29dof_wbt_randomization_with_action_delay",
     "g1_29dof_wbt_randomization_w_object",
     "g1_29dof_wbt_randomization_w_object_with_action_delay",
+    "g1_29dof_wbt_randomization_w_object_teacher_state_robust",
 ]

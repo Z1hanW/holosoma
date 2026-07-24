@@ -38,6 +38,8 @@ Useful env:
   MASTER_PORT=29640
   BOX_CHECKPOINT_SRC=/data/logs_new/boxer/.../model_30500.pt
   BOX_CHECKPOINT_REL=checkpoints/box/model_30500.pt
+  POLICY_HISTORY_LENGTH=1      explicit target-policy history for box warm start
+  BOX_RESUME_HISTORY_LENGTH=1  history encoded by the initializer
   PREPARE_CP_AS=1
   SYNC_LOCAL_ASSETS=1
   RESTART=1
@@ -50,6 +52,13 @@ case "${ACTION}" in
   -h|--help|help)
     usage
     exit 0
+    ;;
+  launch|all)
+    echo "[ERROR] batch_track.sh launch is quarantined: this legacy path performs per-node git pull and" >&2
+    echo "[ERROR] cannot prove immutable source/data/checkpoint/NCCL provenance. Its historical 195-clip" >&2
+    echo "[ERROR] contact bank also lacks 28 box sidecars and mixes 30 Hz retarget intervals with rollout steps." >&2
+    echo "[ERROR] Use batch_ne.sh with a content-addressed snapshot and a fully validated contact bank." >&2
+    exit 2
     ;;
 esac
 
@@ -88,8 +97,10 @@ LOCAL_TEACHER_BANK_SRC=${LOCAL_TEACHER_BANK_SRC:-${SCRIPT_DIR}/${LOCAL_TEACHER_B
 BOX_CHECKPOINT_SRC=${BOX_CHECKPOINT_SRC:-/data/logs_new/boxer/20260610_001228-g1_29dof_wbt_w_object_distill_box_button_contact_aware_drop_button_depth-locomotion/model_30500.pt}
 BOX_CHECKPOINT_REL=${BOX_CHECKPOINT_REL:-checkpoints/box/$(basename "${BOX_CHECKPOINT_SRC}")}
 BOX_CHECKPOINT_REMOTE="${REMOTE_REPO}/${BOX_CHECKPOINT_REL}"
+BOX_RESUME_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH:-1}
+POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${BOX_RESUME_HISTORY_LENGTH}}
 
-RUN_NAME=${RUN_NAME:-as-track-real-mesh-cotrack-40gpu-resume-box}
+RUN_NAME=${RUN_NAME:-as-track-real-mesh-cotrack-40gpu-resume-box-history${POLICY_HISTORY_LENGTH}}
 WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_hull}
 TRAINING_SEED=${TRAINING_SEED:-}
@@ -121,6 +132,20 @@ if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC != 8 )); then
 fi
 if ! [[ "${NNODES}" =~ ^[0-9]+$ ]] || (( NNODES != ${#NODE_LIST[@]} )); then
   echo "[ERROR] NNODES must equal node list length. Got NNODES=${NNODES}, nodes=${#NODE_LIST[@]}" >&2
+  exit 2
+fi
+if ! [[ "${BOX_RESUME_HISTORY_LENGTH}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] BOX_RESUME_HISTORY_LENGTH must be a positive integer. Got: ${BOX_RESUME_HISTORY_LENGTH}" >&2
+  exit 2
+fi
+if ! [[ "${POLICY_HISTORY_LENGTH}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] POLICY_HISTORY_LENGTH must be a positive integer. Got: ${POLICY_HISTORY_LENGTH}" >&2
+  exit 2
+fi
+if [[ "${POLICY_HISTORY_LENGTH}" != "${BOX_RESUME_HISTORY_LENGTH}" ]]; then
+  echo "[ERROR] Box warm start cannot silently change target-policy history." >&2
+  echo "[ERROR] POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}, BOX_RESUME_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH}." >&2
+  echo "[ERROR] Use history ${BOX_RESUME_HISTORY_LENGTH}, or disable box initialization in a different launcher." >&2
   exit 2
 fi
 
@@ -195,7 +220,7 @@ export PATH="\$(dirname "\${PYTHON_BIN}"):\${PATH}"
 if [[ $(quote "${PREPARE_CP_AS}") == "1" ]]; then
   COPY_KEEP_BANK=1 KEEP_EXPECTED_TOTAL=$(quote "${AS_KEEP_EXPECTED_TOTAL}") OUTPUT_BANK_NAME=$(quote "${AS_OUTPUT_BANK}") bash cp_as.sh
 fi
-python3 - <<'PY'
+"\${PYTHON_BIN}" - <<'PY'
 import json
 from pathlib import Path
 
@@ -253,7 +278,8 @@ export AS_OBJECT_MAP=$(quote "data/ds_as_data/${AS_OUTPUT_BANK}/_clip_object_urd
 export CONTACT_EXPORT_ROOT=$(quote "data/ds_as_data/${AS_KEEP_BANK}/contact_export_from_retarget")
 export RESUME_FROM_BOX=1
 export BOX_RESUME_CKPT=$(quote "${BOX_CHECKPOINT_REMOTE}")
-export BOX_RESUME_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH:-1}
+export BOX_RESUME_HISTORY_LENGTH=$(quote "${BOX_RESUME_HISTORY_LENGTH}")
+export POLICY_HISTORY_LENGTH=$(quote "${POLICY_HISTORY_LENGTH}")
 export WANDB_RESUME_SAME_RUN=0
 export WANDB_PROJECT=$(quote "${WANDB_PROJECT}")
 export SEQUENCE_NAME=$(quote "${RUN_NAME}")

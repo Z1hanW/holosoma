@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from loguru import logger
 
@@ -493,6 +493,42 @@ class BaseSimulator:
             self.bridge.step()
 
     # ----- Video Recording Interface -----
+    def requires_episode_callbacks(self) -> bool:
+        """Whether reset must notify simulator episode lifecycle hooks.
+
+        The built-in hooks only drive the video recorder and virtual gantry, so
+        the normal headless-training configuration can skip them entirely.  A
+        subclass that overrides either the scalar or batched lifecycle hook is
+        conservatively treated as active to preserve custom simulator behavior.
+        Subclasses with a more precise capability may override this method.
+        """
+
+        if self.video_recorder is not None or self.virtual_gantry is not None:
+            return True
+
+        simulator_type = type(self)
+        return any(
+            getattr(simulator_type, hook_name) is not getattr(BaseSimulator, hook_name)
+            for hook_name in (
+                "on_episode_start",
+                "on_episode_end",
+                "on_episodes_start",
+                "on_episodes_end",
+            )
+        )
+
+    def on_episodes_start(self, env_ids: Sequence[int]) -> None:
+        """Notify episode starts for a host-side batch of environment IDs."""
+
+        for env_id in env_ids:
+            self.on_episode_start(env_id)
+
+    def on_episodes_end(self, env_ids: Sequence[int]) -> None:
+        """Notify episode ends for a host-side batch of environment IDs."""
+
+        for env_id in env_ids:
+            self.on_episode_end(env_id)
+
     def on_episode_start(self, env_id: int = 0) -> None:
         """Called when an episode starts.
 

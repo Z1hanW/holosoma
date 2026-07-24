@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${ROOT_DIR}/scripts/mujoco_perception_env.sh"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -101,6 +102,7 @@ MOTION_FILE="${1:-$DEFAULT_MOTION_FILE}"
 MODEL_INPUT="${2:-$DEFAULT_MODEL_INPUT}"
 
 MUJOCO_PY="${MUJOCO_PY:-}"
+MUJOCO_PYTHONPATH="${MUJOCO_PYTHONPATH:-}"
 INFER_PY="${INFER_PY:-}"
 MUJOCO_CPUSET="${MUJOCO_CPUSET:-0}"
 SIM_FPS_EXPLICIT=0
@@ -141,7 +143,7 @@ ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-0}"
 MUJOCO_RENDER_848_PERCEPTION_PRESET="${MUJOCO_RENDER_848_PERCEPTION_PRESET:-camera_depth_d435i_mujoco_render_848x480}"
 PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
-PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"
+PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-}"
 PERCEPTION_CAMERA_WIDTH_EXPLICIT=0
 PERCEPTION_CAMERA_HEIGHT_EXPLICIT=0
 PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT=0
@@ -171,7 +173,14 @@ PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-}"
 PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
 PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
 PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
+holosoma_capture_explicit_env \
+  PERCEPTION_CAMERA_WARP_NORMALIZE \
+  PERCEPTION_CAMERA_WARP_EDGE_NOISE \
+  PERCEPTION_CAMERA_WARP_ENABLE_HOLES \
+  PERCEPTION_CAMERA_APPLY_SENSOR_NOISE \
+  HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE
 PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
+PERCEPTION_CAMERA_WARP_NORMALIZE="${PERCEPTION_CAMERA_WARP_NORMALIZE:-}"
 PERCEPTION_CAMERA_WARP_EDGE_BORDER="${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-}"
 PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB="${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-}"
 PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB="${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-}"
@@ -180,12 +189,19 @@ PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY="${PERCEPTION_CAMERA_WARP_EDGE_THRE
 PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH="${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-}"
 PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-}"
 PERCEPTION_CAMERA_WARP_HOLE_PROB="${PERCEPTION_CAMERA_WARP_HOLE_PROB:-}"
+PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE="${PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE:-}"
 PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-}"
 PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-}"
-HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT=0
-[[ -n "${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE+x}" ]] && HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT=1
-HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT=0
-[[ -n "${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT+x}" ]] && HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT=1
+PERCEPTION_RANDOMIZATION_ENABLED="${PERCEPTION_RANDOMIZATION_ENABLED:-}"
+PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE="${PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE:-}"
+PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG="${PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG:-}"
+PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE="${PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE:-}"
+PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE="${PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE:-}"
+PERCEPTION_RANDOMIZATION_CONTRACT_STATUS=""
+PERCEPTION_CONTRACT_ENVELOPE_B64=""
+PERCEPTION_PRODUCER_TICK_DT="${PERCEPTION_PRODUCER_TICK_DT:-}"
+PERCEPTION_PRODUCER_SEED="${PERCEPTION_PRODUCER_SEED:-}"
+PERCEPTION_ALLOW_MUJOCO_NOISE="${PERCEPTION_ALLOW_MUJOCO_NOISE:-}"
 PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-}"
 if [[ -z "$PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN" ]]; then
   if [[ "$PERCEPTION_PRESET" == "$MUJOCO_RENDER_848_PERCEPTION_PRESET" ]]; then
@@ -327,7 +343,7 @@ resolve_python() {
 python_has_modules() {
   local python_bin="$1"
   shift
-  "$python_bin" - "$@" <<'PY' >/dev/null 2>&1
+  PYTHONPATH="${MUJOCO_PYTHONPATH:-${PYTHONPATH:-}}" "$python_bin" - "$@" <<'PY' >/dev/null 2>&1
 import importlib
 import os
 import sys
@@ -381,11 +397,12 @@ PY
 }
 
 if [[ -n "$MUJOCO_PY" ]]; then
-  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" "$MUJOCO_PY")"
+  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard pydantic" "$MUJOCO_PY")"
 else
-  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" \
+  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard pydantic" \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
     "$(command -v python 2>/dev/null || true)" \
     "$(command -v python3 2>/dev/null || true)")"
@@ -998,7 +1015,12 @@ apply_training_perception_overrides() {
   local override_lines
   override_lines="$(
     "$INFER_PY" - <<'PY' "$model_path"
+import base64
+import hashlib
 import json
+import math
+import os
+import re
 import sys
 
 import onnx
@@ -1006,17 +1028,792 @@ import onnx
 model = onnx.load(sys.argv[1])
 metadata = {}
 for prop in model.metadata_props:
+    if prop.key in metadata:
+        raise SystemExit(f"[ERROR] Duplicate ONNX metadata key {prop.key!r}.")
     try:
         metadata[prop.key] = json.loads(prop.value)
     except Exception:
         metadata[prop.key] = prop.value
 
-perception_cfg = metadata.get("experiment_config", {}).get("perception", {})
-if not isinstance(perception_cfg, dict):
-    raise SystemExit(0)
+requires_perception = any(value.name == "perception_obs" for value in model.graph.input)
 experiment_cfg = metadata.get("experiment_config", {})
+if requires_perception and not isinstance(experiment_cfg, dict):
+    raise SystemExit(
+        "[ERROR] A perception ONNX must contain object-valued experiment_config metadata."
+    )
+experiment_cfg = experiment_cfg if isinstance(experiment_cfg, dict) else {}
+perception_cfg = experiment_cfg.get("perception", {})
+if not isinstance(perception_cfg, dict):
+    if requires_perception:
+        raise SystemExit(
+            "[ERROR] A perception ONNX must contain object-valued experiment_config.perception metadata."
+        )
+    raise SystemExit(0)
+
+encoder_type = perception_cfg.get("encoder_type")
+if "camera_warp_normalize" in perception_cfg and not isinstance(
+    perception_cfg["camera_warp_normalize"], bool
+):
+    raise SystemExit(
+        "[ERROR] Policy metadata perception.camera_warp_normalize must be boolean."
+    )
+if isinstance(encoder_type, str) and encoder_type.strip().lower().startswith("defm_"):
+    if perception_cfg.get("camera_warp_normalize") is not False:
+        raise SystemExit(
+            "[ERROR] DeFM policy metadata must explicitly set "
+            "perception.camera_warp_normalize=false (metric depth in meters). "
+            "Legacy normalized-depth DeFM artifacts require retraining."
+        )
+
+sensor_noise = perception_cfg.get("camera_apply_sensor_noise", False)
+if not isinstance(sensor_noise, bool):
+    raise SystemExit(
+        "[ERROR] Policy metadata perception.camera_apply_sensor_noise must be boolean."
+    )
+for noise_key in ("camera_warp_edge_noise", "camera_warp_enable_holes"):
+    if noise_key in perception_cfg and not isinstance(perception_cfg[noise_key], bool):
+        raise SystemExit(
+            f"[ERROR] Policy metadata perception.{noise_key} must be boolean."
+        )
+holes_enabled = perception_cfg.get("camera_warp_enable_holes", False)
+reset_refresh_semantics = perception_cfg.get(
+    "reset_refresh_semantics",
+    "legacy_full_v1",
+)
+if not isinstance(reset_refresh_semantics, str):
+    raise SystemExit(
+        "[ERROR] Policy metadata perception.reset_refresh_semantics must be a string."
+    )
+noise_requested = any(
+    perception_cfg.get(key, False)
+    for key in (
+        "camera_warp_edge_noise",
+        "camera_warp_enable_holes",
+        "camera_apply_sensor_noise",
+    )
+)
+
+
+def parse_bool(value, *, path):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise SystemExit(f"[ERROR] {path} must be boolean, got {value!r}.")
+
+
+if os.environ.get("PERCEPTION_CAMERA_APPLY_SENSOR_NOISE_EXPLICIT") == "1":
+    explicit_sensor_noise = parse_bool(
+        os.environ.get("PERCEPTION_CAMERA_APPLY_SENSOR_NOISE", ""),
+        path="Explicit PERCEPTION_CAMERA_APPLY_SENSOR_NOISE",
+    )
+    if explicit_sensor_noise != sensor_noise:
+        raise SystemExit(
+            "[ERROR] Explicit PERCEPTION_CAMERA_APPLY_SENSOR_NOISE conflicts with "
+            f"checkpoint metadata ({explicit_sensor_noise} != {sensor_noise}); refusing "
+            "perception noise-distribution drift."
+        )
+
+
+def checked_number(value, *, path):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(f"[ERROR] {path} must be a finite number, got {value!r}.")
+    result = float(value)
+    if not math.isfinite(result):
+        raise SystemExit(f"[ERROR] {path} must be finite, got {value!r}.")
+    return result
+
+
+for noise_key in (
+    "camera_warp_additive_noise_std",
+    "camera_warp_depth_offset_std",
+):
+    noise_value = checked_number(
+        perception_cfg.get(noise_key, 0.0) or 0.0,
+        path=f"experiment_config.perception.{noise_key}",
+    )
+    if noise_value < 0.0:
+        raise SystemExit(
+            f"[ERROR] experiment_config.perception.{noise_key} must be non-negative."
+        )
+    noise_requested = noise_requested or noise_value > 0.0
+
+
+def checked_pair(value, *, path, minimum=None, maximum=None):
+    if (
+        isinstance(value, (str, bytes, dict))
+        or not isinstance(value, (list, tuple))
+        or len(value) != 2
+    ):
+        raise SystemExit(f"[ERROR] {path} must be a two-value [low, high] range.")
+    low = checked_number(value[0], path=f"{path}[0]")
+    high = checked_number(value[1], path=f"{path}[1]")
+    if low > high:
+        raise SystemExit(f"[ERROR] {path} must satisfy low <= high, got {value!r}.")
+    if minimum is not None and low < minimum:
+        raise SystemExit(f"[ERROR] {path} must be >= {minimum}, got {value!r}.")
+    if maximum is not None and high > maximum:
+        raise SystemExit(f"[ERROR] {path} must be <= {maximum}, got {value!r}.")
+    return [low, high]
+
+
+def checked_axes(value, *, path, axes):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SystemExit(f"[ERROR] {path} must be an axis-keyed object.")
+    actual = set(value)
+    expected = set(axes)
+    if actual != expected:
+        raise SystemExit(
+            f"[ERROR] {path} axes must be exactly {list(axes)!r}; got {sorted(actual)!r}."
+        )
+    return {axis: checked_pair(value[axis], path=f"{path}.{axis}") for axis in axes}
+
+
+canonical_camera_func = (
+    "holosoma.managers.randomization.terms.locomotion:randomize_camera_raycast"
+)
+randomization_cfg = experiment_cfg.get("randomization", {})
+if not isinstance(randomization_cfg, dict):
+    if requires_perception:
+        raise SystemExit(
+            "[ERROR] experiment_config.randomization must be an object for a perception ONNX."
+        )
+    randomization_cfg = {}
+reset_terms = randomization_cfg.get("reset_terms", {})
+if not isinstance(reset_terms, dict):
+    if requires_perception:
+        raise SystemExit(
+            "[ERROR] experiment_config.randomization.reset_terms must be an object."
+        )
+    reset_terms = {}
+
+enabled_camera_terms = []
+for term_name, term in reset_terms.items():
+    if not isinstance(term, dict):
+        if term_name == "randomize_camera_raycast":
+            raise SystemExit(
+                "[ERROR] randomize_camera_raycast reset term must be an object."
+            )
+        continue
+    func = term.get("func")
+    func_basename = str(func or "").replace(":", ".").rsplit(".", 1)[-1]
+    if func != canonical_camera_func:
+        if term_name == "randomize_camera_raycast" or func_basename == "randomize_camera_raycast":
+            raise SystemExit(
+                "[ERROR] Camera reset randomization must use the canonical function "
+                f"{canonical_camera_func!r}; term {term_name!r} declares {func!r}."
+            )
+        continue
+    params = term.get("params", {})
+    if not isinstance(params, dict):
+        raise SystemExit(
+            f"[ERROR] Camera reset term {term_name!r}.params must be an object."
+        )
+    enabled = params.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise SystemExit(
+            f"[ERROR] Camera reset term {term_name!r}.params.enabled must be boolean."
+        )
+    if enabled:
+        allowed_params = {
+            "enabled",
+            "translation_range",
+            "rotation_range_deg",
+            "noise_std_mult_range",
+            "noise_drop_prob_range",
+        }
+        unexpected_params = sorted(set(params) - allowed_params)
+        if unexpected_params:
+            raise SystemExit(
+                "[ERROR] Enabled camera reset randomization contains unsupported/"
+                f"unauthenticated parameters: {unexpected_params!r}."
+            )
+        enabled_camera_terms.append((term_name, params))
+
+if len(enabled_camera_terms) > 1:
+    raise SystemExit(
+        "[ERROR] Expected at most one enabled canonical randomize_camera_raycast reset term; "
+        f"found {[name for name, _ in enabled_camera_terms]!r}."
+    )
+
+camera_params = enabled_camera_terms[0][1] if enabled_camera_terms else None
+translation_range = None
+rotation_range_deg = None
+noise_std_mult_range = None
+noise_drop_prob_range = None
+if camera_params is not None:
+    translation_range = checked_axes(
+        camera_params.get("translation_range"),
+        path="randomize_camera_raycast.params.translation_range",
+        axes=("x", "y", "z"),
+    )
+    rotation_range_deg = checked_axes(
+        camera_params.get("rotation_range_deg"),
+        path="randomize_camera_raycast.params.rotation_range_deg",
+        axes=("roll", "pitch", "yaw"),
+    )
+    if camera_params.get("noise_std_mult_range") is not None:
+        noise_std_mult_range = checked_pair(
+            camera_params["noise_std_mult_range"],
+            path="randomize_camera_raycast.params.noise_std_mult_range",
+            minimum=0.0,
+        )
+    if camera_params.get("noise_drop_prob_range") is not None:
+        noise_drop_prob_range = checked_pair(
+            camera_params["noise_drop_prob_range"],
+            path="randomize_camera_raycast.params.noise_drop_prob_range",
+            minimum=0.0,
+            maximum=1.0,
+        )
+
+if requires_perception and sensor_noise and (
+    camera_params is None
+    or (noise_std_mult_range is None and noise_drop_prob_range is None)
+):
+    raise SystemExit(
+        "[ERROR] perception.camera_apply_sensor_noise=True requires one enabled canonical "
+        "randomize_camera_raycast reset term with at least one explicit "
+        "noise_std_mult_range or noise_drop_prob_range."
+    )
+
+expected_camera_summary = None
+if camera_params is not None:
+    expected_camera_summary = {
+        "enabled": True,
+        "translation_xyz": (
+            None
+            if translation_range is None
+            else [translation_range[axis] for axis in ("x", "y", "z")]
+        ),
+        "rotation_rpy_deg": (
+            None
+            if rotation_range_deg is None
+            else [rotation_range_deg[axis] for axis in ("roll", "pitch", "yaw")]
+        ),
+        "noise_std_mult": noise_std_mult_range,
+        "noise_drop_prob": noise_drop_prob_range,
+    }
+
+
+def checked_contract_camera_summary(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SystemExit(
+            "[ERROR] perception_observation_contract.camera_reset_randomization must be an object or null."
+        )
+    expected_keys = {
+        "enabled",
+        "translation_xyz",
+        "rotation_rpy_deg",
+        "noise_std_mult",
+        "noise_drop_prob",
+    }
+    if set(value) != expected_keys:
+        raise SystemExit(
+            "[ERROR] perception_observation_contract.camera_reset_randomization has an "
+            f"unexpected schema: {sorted(value)!r}."
+        )
+    if value["enabled"] is not True:
+        raise SystemExit(
+            "[ERROR] Attached camera_reset_randomization.enabled must be true when the summary is present."
+        )
+
+    def vector(value, *, path):
+        if value is None:
+            return None
+        if (
+            isinstance(value, (str, bytes, dict))
+            or not isinstance(value, (list, tuple))
+            or len(value) != 3
+        ):
+            raise SystemExit(f"[ERROR] {path} must contain three axis ranges.")
+        return [checked_pair(pair, path=f"{path}[{index}]") for index, pair in enumerate(value)]
+
+    std = value["noise_std_mult"]
+    drop = value["noise_drop_prob"]
+    return {
+        "enabled": True,
+        "translation_xyz": vector(
+            value["translation_xyz"],
+            path="perception_observation_contract.camera_reset_randomization.translation_xyz",
+        ),
+        "rotation_rpy_deg": vector(
+            value["rotation_rpy_deg"],
+            path="perception_observation_contract.camera_reset_randomization.rotation_rpy_deg",
+        ),
+        "noise_std_mult": (
+            None
+            if std is None
+            else checked_pair(
+                std,
+                path="perception_observation_contract.camera_reset_randomization.noise_std_mult",
+                minimum=0.0,
+            )
+        ),
+        "noise_drop_prob": (
+            None
+            if drop is None
+            else checked_pair(
+                drop,
+                path="perception_observation_contract.camera_reset_randomization.noise_drop_prob",
+                minimum=0.0,
+                maximum=1.0,
+            )
+        ),
+    }
+
+
+contract_present = "perception_observation_contract" in metadata
+digest_present = "perception_observation_contract_sha256" in metadata
+if contract_present != digest_present:
+    raise SystemExit(
+        "[ERROR] Attached perception observation contract and its SHA-256 digest must be present together."
+    )
+contract_status = "not-applicable"
+perception_contract_envelope_b64 = None
+hole_reference_batch_size = None
+attached_producer_tick_dt = None
+if requires_perception and contract_present:
+    contract = metadata["perception_observation_contract"]
+    declared_digest = metadata["perception_observation_contract_sha256"]
+    if not isinstance(contract, dict):
+        raise SystemExit("[ERROR] perception_observation_contract must be an object.")
+    contract_version = contract.get("version")
+    if (
+        isinstance(contract_version, bool)
+        or not isinstance(contract_version, int)
+        or contract_version != 2
+    ):
+        raise SystemExit(
+            "[ERROR] Direct perception deployment requires perception observation contract "
+            "version=2. Re-export the policy after the targeted producer-lifecycle fix."
+        )
+    if not isinstance(declared_digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", declared_digest) is None:
+        raise SystemExit(
+            "[ERROR] perception_observation_contract_sha256 must be 64 hexadecimal characters."
+        )
+    try:
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"[ERROR] Invalid attached perception observation contract: {exc}")
+    computed_digest = hashlib.sha256(payload).hexdigest()
+    if computed_digest != declared_digest.lower():
+        raise SystemExit(
+            "[ERROR] Attached perception observation contract SHA-256 does not match its payload."
+        )
+    training_geometry_support = contract.get("training_geometry_support")
+    if not isinstance(training_geometry_support, dict):
+        raise SystemExit(
+            "[ERROR] Version-2 perception contract lacks object-valued "
+            "training_geometry_support. Re-export the policy with authenticated training geometry."
+        )
+    envelope_payload = json.dumps(
+        {
+            "contract": contract,
+            "sha256": computed_digest,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    perception_contract_envelope_b64 = base64.b64encode(envelope_payload).decode("ascii")
+    missing = object()
+    producer_lifecycle = contract.get("producer_lifecycle", missing)
+    additive_noise_std_raw = perception_cfg.get("camera_warp_additive_noise_std", 0.0)
+    additive_noise_std = checked_number(
+        additive_noise_std_raw,
+        path="experiment_config.perception.camera_warp_additive_noise_std",
+    )
+    if additive_noise_std < 0.0:
+        raise SystemExit(
+            "[ERROR] experiment_config.perception.camera_warp_additive_noise_std must be non-negative."
+        )
+    reset_randomization_consumes_rng = bool(
+        camera_params is not None
+        and any(
+            value is not None
+            for value in (
+                translation_range,
+                rotation_range_deg,
+                noise_std_mult_range,
+                noise_drop_prob_range,
+            )
+        )
+    )
+    sensor_noise_on_reset = bool(
+        sensor_noise
+        and camera_params is not None
+        and (noise_std_mult_range is not None or noise_drop_prob_range is not None)
+    )
+    reset_refresh_pixel_rng = bool(
+        perception_cfg.get("output_mode") == "camera_depth"
+        and (
+            perception_cfg.get("camera_warp_edge_noise", False)
+            or additive_noise_std > 0.0
+            or perception_cfg.get("camera_warp_latency_frame_range") is not None
+            or sensor_noise_on_reset
+        )
+    )
+    expected_reset_refresh_consumes_global_rng = bool(
+        reset_randomization_consumes_rng or reset_refresh_pixel_rng
+    )
+    expected_producer_lifecycle = {
+        "reset_refresh_semantics": "targeted_v2",
+        "ordinary_manager_update_calls_per_control_tick": 1,
+        "initialization_control_ticks_before_first_reset_output": 1,
+        "initialization_ordinary_manager_update_calls_before_first_reset_output": 1,
+        "reset_output_republished_until_physics_advances": True,
+        "reset_output_scope": "reset_env_subset",
+        "hole_clock_advances_on_reset_refresh": False,
+        "camera_frequency_phase_advances_on_reset_refresh": False,
+        "camera_producer_reset_refresh_consumes_process_global_rng": expected_reset_refresh_consumes_global_rng,
+        "future_noise_sample_path_peer_reset_coupled": expected_reset_refresh_consumes_global_rng,
+        "batch_size_invariant_sample_path": False,
+        "stochastic_equivalence": "distribution_only",
+        "seed_replay_scope": "same_execution_trace_only",
+    }
+    if producer_lifecycle != expected_producer_lifecycle:
+        raise SystemExit(
+            "[ERROR] Direct perception deployment requires the authenticated version-2 "
+            "targeted_v2 producer_lifecycle distribution contract. It must honestly declare "
+            "process-global RNG consumption, peer-reset sample-path coupling, and "
+            "stochastic_equivalence='distribution_only' with seed replay limited to the same "
+            "execution trace. Fix and re-export/retrain."
+        )
+    if reset_refresh_semantics != producer_lifecycle["reset_refresh_semantics"]:
+        raise SystemExit(
+            "[ERROR] Attached reset_refresh_semantics conflicts with "
+            "experiment_config.perception.reset_refresh_semantics."
+        )
+    camera_setup_randomization = contract.get("camera_setup_randomization", missing)
+    if camera_setup_randomization is missing:
+        raise SystemExit(
+            "[ERROR] Version-2 perception contract lacks camera_setup_randomization."
+        )
+    if camera_setup_randomization is not None and (
+        not isinstance(camera_setup_randomization, dict)
+        or camera_setup_randomization.get("enabled") is not False
+    ):
+        raise SystemExit(
+            "[ERROR] Direct reset reconstruction requires attached camera_setup_randomization "
+            "to be null or explicitly disabled; legacy one-shot jitter cannot be stacked."
+        )
+    attached_producer_tick_dt = checked_number(
+        contract.get("producer_tick_dt"),
+        path="perception_observation_contract.producer_tick_dt",
+    )
+    if attached_producer_tick_dt <= 0.0:
+        raise SystemExit(
+            "[ERROR] perception_observation_contract.producer_tick_dt must be positive."
+        )
+    hole_schema = contract.get("hole_generator_schema", missing)
+    if hole_schema is missing:
+        raise SystemExit(
+            "[ERROR] Attached perception observation contract lacks hole_generator_schema."
+        )
+    if holes_enabled:
+        if not isinstance(hole_schema, dict):
+            raise SystemExit(
+                "[ERROR] camera_warp_enable_holes=True requires an attached hole_generator_schema object."
+            )
+        if hole_schema.get("normalization_scope") != "reference_batch":
+            raise SystemExit(
+                "[ERROR] Attached hole_generator_schema.normalization_scope must be 'reference_batch'."
+            )
+        raw_reference_batch_size = hole_schema.get("reference_batch_size")
+        if (
+            isinstance(raw_reference_batch_size, bool)
+            or not isinstance(raw_reference_batch_size, int)
+            or raw_reference_batch_size <= 0
+        ):
+            raise SystemExit(
+                "[ERROR] Attached hole_generator_schema.reference_batch_size must be a positive integer."
+            )
+        hole_reference_batch_size = raw_reference_batch_size
+    elif hole_schema is not None:
+        raise SystemExit(
+            "[ERROR] Attached hole_generator_schema is present while camera_warp_enable_holes=False."
+        )
+    attached_summary = contract.get("camera_reset_randomization", missing)
+    if attached_summary is missing:
+        raise SystemExit(
+            "[ERROR] Attached perception observation contract lacks camera_reset_randomization."
+        )
+    normalized_attached_summary = checked_contract_camera_summary(attached_summary)
+    if normalized_attached_summary != expected_camera_summary:
+        raise SystemExit(
+            "[ERROR] Attached perception camera_reset_randomization conflicts with "
+            "experiment_config.randomization.reset_terms."
+        )
+    contract_status = "attached-v2-targeted-v2-distribution-verified"
+elif requires_perception:
+    raise SystemExit(
+        "[ERROR] Direct perception deployment requires an attached version-2 observation "
+        "contract with a targeted_v2 producer_lifecycle. Legacy/missing-contract artifacts "
+        "cannot establish an authenticated distribution-compatible direct producer; fix the "
+        "reset path and re-export/retrain."
+    )
+
+
+def checked_json_env(name, expected, validator):
+    if name not in os.environ:
+        return
+    raw = os.environ[name]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"[ERROR] Explicit {name} must be valid JSON: {exc}.")
+    normalized = validator(parsed)
+    if normalized != expected:
+        raise SystemExit(
+            f"[ERROR] Explicit {name} conflicts with checkpoint camera reset metadata."
+        )
+
+
+if requires_perception:
+    if "PERCEPTION_RANDOMIZATION_ENABLED" in os.environ:
+        explicit_enabled = parse_bool(
+            os.environ["PERCEPTION_RANDOMIZATION_ENABLED"],
+            path="Explicit PERCEPTION_RANDOMIZATION_ENABLED",
+        )
+        if explicit_enabled != (camera_params is not None):
+            raise SystemExit(
+                "[ERROR] Explicit PERCEPTION_RANDOMIZATION_ENABLED conflicts with checkpoint camera reset metadata."
+            )
+    checked_json_env(
+        "PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE",
+        translation_range,
+        lambda value: checked_axes(
+            value,
+            path="Explicit PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE",
+            axes=("x", "y", "z"),
+        ),
+    )
+    checked_json_env(
+        "PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG",
+        rotation_range_deg,
+        lambda value: checked_axes(
+            value,
+            path="Explicit PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG",
+            axes=("roll", "pitch", "yaw"),
+        ),
+    )
+    checked_json_env(
+        "PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE",
+        noise_std_mult_range,
+        lambda value: (
+            None
+            if value is None
+            else checked_pair(
+                value,
+                path="Explicit PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE",
+                minimum=0.0,
+            )
+        ),
+    )
+    checked_json_env(
+        "PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE",
+        noise_drop_prob_range,
+        lambda value: (
+            None
+            if value is None
+            else checked_pair(
+                value,
+                path="Explicit PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE",
+                minimum=0.0,
+                maximum=1.0,
+            )
+        ),
+    )
+    if "HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT" in os.environ and parse_bool(
+        os.environ["HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT"],
+        path="Explicit HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT",
+    ):
+        raise SystemExit(
+            "[ERROR] HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT enables legacy one-shot jitter and "
+            "conflicts with authenticated direct reset randomization. Remove it or set it false."
+        )
+    if "PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE" in os.environ:
+        explicit_hole_batch_raw = os.environ[
+            "PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE"
+        ]
+        try:
+            explicit_hole_batch = int(explicit_hole_batch_raw)
+        except ValueError:
+            raise SystemExit(
+                "[ERROR] Explicit PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE must be an integer."
+            )
+        if (
+            str(explicit_hole_batch) != explicit_hole_batch_raw.strip()
+            or explicit_hole_batch != hole_reference_batch_size
+        ):
+            raise SystemExit(
+                "[ERROR] Explicit PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE conflicts "
+                "with the attached perception contract."
+            )
+    for allow_name in (
+        "PERCEPTION_ALLOW_MUJOCO_NOISE",
+        "HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE",
+    ):
+        marker_name = f"{allow_name}_EXPLICIT"
+        is_explicit = allow_name in os.environ
+        if allow_name == "HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE":
+            is_explicit = os.environ.get(marker_name) == "1"
+        if not is_explicit:
+            continue
+        explicit_allow = parse_bool(
+            os.environ.get(allow_name, ""),
+            path=f"Explicit {allow_name}",
+        )
+        if explicit_allow != noise_requested:
+            raise SystemExit(
+                f"[ERROR] Explicit {allow_name} conflicts with checkpoint perception noise settings."
+            )
+
+    simulator_cfg = experiment_cfg.get("simulator")
+    if not isinstance(simulator_cfg, dict):
+        raise SystemExit(
+            "[ERROR] Perception ONNX metadata must declare experiment_config.simulator."
+        )
+    simulator_config = simulator_cfg.get("config")
+    if not isinstance(simulator_config, dict):
+        raise SystemExit(
+            "[ERROR] Perception ONNX metadata must declare experiment_config.simulator.config."
+        )
+    training_sim = simulator_config.get("sim")
+    if not isinstance(training_sim, dict):
+        raise SystemExit(
+            "[ERROR] Perception ONNX metadata must declare experiment_config.simulator.config.sim."
+        )
+    training_fps = checked_number(
+        training_sim.get("fps"),
+        path="experiment_config.simulator.config.sim.fps",
+    )
+    training_decimation_raw = training_sim.get("control_decimation")
+    training_decimation = checked_number(
+        training_decimation_raw,
+        path="experiment_config.simulator.config.sim.control_decimation",
+    )
+    if training_fps <= 0.0 or training_decimation <= 0.0:
+        raise SystemExit(
+            "[ERROR] Training simulator fps and control_decimation must both be positive."
+        )
+    if not training_decimation.is_integer():
+        raise SystemExit(
+            "[ERROR] Training simulator control_decimation must be an integer."
+        )
+    producer_tick_dt = training_decimation / training_fps
+    if not math.isfinite(producer_tick_dt) or producer_tick_dt <= 0.0:
+        raise SystemExit("[ERROR] Computed perception producer tick dt must be finite and positive.")
+    if attached_producer_tick_dt is None or not math.isclose(
+        attached_producer_tick_dt,
+        producer_tick_dt,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    ):
+        raise SystemExit(
+            "[ERROR] Attached perception producer_tick_dt conflicts with checkpoint simulator "
+            f"cadence ({attached_producer_tick_dt!r} != {producer_tick_dt:.17g})."
+        )
+    if "PERCEPTION_PRODUCER_TICK_DT" in os.environ:
+        explicit_tick = os.environ["PERCEPTION_PRODUCER_TICK_DT"]
+        try:
+            explicit_tick_value = float(explicit_tick)
+        except ValueError:
+            raise SystemExit(
+                f"[ERROR] Explicit PERCEPTION_PRODUCER_TICK_DT must be numeric, got {explicit_tick!r}."
+            )
+        if (
+            not math.isfinite(explicit_tick_value)
+            or explicit_tick_value <= 0.0
+            or not math.isclose(
+                explicit_tick_value,
+                producer_tick_dt,
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            )
+        ):
+            raise SystemExit(
+                "[ERROR] Explicit PERCEPTION_PRODUCER_TICK_DT conflicts with checkpoint "
+                f"training cadence ({explicit_tick!r} != {producer_tick_dt:.17g})."
+            )
+    training_cfg = experiment_cfg.get("training")
+    if not isinstance(training_cfg, dict):
+        raise SystemExit(
+            "[ERROR] Perception ONNX metadata must declare experiment_config.training."
+        )
+    producer_seed = training_cfg.get("seed")
+    if (
+        isinstance(producer_seed, bool)
+        or not isinstance(producer_seed, int)
+        or producer_seed < 0
+    ):
+        raise SystemExit(
+            "[ERROR] Checkpoint training seed must be a non-negative integer, "
+            f"got {producer_seed!r}."
+        )
+    if "PERCEPTION_PRODUCER_SEED" in os.environ:
+        explicit_seed_raw = os.environ["PERCEPTION_PRODUCER_SEED"]
+        try:
+            explicit_seed = int(explicit_seed_raw)
+        except ValueError:
+            raise SystemExit(
+                f"[ERROR] Explicit PERCEPTION_PRODUCER_SEED must be an integer, got {explicit_seed_raw!r}."
+            )
+        if str(explicit_seed) != explicit_seed_raw.strip() or explicit_seed != producer_seed:
+            raise SystemExit(
+                "[ERROR] Explicit PERCEPTION_PRODUCER_SEED conflicts with checkpoint training seed."
+            )
+    print(f"PERCEPTION_RANDOMIZATION_ENABLED={camera_params is not None}")
+    if translation_range is not None:
+        print(
+            "PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE="
+            + json.dumps(translation_range, separators=(",", ":"), allow_nan=False)
+        )
+    if rotation_range_deg is not None:
+        print(
+            "PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG="
+            + json.dumps(rotation_range_deg, separators=(",", ":"), allow_nan=False)
+        )
+    if noise_std_mult_range is not None:
+        print(
+            "PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE="
+            + json.dumps(noise_std_mult_range, separators=(",", ":"), allow_nan=False)
+        )
+    if noise_drop_prob_range is not None:
+        print(
+            "PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE="
+            + json.dumps(noise_drop_prob_range, separators=(",", ":"), allow_nan=False)
+        )
+    if hole_reference_batch_size is not None:
+        print(
+            "PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE="
+            f"{hole_reference_batch_size}"
+        )
+    print(f"PERCEPTION_RANDOMIZATION_CONTRACT_STATUS={contract_status}")
+    if not perception_contract_envelope_b64:
+        raise SystemExit("[ERROR] Failed to construct the authenticated perception contract envelope.")
+    print(f"PERCEPTION_CONTRACT_ENVELOPE_B64={perception_contract_envelope_b64}")
+    print(f"PERCEPTION_PRODUCER_TICK_DT={producer_tick_dt:.17g}")
+    print(f"PERCEPTION_PRODUCER_SEED={producer_seed}")
+    print(f"PERCEPTION_ALLOW_MUJOCO_NOISE={noise_requested}")
 
 field_map = {
+    "object_geometry_mode": "PERCEPTION_OBJECT_GEOMETRY_MODE",
     "update_hz": "PERCEPTION_UPDATE_HZ",
     "camera_fps": "PERCEPTION_CAMERA_FPS",
     "camera_width": "PERCEPTION_CAMERA_WIDTH",
@@ -1033,6 +1830,7 @@ field_map = {
     "camera_warp_crop_left": "PERCEPTION_CAMERA_WARP_CROP_LEFT",
     "camera_warp_crop_right": "PERCEPTION_CAMERA_WARP_CROP_RIGHT",
     "camera_warp_min_valid_depth": "PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH",
+    "camera_warp_normalize": "PERCEPTION_CAMERA_WARP_NORMALIZE",
     "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
     "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
     "camera_warp_edge_noise": "PERCEPTION_CAMERA_WARP_EDGE_NOISE",
@@ -1052,6 +1850,11 @@ for src_key, env_key in field_map.items():
         continue
     if isinstance(value, bool):
         print(f"{env_key}={value}")
+    elif isinstance(value, (list, tuple)):
+        # Tyro consumes variable-length sequences as separate CLI tokens.
+        # Emitting Python's ``[3, 4]`` representation makes the shell pass
+        # invalid tokens (``[3,`` and ``4]``).
+        print(f"{env_key}=" + " ".join(str(item) for item in value))
     elif isinstance(value, int):
         print(f"{env_key}={value}")
     elif isinstance(value, float):
@@ -1059,22 +1862,7 @@ for src_key, env_key in field_map.items():
     else:
         print(f"{env_key}={value}")
 
-noise_requested = any(bool(perception_cfg.get(key)) for key in (
-    "camera_warp_edge_noise",
-    "camera_warp_enable_holes",
-    "camera_apply_sensor_noise",
-))
 print(f"HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE={noise_requested}")
-
-randomization_cfg = experiment_cfg.get("randomization", {})
-if isinstance(randomization_cfg, dict):
-    reset_terms = randomization_cfg.get("reset_terms", {})
-    if isinstance(reset_terms, dict):
-        camera_randomizer = reset_terms.get("randomize_camera_raycast", {})
-        if isinstance(camera_randomizer, dict):
-            params = camera_randomizer.get("params", {})
-            if isinstance(params, dict) and params.get("enabled") is not None:
-                print(f"HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT={bool(params.get('enabled'))}")
 PY
   )"
 
@@ -1085,6 +1873,44 @@ PY
   while IFS='=' read -r key value; do
     [[ -z "${key:-}" ]] && continue
     case "$key" in
+      PERCEPTION_RANDOMIZATION_ENABLED)
+        PERCEPTION_RANDOMIZATION_ENABLED="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE)
+        PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG)
+        PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE)
+        PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE)
+        PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_CONTRACT_STATUS)
+        PERCEPTION_RANDOMIZATION_CONTRACT_STATUS="$value"
+        ;;
+      PERCEPTION_CONTRACT_ENVELOPE_B64)
+        PERCEPTION_CONTRACT_ENVELOPE_B64="$value"
+        ;;
+      PERCEPTION_PRODUCER_TICK_DT)
+        PERCEPTION_PRODUCER_TICK_DT="$value"
+        ;;
+      PERCEPTION_PRODUCER_SEED)
+        PERCEPTION_PRODUCER_SEED="$value"
+        ;;
+      PERCEPTION_ALLOW_MUJOCO_NOISE)
+        PERCEPTION_ALLOW_MUJOCO_NOISE="$value"
+        ;;
+      PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE)
+        PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE="$value"
+        ;;
+      PERCEPTION_OBJECT_GEOMETRY_MODE)
+        if [[ -z "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]]; then
+          PERCEPTION_OBJECT_GEOMETRY_MODE="$value"
+        fi
+        ;;
       PERCEPTION_UPDATE_HZ)
         if [[ -z "$PERCEPTION_UPDATE_HZ" ]]; then
           PERCEPTION_UPDATE_HZ="$value"
@@ -1145,6 +1971,16 @@ PY
           PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="$value"
         fi
         ;;
+      PERCEPTION_CAMERA_WARP_NORMALIZE)
+        checkpoint_normalize="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+        runtime_normalize="$(printf '%s' "${PERCEPTION_CAMERA_WARP_NORMALIZE:-}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${PERCEPTION_CAMERA_WARP_NORMALIZE_EXPLICIT:-0}" == "1" && "$runtime_normalize" != "$checkpoint_normalize" ]]; then
+          echo "[ERROR] Explicit PERCEPTION_CAMERA_WARP_NORMALIZE=${PERCEPTION_CAMERA_WARP_NORMALIZE} conflicts with checkpoint metadata ${value}; refusing depth-unit drift." >&2
+          return 2
+        fi
+        PERCEPTION_CAMERA_WARP_NORMALIZE="$value"
+        export PERCEPTION_CAMERA_WARP_NORMALIZE
+        ;;
       PERCEPTION_CAMERA_WARP_CROP_TOP)
         if [[ "$PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WARP_CROP_TOP" ]]; then
           PERCEPTION_CAMERA_WARP_CROP_TOP="$value"
@@ -1176,9 +2012,7 @@ PY
         fi
         ;;
       PERCEPTION_CAMERA_WARP_EDGE_NOISE)
-        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]]; then
-          PERCEPTION_CAMERA_WARP_EDGE_NOISE="$value"
-        fi
+        holosoma_apply_checkpoint_value "$key" "$value"
         ;;
       PERCEPTION_CAMERA_WARP_EDGE_BORDER)
         if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ]]; then
@@ -1211,9 +2045,7 @@ PY
         fi
         ;;
       PERCEPTION_CAMERA_WARP_ENABLE_HOLES)
-        if [[ -z "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ]]; then
-          PERCEPTION_CAMERA_WARP_ENABLE_HOLES="$value"
-        fi
+        holosoma_apply_checkpoint_value "$key" "$value"
         ;;
       PERCEPTION_CAMERA_WARP_HOLE_PROB)
         if [[ -z "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ]]; then
@@ -1221,19 +2053,10 @@ PY
         fi
         ;;
       PERCEPTION_CAMERA_APPLY_SENSOR_NOISE)
-        if [[ -z "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ]]; then
-          PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="$value"
-        fi
+        holosoma_apply_checkpoint_value "$key" "$value"
         ;;
       HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE)
-        if [[ "$HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT" != "1" && -z "${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-}" ]]; then
-          export HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE="$value"
-        fi
-        ;;
-      HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT)
-        if [[ "$HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT" != "1" && -z "${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-}" ]]; then
-          export HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT="$value"
-        fi
+        holosoma_apply_checkpoint_value "$key" "$value"
         ;;
     esac
   done <<< "$override_lines"
@@ -1251,6 +2074,9 @@ import sys
 from pathlib import Path
 
 import onnx
+from holosoma_inference.utils.policy_contract import (
+    effective_motion_transition_settings_from_metadata,
+)
 
 
 def resolve_model_path(path_str: str) -> Path:
@@ -1271,23 +2097,16 @@ for prop in model.metadata_props:
     except Exception:
         metadata[prop.key] = prop.value
 
-motion_cfg = (
-    metadata.get("experiment_config", {})
-    .get("command", {})
-    .get("setup_terms", {})
-    .get("motion_command", {})
-    .get("params", {})
-    .get("motion_config", {})
+transition_settings = effective_motion_transition_settings_from_metadata(metadata)
+effective_transition_applied = bool(
+    transition_settings["prepend"]["applied"]
+    or transition_settings["append"]["applied"]
 )
-motion_cfg = motion_cfg if isinstance(motion_cfg, dict) else {}
+effective_prepend_applied = bool(transition_settings["prepend"]["applied"])
 
-needs_default_pose_transition = bool(
-    (motion_cfg.get("enable_default_pose_prepend") and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0)
-    or (motion_cfg.get("enable_default_pose_append") and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0)
-)
-
-if needs_default_pose_transition:
+if effective_transition_applied:
     print("APPLY_TRAINING_MOTION_TRANSITIONS=1")
+if effective_prepend_applied:
     print("SIM_MOTION_INIT_MODE=training_default_pose")
     print("USE_ROOT_REFERENCE_AT_CLIP_START=1")
     print("AUTO_START_STIFF_HOLD_SEC=1.0")
@@ -1332,117 +2151,7 @@ PY
 }
 
 infer_inference_config() {
-  "$INFER_PY" - <<'PY' "$1"
-import json
-import sys
-
-import onnx
-
-model = onnx.load(sys.argv[1])
-input_dims = {}
-for value in model.graph.input:
-    dims = [dim.dim_value or dim.dim_param for dim in value.type.tensor_type.shape.dim]
-    input_dims[value.name] = dims
-
-obs_dim = None
-obs_shape = input_dims.get("obs")
-if obs_shape is not None and len(obs_shape) >= 2 and isinstance(obs_shape[1], int):
-    obs_dim = obs_shape[1]
-
-metadata = {}
-for prop in model.metadata_props:
-    try:
-        metadata[prop.key] = json.loads(prop.value)
-    except Exception:
-        metadata[prop.key] = prop.value
-
-groups = (
-    metadata.get("experiment_config", {})
-    .get("observation", {})
-    .get("groups", {})
-)
-groups = groups if isinstance(groups, dict) else {}
-
-actor_input_dim = (
-    metadata.get("experiment_config", {})
-    .get("algo", {})
-    .get("config", {})
-    .get("module_dict", {})
-    .get("actor", {})
-    .get("input_dim")
-)
-actor_input_dim = actor_input_dim if isinstance(actor_input_dim, list) else []
-
-if "perception_obs" in input_dims:
-    if obs_dim == 94 and actor_input_dim == [
-        "actor_obs_root_contact_aware",
-        "actor_obs_drop_button",
-        "actor_obs_proprio_with_actions_no_linvel",
-    ]:
-        print("g1-29dof-wbt-object-contact-aware-drop-button-depth-distill")
-        raise SystemExit(0)
-    if obs_dim == 96 and actor_input_dim == [
-        "actor_obs_root_contact_aware",
-        "actor_obs_proprio",
-        "actor_obs_actions",
-    ]:
-        print("g1-29dof-wbt-object-contact-aware-depth-distill")
-        raise SystemExit(0)
-    if obs_dim == 308 and actor_input_dim == ["actor_obs_root", "actor_obs_proprio_no_linvel"]:
-        print("g1-29dof-wbt-object-distill")
-        raise SystemExit(0)
-    raise SystemExit(
-        "Unsupported depth ONNX inputs: "
-        f"obs_dim={obs_dim!r}, actor_input_dim={actor_input_dim!r}, inputs={sorted(input_dims)}"
-    )
-
-if obs_dim == 105 and actor_input_dim == [
-    "actor_obs_root",
-    "actor_obs_proprio_no_linvel",
-    "actor_obs_actions",
-    "actor_obs_box",
-]:
-    print("g1-29dof-wbt-object-mocap-distill")
-    raise SystemExit(0)
-
-if any(name in groups for name in ("actor_obs_root", "actor_obs_torso", "actor_obs_proprio", "actor_obs_box")):
-    print("g1-29dof-wbt-object-distill")
-    raise SystemExit(0)
-
-actor_obs = groups.get("actor_obs", {})
-terms_cfg = actor_obs.get("terms", {}) if isinstance(actor_obs, dict) else {}
-terms = list(terms_cfg.keys()) if isinstance(terms_cfg, dict) else []
-terms_set = set(terms)
-
-legacy_w_object_terms = {
-    "motion_command",
-    "motion_ref_ori_b",
-    "base_ang_vel",
-    "dof_pos",
-    "dof_vel",
-    "actions",
-    "obj_target_pose_size_b",
-    "obj_pos_b",
-    "obj_ori_b",
-}
-
-if obs_dim == 123:
-    print("g1-29dof-wbt-object-distill")
-elif obs_dim == 875:
-    print("g1-29dof-wbt-w-object")
-elif obs_dim == 175:
-    print("g1-29dof-wbt-w-object")
-elif obs_dim == 181:
-    print("g1-29dof-wbt-object-generalist")
-elif {"obj_lin_vel_b", "obj_ang_vel_b"} & terms_set:
-    print("g1-29dof-wbt-object-generalist")
-elif legacy_w_object_terms.issubset(terms_set):
-    print("g1-29dof-wbt-w-object")
-elif terms_set:
-    raise SystemExit(f"Unsupported actor_obs terms for non-depth split rollout: {terms}")
-else:
-    raise SystemExit(f"Unable to infer split rollout config from ONNX obs dim {obs_dim!r}")
-PY
+  "$INFER_PY" "$ROOT_DIR/scripts/mj_infer_inference_config.py" "$1"
 }
 
 onnx_has_input() {
@@ -1468,6 +2177,8 @@ apply_training_object_overrides "$POLICY_MODEL"
 apply_training_perception_overrides "$POLICY_MODEL"
 apply_gt_mujoco_physics_overrides
 
+PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"
+
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
 SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-0}"
 SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-0}"
@@ -1489,7 +2200,7 @@ fi
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ -n "$POLICY_MOTION_INDEX_OFFSET" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="$POLICY_MOTION_INDEX_OFFSET"
-  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-drop-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
+  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-drop-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-dual-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-contact-aware-dual-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-pickup-drop-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
   fi
 fi
@@ -1501,6 +2212,35 @@ fi
 if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" && "$ENABLE_SPLIT_PERCEPTION_OBS" != "1" ]]; then
   echo "Model expects perception_obs but ENABLE_SPLIT_PERCEPTION_OBS=${ENABLE_SPLIT_PERCEPTION_OBS}" >&2
   exit 1
+fi
+if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]]; then
+  case "$PERCEPTION_RANDOMIZATION_ENABLED" in
+    True|False)
+      ;;
+    *)
+      echo "[ERROR] Missing authenticated direct perception randomization state." >&2
+      exit 1
+      ;;
+  esac
+  case "$PERCEPTION_ALLOW_MUJOCO_NOISE" in
+    True|False)
+      ;;
+    *)
+      echo "[ERROR] Missing authenticated direct perception noise permission." >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "$PERCEPTION_PRODUCER_TICK_DT" ]]; then
+    echo "[ERROR] Missing checkpoint-derived perception producer tick dt." >&2
+    exit 1
+  fi
+  if [[ -z "$PERCEPTION_PRODUCER_SEED" ]]; then
+    echo "[ERROR] Missing checkpoint-derived perception producer seed." >&2
+    exit 1
+  fi
+  # Direct reset randomization is carried by RunSimConfig.  Always suppress the
+  # historical one-shot mount jitter so the two distributions cannot stack.
+  export HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT=False
 fi
 export HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE="${HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE:-1}"
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" && -z "$SIM_DEVICE" ]]; then
@@ -1571,7 +2311,12 @@ if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
   PUBLISH_PERCEPTION_OBS_SHM=0
 fi
 
-if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" ]]; then
+if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" \
+      || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" \
+      || "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object-history1" \
+      || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist-history1" \
+      || "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object-legacy" \
+      || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-velocity-generalist" ]]; then
   if [[ -z "$USE_SIM_TIME" ]]; then
     USE_SIM_TIME="1"
   fi
@@ -1670,19 +2415,15 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} warp_edge_border=${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-<default>} warp_edge_shuffle_prob=${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-<default>} warp_edge_empty_prob=${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-<default>} warp_edge_thresh=${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-<default>}/${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-<default>} warp_edge_far_depth_thresh=${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-<default>} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-<default>} warp_hole_prob=${PERCEPTION_CAMERA_WARP_HOLE_PROB:-<default>} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-<default>} allow_mujoco_noise=${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-<default>} camera_randomize_placement=${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_normalize=${PERCEPTION_CAMERA_WARP_NORMALIZE:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} warp_edge_border=${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-<default>} warp_edge_shuffle_prob=${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-<default>} warp_edge_empty_prob=${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-<default>} warp_edge_thresh=${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-<default>}/${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-<default>} warp_edge_far_depth_thresh=${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-<default>} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-<default>} warp_hole_prob=${PERCEPTION_CAMERA_WARP_HOLE_PROB:-<default>} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-<default>} allow_mujoco_noise=${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] direct perception reset: contract=${PERCEPTION_RANDOMIZATION_CONTRACT_STATUS:-<missing>} enabled=${PERCEPTION_RANDOMIZATION_ENABLED:-<missing>} translation=${PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE:-<none>} rotation_deg=${PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG:-<none>} noise_std_mult=${PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE:-<none>} noise_drop_prob=${PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE:-<none>} producer_tick_dt=${PERCEPTION_PRODUCER_TICK_DT:-<missing>} producer_seed=${PERCEPTION_PRODUCER_SEED:-<missing>} seed_replay_scope=same_execution_trace_only allow_mujoco_noise=${PERCEPTION_ALLOW_MUJOCO_NOISE:-<missing>} hole_reference_batch_size=${PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE:-<none>} legacy_setup_jitter=${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-<unset>}"
   if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
-    echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}."
+    echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}. Every frame must carry the target run_sim sim-state episode_generation (an unrelated renderer-local counter is rejected)."
   fi
 fi
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
 fi
-if is_truthy_env "${DRY_RUN:-0}"; then
-  echo "[INFO] DRY_RUN=1; not launching MuJoCo or policy."
-  exit 0
-fi
-
 terminate_pid() {
   local pid="$1"
   [[ -n "${pid:-}" ]] || return
@@ -1715,6 +2456,185 @@ if [[ -n "${MUJOCO_CPUSET}" ]]; then
   fi
 fi
 
+DIRECT_PERCEPTION_PRODUCER=0
+if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]]; then
+  DIRECT_PERCEPTION_PRODUCER=1
+fi
+if [[ "$DIRECT_PERCEPTION_PRODUCER" == "1" && -z "$PERCEPTION_CONTRACT_ENVELOPE_B64" ]]; then
+  echo "[ERROR] Direct perception producer requires an authenticated checkpoint contract envelope." >&2
+  exit 1
+fi
+
+RUN_SIM_CMD=()
+if [[ -n "$MUJOCO_PYTHONPATH" ]]; then
+  RUN_SIM_CMD+=(env "PYTHONPATH=${MUJOCO_PYTHONPATH}")
+fi
+RUN_SIM_CMD+=(
+  "$MUJOCO_PY" -u "$ROOT_DIR/src/holosoma/holosoma/run_sim.py"
+  simulator:mujoco
+  robot:g1_29dof_w_object
+  terrain:terrain_locomotion_plane
+)
+if [[ "$DIRECT_PERCEPTION_PRODUCER" == "1" ]]; then
+  RUN_SIM_CMD+=("perception:${PERCEPTION_PRESET}")
+fi
+RUN_SIM_CMD+=(
+  --training.headless "$TRAINING_HEADLESS"
+  --simulator.config.debug-viz "$SIM_DEBUG_VIZ"
+  --simulator.config.sim.fps "$SIM_FPS"
+  --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION"
+  --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED"
+  --robot.object.enabled=True
+  --robot.object.object-urdf-path "$OBJECT_URDF"
+  --simulator.config.bridge.interface "$INTERFACE_NAME"
+  --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT"
+  --simulator.config.bridge.publish-sim-state=True
+  --simulator.config.bridge.listen-control=True
+  --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT"
+  --simulator.config.bridge.control-port "$SIM_CONTROL_PORT"
+  --motion-init.enabled=True
+  --motion-init.motion-file "$MOTION_FILE"
+  --motion-init.mode "$SIM_MOTION_INIT_MODE"
+  --motion-init.object-name object
+)
+
+append_run_sim_value() {
+  local option="$1"
+  local value="$2"
+  if [[ -n "$value" ]]; then
+    RUN_SIM_CMD+=("$option" "$value")
+  fi
+}
+
+if [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.mujoco-show-object-collision True)
+fi
+if [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.mujoco-hide-object-visuals-when-showing-collision True)
+fi
+append_run_sim_value --simulator.config.sim.substeps "$SIM_SUBSTEPS"
+append_run_sim_value --simulator.config.sim.physx.num-position-iterations "${SIM_PHYSX_POSITION_ITERATIONS:-}"
+append_run_sim_value --simulator.config.sim.physx.num-velocity-iterations "${SIM_PHYSX_VELOCITY_ITERATIONS:-}"
+append_run_sim_value --simulator.config.sim.physx.bounce-threshold-velocity "${SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY:-}"
+append_run_sim_value --simulator.config.mujoco-backend "$MUJOCO_BACKEND"
+append_run_sim_value --device "$SIM_DEVICE"
+append_run_sim_value --robot.init-state.pos "$ROBOT_INIT_STATE_POS"
+append_run_sim_value --robot.init-state.rot "$ROBOT_INIT_STATE_ROT"
+append_run_sim_value --robot.asset.enable-self-collisions "$ROBOT_ENABLE_SELF_COLLISIONS"
+if [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-use-training-urdf-scene True)
+fi
+if [[ "$SIM_ADD_DEFAULT_OBJECT_ACTUATORS" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-add-default-actuators True)
+fi
+if [[ "$SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-copy-joint-defaults-from-robot-xml True)
+fi
+if [[ "$SIM_COPY_TENDONS_FROM_ROBOT_XML" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-copy-tendons-from-robot-xml True)
+fi
+if [[ "$SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-copy-collision-geoms-from-robot-xml True)
+fi
+if [[ "$SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-copy-contact-pairs-from-robot-xml True)
+fi
+append_run_sim_value --robot.object.mujoco-object-mass-scale "$MUJOCO_OBJECT_MASS_SCALE"
+append_run_sim_value --robot.object.mujoco-object-mass-override "$MUJOCO_OBJECT_MASS_OVERRIDE"
+append_run_sim_value --robot.object.mujoco-object-geom-friction "$MUJOCO_OBJECT_GEOM_FRICTION"
+append_run_sim_value --robot.object.mujoco-object-terrain-pair-friction "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION"
+append_run_sim_value --robot.object.mujoco-object-lateral-friction "$MUJOCO_OBJECT_LATERAL_FRICTION"
+append_run_sim_value --robot.object.mujoco-object-rolling-friction "$MUJOCO_OBJECT_ROLLING_FRICTION"
+append_run_sim_value --robot.object.mujoco-object-contact-stiffness "$MUJOCO_OBJECT_CONTACT_STIFFNESS"
+append_run_sim_value --robot.object.mujoco-object-contact-damping "$MUJOCO_OBJECT_CONTACT_DAMPING"
+if [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]]; then
+  RUN_SIM_CMD+=(--robot.object.mujoco-limit-object-contacts-to-carry-bodies True)
+fi
+append_run_sim_value --robot.object.mujoco-object-contact-body-name-markers "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
+append_run_sim_value --terrain.terrain-term.static-friction "$TERRAIN_STATIC_FRICTION"
+append_run_sim_value --terrain.terrain-term.dynamic-friction "$TERRAIN_DYNAMIC_FRICTION"
+if [[ "$DIRECT_PERCEPTION_PRODUCER" == "1" ]]; then
+  RUN_SIM_CMD+=(
+    --simulator.config.bridge.publish-perception-obs True
+    --simulator.config.bridge.perception-obs-port "$PERCEPTION_OBS_PORT"
+    --perception-randomization.enabled "$PERCEPTION_RANDOMIZATION_ENABLED"
+    --perception-producer-tick-dt "$PERCEPTION_PRODUCER_TICK_DT"
+    --perception-allow-mujoco-noise "$PERCEPTION_ALLOW_MUJOCO_NOISE"
+    --perception-contract-envelope-b64 "$PERCEPTION_CONTRACT_ENVELOPE_B64"
+    --training.seed "$PERCEPTION_PRODUCER_SEED"
+  )
+  append_run_sim_value --perception-randomization.translation-range "$PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE"
+  append_run_sim_value --perception-randomization.rotation-range-deg "$PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG"
+  append_run_sim_value --perception-randomization.noise-std-mult-range "$PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE"
+  append_run_sim_value --perception-randomization.noise-drop-prob-range "$PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE"
+  if [[ "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]]; then
+    RUN_SIM_CMD+=(
+      --simulator.config.bridge.publish-perception-obs-shm True
+      --simulator.config.bridge.perception-obs-shm-name "$PERCEPTION_OBS_SHM_NAME"
+    )
+  fi
+  append_run_sim_value --perception.camera-source "$PERCEPTION_CAMERA_SOURCE"
+  append_run_sim_value --perception.object-geometry-mode "$PERCEPTION_OBJECT_GEOMETRY_MODE"
+  append_run_sim_value --perception.camera-width "$PERCEPTION_CAMERA_WIDTH"
+  append_run_sim_value --perception.camera-height "$PERCEPTION_CAMERA_HEIGHT"
+  append_run_sim_value --perception.camera-warp-crop-top "$PERCEPTION_CAMERA_WARP_CROP_TOP"
+  append_run_sim_value --perception.camera-warp-crop-bottom "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM"
+  append_run_sim_value --perception.camera-warp-crop-left "$PERCEPTION_CAMERA_WARP_CROP_LEFT"
+  append_run_sim_value --perception.camera-warp-crop-right "$PERCEPTION_CAMERA_WARP_CROP_RIGHT"
+  append_run_sim_value --perception.camera-pitch-deg "$PERCEPTION_CAMERA_PITCH_DEG"
+  append_run_sim_value --perception.camera-vfov-deg "$PERCEPTION_CAMERA_VFOV_DEG"
+  append_run_sim_value --perception.camera-hfov-deg "$PERCEPTION_CAMERA_HFOV_DEG"
+  append_run_sim_value --perception.camera-include-robot-mesh "$PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH"
+  append_run_sim_value --perception.camera-near "$PERCEPTION_CAMERA_NEAR"
+  append_run_sim_value --perception.camera-far "$PERCEPTION_CAMERA_FAR"
+  append_run_sim_value --perception.max-distance "$PERCEPTION_MAX_DISTANCE"
+  append_run_sim_value --perception.camera-warp-min-valid-depth "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH"
+  append_run_sim_value --perception.camera-warp-normalize "$PERCEPTION_CAMERA_WARP_NORMALIZE"
+  append_run_sim_value --perception.update-hz "$PERCEPTION_UPDATE_HZ"
+  append_run_sim_value --perception.camera-fps "$PERCEPTION_CAMERA_FPS"
+  append_run_sim_value --perception.camera-warp-buffer-len "$PERCEPTION_CAMERA_WARP_BUFFER_LEN"
+  append_run_sim_value --perception.camera-warp-latency-frame "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME"
+  append_run_sim_value --perception.camera-warp-edge-noise "$PERCEPTION_CAMERA_WARP_EDGE_NOISE"
+  append_run_sim_value --perception.camera-warp-edge-border "$PERCEPTION_CAMERA_WARP_EDGE_BORDER"
+  append_run_sim_value --perception.camera-warp-edge-shuffle-prob "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB"
+  append_run_sim_value --perception.camera-warp-edge-empty-prob "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB"
+  append_run_sim_value --perception.camera-warp-edge-thresh-primary "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY"
+  append_run_sim_value --perception.camera-warp-edge-thresh-secondary "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY"
+  append_run_sim_value --perception.camera-warp-edge-far-depth-thresh "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH"
+  append_run_sim_value --perception.camera-warp-enable-holes "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES"
+  append_run_sim_value --perception.camera-warp-hole-prob "$PERCEPTION_CAMERA_WARP_HOLE_PROB"
+  append_run_sim_value --perception.camera-warp-hole-reference-batch-size "$PERCEPTION_CAMERA_WARP_HOLE_REFERENCE_BATCH_SIZE"
+  append_run_sim_value --perception.camera-apply-sensor-noise "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE"
+fi
+if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.use-zmq-lowcmd True)
+fi
+if [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.ignore-default-idle-command True)
+fi
+if [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.log-first-command-summary True)
+fi
+if [[ "$SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.hold-default-pose-until-first-command True)
+fi
+if [[ "$SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.hold-initial-pose-until-first-command True)
+fi
+if [[ "$SIM_FREEZE_UNTIL_FIRST_COMMAND" == "1" ]]; then
+  RUN_SIM_CMD+=(--simulator.config.bridge.freeze-until-first-command True)
+fi
+
+if is_truthy_env "${DRY_RUN:-0}"; then
+  if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
+    printf '[DRY_RUN] run_sim:'
+    printf ' %q' "${MUJOCO_LAUNCH_PREFIX[@]}" "${RUN_SIM_CMD[@]}"
+    printf '\n'
+  fi
+  echo "[INFO] DRY_RUN=1; not launching MuJoCo or policy."
+  exit 0
+fi
+
 wait_for_sim_ready() {
   local deadline=$((SECONDS + SIM_READY_TIMEOUT))
   while (( SECONDS < deadline )); do
@@ -1735,98 +2655,7 @@ wait_for_sim_ready() {
 }
 
 if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
-  "${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" -u "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
-    simulator:mujoco \
-    robot:g1_29dof_w_object \
-    terrain:terrain_locomotion_plane \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
-    --training.headless "$TRAINING_HEADLESS" \
-    --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
-    $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
-    $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
-    --simulator.config.sim.fps "$SIM_FPS" \
-    --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION" \
-    $( [[ -n "$SIM_SUBSTEPS" ]] && printf '%s %s' "--simulator.config.sim.substeps" "$SIM_SUBSTEPS" ) \
-    $( [[ -n "${SIM_PHYSX_POSITION_ITERATIONS:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.num-position-iterations" "$SIM_PHYSX_POSITION_ITERATIONS" ) \
-    $( [[ -n "${SIM_PHYSX_VELOCITY_ITERATIONS:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.num-velocity-iterations" "$SIM_PHYSX_VELOCITY_ITERATIONS" ) \
-    $( [[ -n "${SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.bounce-threshold-velocity" "$SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY" ) \
-    $( [[ -n "$MUJOCO_BACKEND" ]] && printf '%s %s' "--simulator.config.mujoco-backend" "$MUJOCO_BACKEND" ) \
-    $( [[ -n "$SIM_DEVICE" ]] && printf '%s %s' "--device" "$SIM_DEVICE" ) \
-    --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED" \
-    $( [[ -n "$ROBOT_INIT_STATE_POS" ]] && printf '%s %s' "--robot.init-state.pos" "$ROBOT_INIT_STATE_POS" ) \
-    $( [[ -n "$ROBOT_INIT_STATE_ROT" ]] && printf '%s %s' "--robot.init-state.rot" "$ROBOT_INIT_STATE_ROT" ) \
-    $( [[ -n "$ROBOT_ENABLE_SELF_COLLISIONS" ]] && printf '%s %s' "--robot.asset.enable-self-collisions" "$ROBOT_ENABLE_SELF_COLLISIONS" ) \
-    --robot.object.enabled=True \
-    --robot.object.object-urdf-path "$OBJECT_URDF" \
-    $( [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" ]] && printf '%s %s' "--robot.object.mujoco-use-training-urdf-scene" "True" ) \
-    $( [[ "$SIM_ADD_DEFAULT_OBJECT_ACTUATORS" == "1" ]] && printf '%s %s' "--robot.object.mujoco-add-default-actuators" "True" ) \
-    $( [[ "$SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-joint-defaults-from-robot-xml" "True" ) \
-    $( [[ "$SIM_COPY_TENDONS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-tendons-from-robot-xml" "True" ) \
-    $( [[ "$SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-collision-geoms-from-robot-xml" "True" ) \
-    $( [[ "$SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-contact-pairs-from-robot-xml" "True" ) \
-    $( [[ -n "$MUJOCO_OBJECT_MASS_SCALE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-scale" "$MUJOCO_OBJECT_MASS_SCALE" ) \
-    $( [[ -n "$MUJOCO_OBJECT_MASS_OVERRIDE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-override" "$MUJOCO_OBJECT_MASS_OVERRIDE" ) \
-    $( [[ -n "$MUJOCO_OBJECT_GEOM_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-geom-friction" "$MUJOCO_OBJECT_GEOM_FRICTION" ) \
-    $( [[ -n "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-terrain-pair-friction" "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ) \
-    $( [[ -n "$MUJOCO_OBJECT_LATERAL_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-lateral-friction" "$MUJOCO_OBJECT_LATERAL_FRICTION" ) \
-    $( [[ -n "$MUJOCO_OBJECT_ROLLING_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-rolling-friction" "$MUJOCO_OBJECT_ROLLING_FRICTION" ) \
-    $( [[ -n "$MUJOCO_OBJECT_CONTACT_STIFFNESS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-stiffness" "$MUJOCO_OBJECT_CONTACT_STIFFNESS" ) \
-    $( [[ -n "$MUJOCO_OBJECT_CONTACT_DAMPING" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-damping" "$MUJOCO_OBJECT_CONTACT_DAMPING" ) \
-    $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
-    $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
-    $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
-    $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
-    --simulator.config.bridge.interface "$INTERFACE_NAME" \
-    --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT" \
-    --simulator.config.bridge.publish-sim-state=True \
-    --simulator.config.bridge.listen-control=True \
-    --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
-    --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs-shm" "True" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-shm-name" "$PERCEPTION_OBS_SHM_NAME" ) \
-    $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
-    $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
-    $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
-    $( [[ "$SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-default-pose-until-first-command" "True" ) \
-    $( [[ "$SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-initial-pose-until-first-command" "True" ) \
-    $( [[ "$SIM_FREEZE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.freeze-until-first-command" "True" ) \
-    --motion-init.enabled=True \
-    --motion-init.motion-file "$MOTION_FILE" \
-    --motion-init.mode "$SIM_MOTION_INIT_MODE" \
-    --motion-init.object-name object \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WIDTH" ]] && printf '%s %s' "--perception.camera-width" "$PERCEPTION_CAMERA_WIDTH" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_HEIGHT" ]] && printf '%s %s' "--perception.camera-height" "$PERCEPTION_CAMERA_HEIGHT" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_TOP" ]] && printf '%s %s' "--perception.camera-warp-crop-top" "$PERCEPTION_CAMERA_WARP_CROP_TOP" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM" ]] && printf '%s %s' "--perception.camera-warp-crop-bottom" "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_LEFT" ]] && printf '%s %s' "--perception.camera-warp-crop-left" "$PERCEPTION_CAMERA_WARP_CROP_LEFT" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_RIGHT" ]] && printf '%s %s' "--perception.camera-warp-crop-right" "$PERCEPTION_CAMERA_WARP_CROP_RIGHT" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_VFOV_DEG" ]] && printf '%s %s' "--perception.camera-vfov-deg" "$PERCEPTION_CAMERA_VFOV_DEG" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_HFOV_DEG" ]] && printf '%s %s' "--perception.camera-hfov-deg" "$PERCEPTION_CAMERA_HFOV_DEG" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH" ]] && printf '%s %s' "--perception.camera-include-robot-mesh" "$PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_NEAR" ]] && printf '%s %s' "--perception.camera-near" "$PERCEPTION_CAMERA_NEAR" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FAR" ]] && printf '%s %s' "--perception.camera-far" "$PERCEPTION_CAMERA_FAR" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_MAX_DISTANCE" ]] && printf '%s %s' "--perception.max-distance" "$PERCEPTION_MAX_DISTANCE" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]] && printf '%s %s' "--perception.camera-warp-min-valid-depth" "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ]] && printf '%s %s' "--perception.camera-warp-edge-border" "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB" ]] && printf '%s %s' "--perception.camera-warp-edge-shuffle-prob" "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB" ]] && printf '%s %s' "--perception.camera-warp-edge-empty-prob" "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY" ]] && printf '%s %s' "--perception.camera-warp-edge-thresh-primary" "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY" ]] && printf '%s %s' "--perception.camera-warp-edge-thresh-secondary" "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH" ]] && printf '%s %s' "--perception.camera-warp-edge-far-depth-thresh" "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ]] && printf '%s %s' "--perception.camera-warp-enable-holes" "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ]] && printf '%s %s' "--perception.camera-warp-hole-prob" "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ]] && printf '%s %s' "--perception.camera-apply-sensor-noise" "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ) \
-    >"$SIM_LOG" 2>&1 &
+  "${MUJOCO_LAUNCH_PREFIX[@]}" "${RUN_SIM_CMD[@]}" >"$SIM_LOG" 2>&1 &
   SIM_PID=$!
 
   if ! wait_for_sim_ready; then

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ class _DummyMotion:
     def __init__(self, clip_ids: list[str]):
         self.clip_ids = clip_ids
         self.num_clips = len(clip_ids)
+        self.clip_lengths = torch.full((len(clip_ids),), 3, dtype=torch.long)
         self.has_object = True
 
 
@@ -145,6 +147,21 @@ def _build_env(tmp_path: Path) -> tuple[SimpleNamespace, _DummyMotionCommand, Pa
     return env, motion_command, export_root
 
 
+def _set_rollout_valid_steps(export_root: Path, valid_steps: list[bool]) -> None:
+    rollout_path = export_root / "clips" / "0000_box_10" / "teacher_rollout_reference.npz"
+    with np.load(rollout_path, allow_pickle=False) as data:
+        payload = {key: np.asarray(data[key]) for key in data.files}
+    payload["valid_steps"] = np.asarray(valid_steps, dtype=np.bool_)
+    np.savez_compressed(rollout_path, **payload)
+
+
+def _enable_episodic_motion_end(env: SimpleNamespace) -> None:
+    env.termination_manager = SimpleNamespace(
+        _term_names=["motion_ends"],
+        _term_cfgs=[SimpleNamespace(func="holosoma.managers.termination.terms.wbt:motion_ends")],
+    )
+
+
 def test_rollout_reference_object_reward_uses_exported_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -161,6 +178,105 @@ def test_rollout_reference_object_reward_uses_exported_rollout(
     assert reward.shape == (2,)
     assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
     assert reward[1].item() < 0.01
+
+
+def test_rollout_reference_rejects_duplicate_clip_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env, motion_command, export_root = _build_env(tmp_path)
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+    source = export_root / "clips" / "0000_box_10"
+    shutil.copytree(source, export_root / "clips" / "box_10")
+
+    with pytest.raises(RuntimeError, match="multiple directories for an active clip"):
+        reward_wbt.object_global_ref_position_error_exp(
+            env,
+            sigma=0.1,
+            rollout_reference_root=str(export_root),
+        )
+
+
+def test_rollout_reference_allows_only_unreachable_final_frame_to_be_invalid_in_episodic_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    _enable_episodic_motion_end(env)
+    _set_rollout_valid_steps(export_root, [True, True, False])
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    reward = reward_wbt.object_global_ref_position_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+
+
+def test_rollout_reference_requires_final_frame_in_continuing_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    _set_rollout_valid_steps(export_root, [True, True, False])
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    with pytest.raises(RuntimeError, match=r"first_invalid_step=2.*motion_end_mode=continuing"):
+        reward_wbt.object_global_ref_position_error_exp(
+            env,
+            sigma=0.1,
+            rollout_reference_root=str(export_root),
+        )
+
+
+def test_rollout_reference_rejects_invalid_reward_bearing_frame_in_episodic_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    _enable_episodic_motion_end(env)
+    _set_rollout_valid_steps(export_root, [True, False, False])
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    with pytest.raises(RuntimeError, match=r"first_invalid_step=1.*motion_end_mode=episodic"):
+        reward_wbt.object_global_ref_position_error_exp(
+            env,
+            sigma=0.1,
+            rollout_reference_root=str(export_root),
+        )
+
+
+def test_rollout_reference_reward_fails_when_configured_root_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, _ = _build_env(tmp_path)
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    with pytest.raises(FileNotFoundError, match="Refusing to silently replace"):
+        reward_wbt.object_global_ref_position_error_exp(
+            env,
+            sigma=0.1,
+            rollout_reference_root=str(tmp_path / "missing"),
+        )
+
+
+def test_rollout_reference_reward_fails_when_an_active_clip_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    motion_command.motion.clip_ids = ["box_10", "box_11"]
+    motion_command.motion.num_clips = 2
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    with pytest.raises(RuntimeError, match=r"Missing or invalid clip ids.*box_11"):
+        reward_wbt.object_global_ref_position_error_exp(
+            env,
+            sigma=0.1,
+            rollout_reference_root=str(export_root),
+        )
 
 
 def test_rollout_reference_global_ref_reward_uses_exported_rollout(

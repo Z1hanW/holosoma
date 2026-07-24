@@ -33,6 +33,13 @@ from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.visual_motion_transitions import (  # noqa: E402
+    configured_control_dt_s,
+    configured_simulator_type,
+    list_motion_source_clips,
+    resolve_motion_transition_source_for_motion_path,
+    resolve_visual_motion_transition_plan,
+)
 from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
@@ -64,42 +71,9 @@ def _get_motion_config(cfg: ExperimentConfig) -> MotionConfig:
     return MotionConfig(**motion_cfg)
 
 
-def _decode_h5_strings(values: np.ndarray) -> list[str]:
-    decoded: list[str] = []
-    for item in values:
-        if isinstance(item, (bytes, np.bytes_)):
-            decoded.append(item.decode("utf-8"))
-        else:
-            decoded.append(str(item))
-    return decoded
-
-
 def _list_motion_clips(motion_cfg: MotionConfig) -> list[str]:
     motion_path = Path(_resolve_data_path(motion_cfg.motion_file))
-    if motion_path.is_dir():
-        files = sorted(list(motion_path.glob("*.npz")) + list(motion_path.glob("*.NPZ")))
-        if not files:
-            raise FileNotFoundError(f"No motion clips found in directory: {motion_path}")
-        return [path.stem for path in files]
-
-    if motion_path.suffix.lower() in (".h5", ".hdf5"):
-        try:
-            import h5py  # type: ignore[import-not-found]
-        except Exception:
-            return [motion_path.stem]
-        with h5py.File(motion_path, "r") as h5f:
-            clips = h5f.get("clips")
-            if clips is None or "clip_ids" not in clips:
-                return [motion_path.stem]
-            clip_ids = _decode_h5_strings(np.asarray(clips["clip_ids"]))
-            if not clip_ids:
-                return [motion_path.stem]
-            return clip_ids
-
-    if motion_path.exists():
-        return [motion_path.stem]
-
-    raise FileNotFoundError(f"Motion file not found: {motion_path}")
+    return list_motion_source_clips(motion_path)
 
 
 def _select_initial_clip(motion_cfg: MotionConfig, clip_names: list[str]) -> str:
@@ -240,9 +214,22 @@ def _maybe_add_default_pose_transitions(
     robot_dof: int,
     fps: float,
     default_joint_pos: np.ndarray,
+    source_clip_count: int,
+    motion_transition_source: dict[str, object] | None,
+    simulator_type: str,
+    control_dt_s: float,
 ) -> np.ndarray:
     if qpos.shape[0] == 0:
         return qpos
+
+    transition_plan = resolve_visual_motion_transition_plan(
+        motion_cfg,
+        fps=fps,
+        control_dt_s=control_dt_s,
+        source_clip_count=source_clip_count,
+        motion_transition_source=motion_transition_source,
+        simulator_type=simulator_type,
+    )
 
     has_object = qpos.shape[1] >= (7 + robot_dof + 7)
     if default_joint_pos.shape[0] != robot_dof:
@@ -255,8 +242,8 @@ def _maybe_add_default_pose_transitions(
     motion_root_quat_end_wxyz = qpos[-1, 3:7]
     motion_root_quat_end_xyzw = motion_root_quat_end_wxyz[[1, 2, 3, 0]]
 
-    if motion_cfg.enable_default_pose_prepend and motion_cfg.default_pose_prepend_duration_s > 0.0:
-        num_steps = int(round(motion_cfg.default_pose_prepend_duration_s * fps))
+    if transition_plan.prepend_steps > 0:
+        num_steps = transition_plan.prepend_steps
         default_root_pos, default_root_quat = _build_default_root_pose(
             robot_config,
             motion_root_pos_start,
@@ -276,8 +263,8 @@ def _maybe_add_default_pose_transitions(
         if segment.shape[0] > 0:
             qpos = np.concatenate([segment, qpos], axis=0)
 
-    if motion_cfg.enable_default_pose_append and motion_cfg.default_pose_append_duration_s > 0.0:
-        num_steps = int(round(motion_cfg.default_pose_append_duration_s * fps))
+    if transition_plan.append_steps > 0:
+        num_steps = transition_plan.append_steps
         default_root_pos, default_root_quat = _build_default_root_pose(
             robot_config,
             motion_root_pos_end,
@@ -411,6 +398,8 @@ def _load_terrain_mesh(cfg: ExperimentConfig, clip_name: str | None = None) -> t
 
 def replay(cfg: ExperimentConfig) -> None:
     motion_cfg = _get_motion_config(cfg)
+    simulator_type = configured_simulator_type(cfg.simulator)
+    control_dt_s = configured_control_dt_s(cfg.simulator)
     robot_urdf_path = _resolve_robot_urdf_path(cfg.robot)
     object_urdf_path = None
     if getattr(cfg.robot.object, "enabled", False) and cfg.robot.object.object_urdf_path:
@@ -430,6 +419,9 @@ def replay(cfg: ExperimentConfig) -> None:
     server.scene.add_grid("/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0))
 
     motion_choices = _list_motion_clips(motion_cfg)
+    motion_transition_source = resolve_motion_transition_source_for_motion_path(
+        Path(_resolve_data_path(motion_cfg.motion_file))
+    )
     active_clip = _select_initial_clip(motion_cfg, motion_choices)
 
     viser_joint_names = list(vr.get_actuated_joint_names())
@@ -469,6 +461,10 @@ def replay(cfg: ExperimentConfig) -> None:
             robot_dof=len(viser_joint_names),
             fps=float(fps),
             default_joint_pos=default_joint_viser,
+            source_clip_count=len(motion_choices),
+            motion_transition_source=motion_transition_source,
+            simulator_type=simulator_type,
+            control_dt_s=control_dt_s,
         )
         if qpos.shape[0] == 0:
             raise ValueError("Loaded motion has zero frames.")

@@ -42,9 +42,13 @@ set -euo pipefail
 #   FREEZE_AT_TIMESTEP_ZERO_PROB
 #                             (default: 0.95; matches checkpoint default)
 #   ENABLE_DEFAULT_POSE_PREPEND
-#                             (default: False; disable runtime default-pose warmup for more stable interactive resets)
+#                             (default: authenticated effective checkpoint value; user override is explicit)
 #   DEFAULT_POSE_PREPEND_DURATION_S
-#                             (default: 0.0; only used when ENABLE_DEFAULT_POSE_PREPEND=True)
+#                             (default: authenticated effective checkpoint value; only used when ENABLE_DEFAULT_POSE_PREPEND=True)
+#   ENABLE_DEFAULT_POSE_APPEND
+#                             (default: authenticated effective checkpoint value; user override is explicit)
+#   DEFAULT_POSE_APPEND_DURATION_S
+#                             (default: authenticated effective checkpoint value; only used when ENABLE_DEFAULT_POSE_APPEND=True)
 #   DISABLE_RANDOMIZATION     (default: True)
 #   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
 #   PYTHON_BIN                (default: python)
@@ -82,6 +86,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma:${SCRIPT_DIR}/src/holosoma_inference${PYTHONPATH:+:${PYTHONPATH}}"
 source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
@@ -446,11 +451,12 @@ auto_pick_default_teacher_checkpoint() {
 
 load_checkpoint_saved_motion_defaults() {
   local checkpoint_ref="$1"
-  "${PYTHON_BIN}" - "${checkpoint_ref}" "${SCRIPT_DIR}" <<'PY' 2>/dev/null || true
+  local expected_checkpoint_sha256="$2"
+  "${PYTHON_BIN}" - "${checkpoint_ref}" "${SCRIPT_DIR}" "${expected_checkpoint_sha256}" <<'PY' 2>/dev/null || true
 import json
 import re
 import sys
-import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 repo_root = Path.cwd().resolve()
@@ -467,15 +473,27 @@ for path_entry in sys.path:
 sys.path = sanitized_sys_path
 
 try:
-    import torch
-    from holosoma.utils.eval_utils import load_checkpoint
+    from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
     from holosoma.utils.path import resolve_data_file_path
-except Exception:
-    print(json.dumps({}))
+    from holosoma_inference.utils.policy_contract import (
+        PolicyContractError,
+        effective_motion_transition_settings_from_metadata,
+    )
+except Exception as exc:
+    print(
+        json.dumps(
+            {
+                "checkpoint_metadata_error": (
+                    f"checkpoint metadata dependency import failed: {type(exc).__name__}: {exc}"
+                )
+            }
+        )
+    )
     sys.exit(0)
 
 checkpoint_ref = sys.argv[1]
 script_dir = Path(sys.argv[2]).resolve()
+expected_checkpoint_sha256 = sys.argv[3]
 retarget_root = script_dir / "src" / "holosoma_retargeting"
 holosoma_root = script_dir / "src" / "holosoma"
 
@@ -534,14 +552,36 @@ def resolve_saved_path(raw_path: str | None) -> str | None:
 
 
 try:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
-        blob = torch.load(checkpoint_path, map_location="cpu")
-except Exception:
-    print(json.dumps({}))
+    blob, checkpoint_sha256 = load_verified_torch_checkpoint(
+        checkpoint_ref,
+        expected_sha256=expected_checkpoint_sha256,
+        map_location="cpu",
+    )
+except Exception as exc:
+    print(
+        json.dumps(
+            {
+                "checkpoint_metadata_error": (
+                    f"checkpoint metadata load/authentication failed: {type(exc).__name__}: {exc}"
+                )
+            }
+        )
+    )
     sys.exit(0)
 
+if not isinstance(blob, dict):
+    print(json.dumps({"checkpoint_metadata_error": "checkpoint payload is not a mapping"}))
+    sys.exit(0)
 experiment_config = blob.get("experiment_config", {})
+try:
+    transition_settings = effective_motion_transition_settings_from_metadata(blob)
+except PolicyContractError as exc:
+    print(json.dumps({"motion_transition_contract_error": str(exc)}))
+    sys.exit(0)
+
+if not isinstance(experiment_config, Mapping):
+    print(json.dumps({"checkpoint_metadata_error": "checkpoint experiment_config is not a mapping"}))
+    sys.exit(0)
 motion_cfg = (
     experiment_config.get("command", {})
     .get("setup_terms", {})
@@ -549,7 +589,14 @@ motion_cfg = (
     .get("params", {})
     .get("motion_config", {})
 )
-robot_cfg = experiment_config.get("robot", {}).get("object", {})
+robot = experiment_config.get("robot", {})
+if not isinstance(motion_cfg, Mapping) or not isinstance(robot, Mapping):
+    print(json.dumps({"checkpoint_metadata_error": "checkpoint motion_config/robot is malformed"}))
+    sys.exit(0)
+robot_cfg = robot.get("object", {})
+if not isinstance(robot_cfg, Mapping):
+    print(json.dumps({"checkpoint_metadata_error": "checkpoint robot.object is malformed"}))
+    sys.exit(0)
 
 motion_path = motion_cfg.get("motion_dir") or motion_cfg.get("motion_file")
 object_urdf_path = robot_cfg.get("object_urdf_path")
@@ -557,6 +604,7 @@ object_urdf_path = robot_cfg.get("object_urdf_path")
 print(
     json.dumps(
         {
+            "checkpoint_sha256": checkpoint_sha256,
             "motion_path": resolve_saved_path(motion_path),
             "saved_motion_path": motion_path,
             "motion_clip_name": motion_cfg.get("motion_clip_name"),
@@ -564,8 +612,12 @@ print(
             "saved_object_urdf_path": object_urdf_path,
             "start_at_timestep_zero_prob": motion_cfg.get("start_at_timestep_zero_prob"),
             "freeze_at_timestep_zero_prob": motion_cfg.get("freeze_at_timestep_zero_prob"),
-            "enable_default_pose_prepend": motion_cfg.get("enable_default_pose_prepend"),
-            "default_pose_prepend_duration_s": motion_cfg.get("default_pose_prepend_duration_s"),
+            "transition_source_semantics": transition_settings["source_semantics"],
+            "motion_transition_contract_sha256": transition_settings["contract_sha256"],
+            "effective_enable_default_pose_prepend": transition_settings["prepend"]["applied"],
+            "effective_default_pose_prepend_duration_s": transition_settings["prepend"]["duration_s"],
+            "effective_enable_default_pose_append": transition_settings["append"]["applied"],
+            "effective_default_pose_append_duration_s": transition_settings["append"]["duration_s"],
             "reset_noise_scale": (
                 ((motion_cfg.get("noise_to_initial_pose") or {}).get("overall_noise_scale"))
                 if isinstance(motion_cfg.get("noise_to_initial_pose"), dict)
@@ -853,6 +905,28 @@ if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
   fi
 fi
 
+# Resolve/download once through a stable no-follow descriptor and publish the
+# validated bytes under their digest. Every later checkpoint consumer is also
+# given this digest, so replacing even the content-addressed path fails closed.
+TEACHER_CHECKPOINT_SOURCE="${TEACHER_CHECKPOINT}"
+TEACHER_CHECKPOINT_CACHE_ROOT="${TEACHER_CHECKPOINT_CACHE_ROOT:-${SCRIPT_DIR}/.checkpoint_cache/infer_box_tracking}"
+TEACHER_CHECKPOINT="$(
+  "${PYTHON_BIN}" scripts/resolve_exact_checkpoint.py \
+    --ref "${TEACHER_CHECKPOINT_SOURCE}" \
+    --cache-root "${TEACHER_CHECKPOINT_CACHE_ROOT}"
+)"
+TEACHER_CHECKPOINT_SHA256="$(basename "${TEACHER_CHECKPOINT}" .pt)"
+if [[ ! "${TEACHER_CHECKPOINT_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "[ERROR] Exact checkpoint resolver did not return a content-addressed .pt path: ${TEACHER_CHECKPOINT}" >&2
+  exit 2
+fi
+if [[ -n "${TEACHER_CHECKPOINT_EXPECTED_SHA256:-}" && "${TEACHER_CHECKPOINT_SHA256}" != "${TEACHER_CHECKPOINT_EXPECTED_SHA256}" ]]; then
+  echo "[ERROR] Resolved teacher SHA256 mismatch: actual=${TEACHER_CHECKPOINT_SHA256} expected=${TEACHER_CHECKPOINT_EXPECTED_SHA256}" >&2
+  exit 2
+fi
+export HOLOSOMA_EXPECTED_EVALUATION_CHECKPOINT_SHA256="${TEACHER_CHECKPOINT_SHA256}"
+echo "[INFO] Pinned exact teacher checkpoint: source=${TEACHER_CHECKPOINT_SOURCE} local=${TEACHER_CHECKPOINT} sha256=${TEACHER_CHECKPOINT_SHA256}"
+
 DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_carry" \
@@ -893,13 +967,31 @@ CHECKPOINT_SAVED_OBJECT_URDF=""
 CHECKPOINT_SAVED_OBJECT_URDF_RAW=""
 CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB=""
 CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB=""
-CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND=""
-CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S=""
+CHECKPOINT_TRANSITION_SOURCE_SEMANTICS=""
+CHECKPOINT_MOTION_TRANSITION_CONTRACT_SHA256=""
+CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_PREPEND=""
+CHECKPOINT_EFFECTIVE_DEFAULT_POSE_PREPEND_DURATION_S=""
+CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_APPEND=""
+CHECKPOINT_EFFECTIVE_DEFAULT_POSE_APPEND_DURATION_S=""
+CHECKPOINT_MOTION_TRANSITION_CONTRACT_ERROR=""
+CHECKPOINT_METADATA_ERROR=""
 CHECKPOINT_SAVED_RESET_NOISE_SCALE=""
-CHECKPOINT_DEFAULTS_JSON="$(load_checkpoint_saved_motion_defaults "${TEACHER_CHECKPOINT}")"
-if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" ]]; then
+CHECKPOINT_METADATA_SHA256=""
+CHECKPOINT_DEFAULTS_JSON="$(
+  load_checkpoint_saved_motion_defaults \
+    "${TEACHER_CHECKPOINT}" \
+    "${TEACHER_CHECKPOINT_SHA256}"
+)"
+if [[ -z "${CHECKPOINT_DEFAULTS_JSON}" || "${CHECKPOINT_DEFAULTS_JSON}" == "{}" ]]; then
+  echo "[ERROR] Failed to read/authenticate checkpoint metadata; refusing to silently disable motion transitions." >&2
+  exit 2
+fi
+if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" ]]; then
   while IFS='=' read -r key value; do
     case "${key}" in
+      checkpoint_sha256)
+        CHECKPOINT_METADATA_SHA256="${value}"
+        ;;
       motion_path)
         CHECKPOINT_SAVED_MOTION_PATH="${value}"
         ;;
@@ -921,11 +1013,29 @@ if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" 
       freeze_at_timestep_zero_prob)
         CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB="${value}"
         ;;
-      enable_default_pose_prepend)
-        CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND="${value}"
+      transition_source_semantics)
+        CHECKPOINT_TRANSITION_SOURCE_SEMANTICS="${value}"
         ;;
-      default_pose_prepend_duration_s)
-        CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S="${value}"
+      motion_transition_contract_sha256)
+        CHECKPOINT_MOTION_TRANSITION_CONTRACT_SHA256="${value}"
+        ;;
+      effective_enable_default_pose_prepend)
+        CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_PREPEND="${value}"
+        ;;
+      effective_default_pose_prepend_duration_s)
+        CHECKPOINT_EFFECTIVE_DEFAULT_POSE_PREPEND_DURATION_S="${value}"
+        ;;
+      effective_enable_default_pose_append)
+        CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_APPEND="${value}"
+        ;;
+      effective_default_pose_append_duration_s)
+        CHECKPOINT_EFFECTIVE_DEFAULT_POSE_APPEND_DURATION_S="${value}"
+        ;;
+      motion_transition_contract_error)
+        CHECKPOINT_MOTION_TRANSITION_CONTRACT_ERROR="${value}"
+        ;;
+      checkpoint_metadata_error)
+        CHECKPOINT_METADATA_ERROR="${value}"
         ;;
       reset_noise_scale)
         CHECKPOINT_SAVED_RESET_NOISE_SCALE="${value}"
@@ -938,10 +1048,18 @@ import os
 
 try:
     payload = json.loads(os.environ.get("CHECKPOINT_DEFAULTS_JSON", "{}"))
-except Exception:
-    payload = {}
+except Exception as exc:
+    print(
+        "checkpoint_metadata_error="
+        f"checkpoint metadata helper returned invalid JSON: {type(exc).__name__}: {exc}"
+    )
+    raise SystemExit(0)
+if not isinstance(payload, dict):
+    print("checkpoint_metadata_error=checkpoint metadata helper JSON is not an object")
+    raise SystemExit(0)
 
 for key in (
+    "checkpoint_sha256",
     "motion_path",
     "saved_motion_path",
     "motion_clip_name",
@@ -949,8 +1067,14 @@ for key in (
     "saved_object_urdf_path",
     "start_at_timestep_zero_prob",
     "freeze_at_timestep_zero_prob",
-    "enable_default_pose_prepend",
-    "default_pose_prepend_duration_s",
+    "transition_source_semantics",
+    "motion_transition_contract_sha256",
+    "effective_enable_default_pose_prepend",
+    "effective_default_pose_prepend_duration_s",
+    "effective_enable_default_pose_append",
+    "effective_default_pose_append_duration_s",
+    "motion_transition_contract_error",
+    "checkpoint_metadata_error",
     "reset_noise_scale",
 ):
     value = payload.get(key)
@@ -959,6 +1083,21 @@ for key in (
     print(f"{key}={value}")
 PY
   )
+fi
+
+if [[ "${CHECKPOINT_METADATA_SHA256}" != "${TEACHER_CHECKPOINT_SHA256}" ]]; then
+  echo "[ERROR] Checkpoint metadata reader SHA256 mismatch: metadata=${CHECKPOINT_METADATA_SHA256} expected=${TEACHER_CHECKPOINT_SHA256}" >&2
+  exit 2
+fi
+
+if [[ -n "${CHECKPOINT_METADATA_ERROR}" ]]; then
+  echo "[ERROR] Checkpoint metadata could not be authenticated: ${CHECKPOINT_METADATA_ERROR}" >&2
+  exit 2
+fi
+if [[ -n "${CHECKPOINT_MOTION_TRANSITION_CONTRACT_ERROR}" ]]; then
+  echo "[ERROR] Checkpoint motion-transition contract is unusable: ${CHECKPOINT_MOTION_TRANSITION_CONTRACT_ERROR}" >&2
+  echo "[ERROR] Raw requested prepend/append flags are not an effective training timeline. Re-save/re-export the checkpoint with the current contract format." >&2
+  exit 2
 fi
 
 MOTION_SELECTION_SOURCE="infer_dataset_default"
@@ -1264,10 +1403,16 @@ if [[ -z "${FREEZE_AT_TIMESTEP_ZERO_PROB+x}" || -z "${FREEZE_AT_TIMESTEP_ZERO_PR
   FREEZE_AT_TIMESTEP_ZERO_PROB="${CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}"
 fi
 if [[ -z "${ENABLE_DEFAULT_POSE_PREPEND+x}" || -z "${ENABLE_DEFAULT_POSE_PREPEND}" ]]; then
-  ENABLE_DEFAULT_POSE_PREPEND="${CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND:-False}"
+  ENABLE_DEFAULT_POSE_PREPEND="${CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_PREPEND:-False}"
 fi
 if [[ -z "${DEFAULT_POSE_PREPEND_DURATION_S+x}" || -z "${DEFAULT_POSE_PREPEND_DURATION_S}" ]]; then
-  DEFAULT_POSE_PREPEND_DURATION_S="${CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S:-0.0}"
+  DEFAULT_POSE_PREPEND_DURATION_S="${CHECKPOINT_EFFECTIVE_DEFAULT_POSE_PREPEND_DURATION_S:-0.0}"
+fi
+if [[ -z "${ENABLE_DEFAULT_POSE_APPEND+x}" || -z "${ENABLE_DEFAULT_POSE_APPEND}" ]]; then
+  ENABLE_DEFAULT_POSE_APPEND="${CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_APPEND:-False}"
+fi
+if [[ -z "${DEFAULT_POSE_APPEND_DURATION_S+x}" || -z "${DEFAULT_POSE_APPEND_DURATION_S}" ]]; then
+  DEFAULT_POSE_APPEND_DURATION_S="${CHECKPOINT_EFFECTIVE_DEFAULT_POSE_APPEND_DURATION_S:-0.0}"
 fi
 if [[ -z "${RESET_NOISE_SCALE+x}" || -z "${RESET_NOISE_SCALE}" ]]; then
   RESET_NOISE_SCALE="${CHECKPOINT_SAVED_RESET_NOISE_SCALE:-0.0}"
@@ -1339,12 +1484,12 @@ if [[ -d "${MOTION_DIR}" && -n "${MOTION_CLIP_NAME}" && ! -f "${MOTION_DIR}/${MO
 fi
 
 if [[ "${LEGACY_OBS_ENABLED}" == "1" || "${HEIGHTMAP_REQUIRED}" == "1" ]]; then
-  "${PYTHON_BIN}" - <<'PY' "${TEACHER_CHECKPOINT}" "${LEGACY_OBS_ENABLED}" "${HEIGHTMAP_REQUIRED}" || exit 2
+  "${PYTHON_BIN}" - <<'PY' "${TEACHER_CHECKPOINT}" "${LEGACY_OBS_ENABLED}" "${HEIGHTMAP_REQUIRED}" "${TEACHER_CHECKPOINT_SHA256}" || exit 2
 import sys
 import tempfile
 from pathlib import Path
 
-import torch
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 
 def parse_bool(v: str) -> bool:
@@ -1377,7 +1522,7 @@ def _parse_wandb_reference(reference: str) -> tuple[str, str]:
     return f"{entity}/{project}/{run_id}", ckpt_name
 
 
-def load_payload(checkpoint_ref: str):
+def load_payload(checkpoint_ref: str, expected_sha256: str):
     if checkpoint_ref.startswith("wandb://"):
         import wandb
 
@@ -1388,16 +1533,26 @@ def load_payload(checkpoint_ref: str):
             ckpt_path = Path(downloaded.name)
             if not ckpt_path.is_absolute():
                 ckpt_path = (Path.cwd() / ckpt_path).resolve()
-            payload = torch.load(ckpt_path, map_location="cpu")
+            payload, _checkpoint_sha256 = load_verified_torch_checkpoint(
+                ckpt_path,
+                expected_sha256=expected_sha256,
+                map_location="cpu",
+            )
             return payload
-    return torch.load(checkpoint_ref, map_location="cpu")
+    payload, _checkpoint_sha256 = load_verified_torch_checkpoint(
+        checkpoint_ref,
+        expected_sha256=expected_sha256,
+        map_location="cpu",
+    )
+    return payload
 
 
 checkpoint_ref = sys.argv[1]
 require_legacy = parse_bool(sys.argv[2])
 require_heightmap = parse_bool(sys.argv[3])
+expected_checkpoint_sha256 = sys.argv[4]
 
-payload = load_payload(checkpoint_ref)
+payload = load_payload(checkpoint_ref, expected_checkpoint_sha256)
 cfg = payload.get("experiment_config")
 if not isinstance(cfg, dict):
     raise SystemExit(f"[ERROR] checkpoint has no experiment_config dict: {checkpoint_ref}")
@@ -1496,6 +1651,8 @@ cmd+=(
   --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${ENABLE_DEFAULT_POSE_PREPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
+  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${ENABLE_DEFAULT_POSE_APPEND}"
+  --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${DEFAULT_POSE_APPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
 )
 
@@ -1551,8 +1708,12 @@ echo "[INFO] checkpoint_saved_object_urdf=${CHECKPOINT_SAVED_OBJECT_URDF:-<none>
 echo "[INFO] checkpoint_saved_object_urdf_raw=${CHECKPOINT_SAVED_OBJECT_URDF_RAW:-<none>}"
 echo "[INFO] checkpoint_saved_start_at_timestep_zero_prob=${CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB:-<none>}"
 echo "[INFO] checkpoint_saved_freeze_at_timestep_zero_prob=${CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB:-<none>}"
-echo "[INFO] checkpoint_saved_enable_default_pose_prepend=${CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND:-<none>}"
-echo "[INFO] checkpoint_saved_default_pose_prepend_duration_s=${CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S:-<none>}"
+echo "[INFO] checkpoint_transition_source_semantics=${CHECKPOINT_TRANSITION_SOURCE_SEMANTICS:-<none>}"
+echo "[INFO] checkpoint_motion_transition_contract_sha256=${CHECKPOINT_MOTION_TRANSITION_CONTRACT_SHA256:-<none>}"
+echo "[INFO] checkpoint_effective_enable_default_pose_prepend=${CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_PREPEND:-<none>}"
+echo "[INFO] checkpoint_effective_default_pose_prepend_duration_s=${CHECKPOINT_EFFECTIVE_DEFAULT_POSE_PREPEND_DURATION_S:-<none>}"
+echo "[INFO] checkpoint_effective_enable_default_pose_append=${CHECKPOINT_EFFECTIVE_ENABLE_DEFAULT_POSE_APPEND:-<none>}"
+echo "[INFO] checkpoint_effective_default_pose_append_duration_s=${CHECKPOINT_EFFECTIVE_DEFAULT_POSE_APPEND_DURATION_S:-<none>}"
 echo "[INFO] checkpoint_saved_reset_noise_scale=${CHECKPOINT_SAVED_RESET_NOISE_SCALE:-<none>}"
 echo "[INFO] motion_dir_source=${MOTION_SELECTION_SOURCE}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
@@ -1577,6 +1738,7 @@ if is_truthy "${VISER_DEFER_INIT}"; then
 fi
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
+echo "[INFO] enable_default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB} freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB} reset_noise_scale=${RESET_NOISE_SCALE}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"

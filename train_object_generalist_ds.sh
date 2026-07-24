@@ -1,6 +1,146 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Scan the untouched argv before sourcing helpers or reading assets.  Tyro is
+# later-wins, so every launcher/provenance-owned option must be rejected in
+# both --name=value and --name value spellings (including underscore aliases).
+reject_generalist_owned_cli_overrides() {
+  local raw_arg option canonical_option
+  for raw_arg in "$@"; do
+    option=${raw_arg%%=*}
+    canonical_option=${option,,}
+    canonical_option=${canonical_option//_/-}
+    case "${canonical_option}" in
+      --command.setup-terms.motion-command.params.motion-config.motion-file|\
+      --robot.object.object-urdf-path|\
+      --training.checkpoint|\
+      --training.policy-init-checkpoint|\
+      --training.export-onnx|\
+      --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root|\
+      --reward.terms.offline-contact-guidance.params.contact-export-root|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-alpha|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps|\
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg|\
+      --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation|\
+      *.rollout-reference-root|\
+      command:*|\
+      reward:*)
+        echo "[ERROR] ${option} is provenance-owned and cannot be overridden in EXTRA_ARGS." >&2
+        echo "[ERROR] Use launcher environment inputs before launch; raw Tyro tails may not replace audited values." >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+reject_generalist_owned_cli_overrides "$@" || exit
+unset -f reject_generalist_owned_cli_overrides
+
+canonicalize_bounded_positive_integer() {
+  local variable_name="$1" maximum="$2" error_text="$3"
+  local raw_value="${!variable_name}" normalized leading_zero_prefix
+  local LC_ALL=C
+  if [[ ! "${raw_value}" =~ ^[0-9]+$ ]]; then
+    echo "${error_text} Got: ${raw_value}" >&2
+    return 2
+  fi
+  if (( ${#raw_value} > 64 )); then
+    echo "${error_text} Got: <overlong-${#raw_value}-digit-integer>" >&2
+    return 2
+  fi
+  leading_zero_prefix=${raw_value%%[!0]*}
+  normalized=${raw_value#"${leading_zero_prefix}"}
+  [[ -n "${normalized}" ]] || normalized=0
+  if [[ "${normalized}" == 0 \
+        || ${#normalized} -gt ${#maximum} \
+        || ( ${#normalized} -eq ${#maximum} && "${normalized}" > "${maximum}" ) ]]; then
+    echo "${error_text} Got: ${raw_value}" >&2
+    return 2
+  fi
+  printf -v "${variable_name}" '%s' "${normalized}"
+}
+
+# Resolve deployment-affecting contracts before sourcing helpers, inspecting
+# assets, computing provenance, or contacting remote systems.  The inference
+# runtime cannot reconstruct t1-aligned segment commands, so an ONNX export of
+# that training mode would be unusable by construction.
+EXPORT_ONNX=${EXPORT_ONNX:-True}
+case "${EXPORT_ONNX,,}" in
+  1|true|yes|on)
+    EXPORT_ONNX=True
+    ;;
+  0|false|no|off)
+    EXPORT_ONNX=False
+    ;;
+  *)
+    echo "[ERROR] EXPORT_ONNX must be a boolean. Got: ${EXPORT_ONNX}" >&2
+    exit 2
+    ;;
+esac
+
+# Contact exporters index physical rollout steps, whereas the multi-clip
+# runtime prepend holds the motion clock at zero.  Keep this as an explicit,
+# provenance-owned launch contract: validating compensated sidecars while the
+# live MotionCommand silently uses the legacy uncompensated default shifts all
+# contact windows by the prepend duration.
+CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION:-False}
+case "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION,,}" in
+  1|true|yes|on)
+    CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True
+    CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION_PROVENANCE=true
+    ;;
+  0|false|no|off)
+    CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=False
+    CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION_PROVENANCE=false
+    ;;
+  *)
+    echo "[ERROR] CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION must be a boolean. Got: ${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" >&2
+    exit 2
+    ;;
+esac
+
+CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-tracking_error}
+case "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" in
+  tracking_error)
+    ;;
+  t1_aligned_segment)
+    if [[ "${EXPORT_ONNX}" == "True" ]]; then
+      echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=t1_aligned_segment is not implemented by inference and cannot be used with EXPORT_ONNX=True." >&2
+      echo "[ERROR] Set EXPORT_ONNX=False to train this mode, or use tracking_error for a deployable policy." >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must be exactly tracking_error or t1_aligned_segment. Got: ${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" >&2
+    exit 2
+    ;;
+esac
+
+CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  canonicalize_bounded_positive_integer \
+    CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS 1000000 \
+    '[ERROR] CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS must be an integer in [1, 1000000].' || exit
+fi
+
+CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]]; then
+  _sparse_zero_yaw_raw="${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}"
+  if [[ ! "${_sparse_zero_yaw_raw}" =~ ^(([0-9]+([.][0-9]*)?)|([.][0-9]+))([eE][+-]?[0-9]+)?$ ]]; then
+    echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG must be a finite number in [0, 180]. Got: ${_sparse_zero_yaw_raw}" >&2
+    exit 2
+  fi
+  if ! LC_ALL=C awk -v value="${_sparse_zero_yaw_raw}" 'BEGIN { numeric = value + 0; exit !(numeric >= 0 && numeric <= 180) }'; then
+    echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG must be a finite number in [0, 180]. Got: ${_sparse_zero_yaw_raw}" >&2
+    exit 2
+  fi
+  unset _sparse_zero_yaw_raw
+fi
+unset -f canonicalize_bounded_positive_integer
+
 # DS-box object generalist training.
 #
 # This launcher prepares a trainable motion bank from:
@@ -16,10 +156,6 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 
-SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
-if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
-  export PATH="${SIM_ENV_BIN}:${PATH}"
-fi
 source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 
@@ -130,12 +266,18 @@ if (( NPROC > AVAILABLE_GPU_COUNT )); then
   echo "[ERROR] Requested NPROC=${NPROC}, but only ${AVAILABLE_GPU_COUNT} CUDA GPU(s) are available." >&2
   exit 2
 fi
-PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
-NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
-MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR_EXPLICIT=0
+MASTER_PORT_EXPLICIT=0
+if [[ -n "${MASTER_ADDR+x}" && -n "${MASTER_ADDR}" ]]; then
+  MASTER_ADDR_EXPLICIT=1
+fi
+if [[ -n "${MASTER_PORT+x}" && -n "${MASTER_PORT}" ]]; then
+  MASTER_PORT_EXPLICIT=1
+fi
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 if [[ ! "${NNODES}" =~ ^[0-9]+$ || "${NNODES}" == "0" ]]; then
   echo "[ERROR] NNODES must be a positive integer. Got: ${NNODES}" >&2
   exit 2
@@ -148,8 +290,31 @@ if (( NODE_RANK >= NNODES )); then
   echo "[ERROR] NODE_RANK=${NODE_RANK} must be smaller than NNODES=${NNODES}." >&2
   exit 2
 fi
-if (( NNODES > 1 )) && [[ -z "${MASTER_ADDR}" ]]; then
-  echo "[ERROR] MASTER_ADDR is required for multi-node torchrun." >&2
+if ! [[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] || (( MASTER_PORT < 1 || MASTER_PORT > 65535 )); then
+  echo "[ERROR] MASTER_PORT must be an integer in [1, 65535]. Got: ${MASTER_PORT}" >&2
+  exit 2
+fi
+if (( NNODES > 1 )) && (( MASTER_ADDR_EXPLICIT == 0 || MASTER_PORT_EXPLICIT == 0 )); then
+  echo "[ERROR] Multi-node launch requires explicit shared MASTER_ADDR and MASTER_PORT." >&2
+  echo "[ERROR] Per-node loopback/random defaults cannot form one torchrun rendezvous." >&2
+  exit 2
+fi
+GLOBAL_WORLD_SIZE=$((NPROC * NNODES))
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+  echo "[ERROR] PER_GPU_ENVS must be a positive integer. Got: ${PER_GPU_ENVS}" >&2
+  exit 2
+fi
+# ``training.num_envs`` is a global count. train_agent divides it by the
+# global world size exactly once, so the launcher default must include every
+# node rather than only this node's local workers.
+NUM_ENVS=${NUM_ENVS:-$((GLOBAL_WORLD_SIZE * PER_GPU_ENVS))}
+if ! [[ "${NUM_ENVS}" =~ ^[0-9]+$ ]] || (( NUM_ENVS < GLOBAL_WORLD_SIZE )); then
+  echo "[ERROR] NUM_ENVS must be an integer >= global world size (${GLOBAL_WORLD_SIZE}). Got: ${NUM_ENVS}" >&2
+  exit 2
+fi
+if (( NUM_ENVS % GLOBAL_WORLD_SIZE != 0 )); then
+  echo "[ERROR] NUM_ENVS must be divisible by global world size (${GLOBAL_WORLD_SIZE}). Got: ${NUM_ENVS}" >&2
   exit 2
 fi
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
@@ -168,9 +333,6 @@ DISABLE_ACTOR_HISTORY=${DISABLE_ACTOR_HISTORY:-True}
 DISABLE_CRITIC_HISTORY=${DISABLE_CRITIC_HISTORY:-True}
 POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-}}
 TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT:-}
-CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
-CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
-CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
@@ -208,6 +370,23 @@ SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
+HOLOSOMA_RANK_VISIBLE_DEVICES=${HOLOSOMA_RANK_VISIBLE_DEVICES:-0}
+case "$(echo "${HOLOSOMA_RANK_VISIBLE_DEVICES}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    HOLOSOMA_RANK_VISIBLE_DEVICES=1
+    ;;
+  0|false|no|off|"")
+    HOLOSOMA_RANK_VISIBLE_DEVICES=0
+    ;;
+  *)
+    echo "[ERROR] HOLOSOMA_RANK_VISIBLE_DEVICES must be a boolean. Got: ${HOLOSOMA_RANK_VISIBLE_DEVICES}" >&2
+    exit 2
+    ;;
+esac
+export HOLOSOMA_RANK_VISIBLE_DEVICES
+unset HOLOSOMA_ORIGINAL_LOCAL_RANK
+unset HOLOSOMA_ORIGINAL_LOCAL_WORLD_SIZE
+unset HOLOSOMA_ORIGINAL_CUDA_VISIBLE_DEVICES
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 
@@ -282,8 +461,10 @@ REFERENCE_OBJECT_ORI_SIGMA=${REFERENCE_OBJECT_ORI_SIGMA:-0.4}
 GENERALIST_LIMITS_DOF_POS_WEIGHT=${GENERALIST_LIMITS_DOF_POS_WEIGHT:--10.0}
 
 if [[ -n "${TRAINING_SEED}" ]]; then
-  if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then
-    echo "[ERROR] TRAINING_SEED/SEED must be an integer. Got: ${TRAINING_SEED}" >&2
+  if [[ ! "${TRAINING_SEED}" =~ ^[0-9]+$ ]] \
+    || (( ${#TRAINING_SEED} > 10 )) \
+    || (( 10#${TRAINING_SEED} > 4294967295 )); then
+    echo "[ERROR] TRAINING_SEED/SEED must be an integer in [0, 4294967295]. Got: ${TRAINING_SEED}" >&2
     exit 2
   fi
 fi
@@ -334,11 +515,11 @@ fi
 
 if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
   case "${RANDOMIZATION_PRESET}" in
-    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay)
+    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay|g1_29dof_wbt_w_object_teacher_state_robust)
       ;;
     *)
       echo "[ERROR] RANDOMIZATION/RANDOMIZATION_PRESET must be one of:" >&2
-      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay" >&2
+      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay, g1_29dof_wbt_w_object_teacher_state_robust" >&2
       echo "[ERROR] Got: ${RANDOMIZATION_PRESET}" >&2
       exit 2
       ;;
@@ -2106,6 +2287,10 @@ case "${DEBUG_MODE}" in
 esac
 
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
+  if (( NNODES != 1 )); then
+    echo "[ERROR] DEBUG_MODE=${DEBUG_MODE} is a single-node/single-process contract; got NNODES=${NNODES}." >&2
+    exit 2
+  fi
   if [[ -n "${OBJECT_SPEC_PATH}" && -f "${OBJECT_SPEC_PATH}" ]]; then
     DEBUG_URDF_COUNT=$("${PYTHON_BIN}" - <<'PY' "${OBJECT_SPEC_PATH}"
 import json
@@ -2144,6 +2329,29 @@ PY
   fi
   ENABLE_VISER=1
   NPROC=1
+  GLOBAL_WORLD_SIZE=1
+fi
+
+# DEBUG_MODE may intentionally reduce the worker topology after the initial
+# launcher defaults were resolved. Validate the rank-offset seed range and the
+# global env contract against this final topology immediately before
+# constructing the train command.
+if [[ -n "${TRAINING_SEED}" ]]; then
+  MAX_BASE_SEED=$((4294967295 - GLOBAL_WORLD_SIZE + 1))
+  if (( 10#${TRAINING_SEED} > MAX_BASE_SEED )); then
+    echo "[ERROR] TRAINING_SEED plus rank offsets must stay <= 4294967295. Got seed=${TRAINING_SEED}, world_size=${GLOBAL_WORLD_SIZE}, max_base=${MAX_BASE_SEED}" >&2
+    exit 2
+  fi
+  unset MAX_BASE_SEED
+fi
+
+if ! [[ "${NUM_ENVS}" =~ ^[0-9]+$ ]] || (( NUM_ENVS < GLOBAL_WORLD_SIZE )); then
+  echo "[ERROR] Final NUM_ENVS must be an integer >= global world size (${GLOBAL_WORLD_SIZE}). Got: ${NUM_ENVS}" >&2
+  exit 2
+fi
+if (( NUM_ENVS % GLOBAL_WORLD_SIZE != 0 )); then
+  echo "[ERROR] Final NUM_ENVS must be divisible by global world size (${GLOBAL_WORLD_SIZE}). Got: ${NUM_ENVS}" >&2
+  exit 2
 fi
 
 if [[ "${ENABLE_VISER}" == "1" ]]; then
@@ -2220,6 +2428,142 @@ if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
     ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
   fi
 fi
+if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
+  ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=$(realpath -m "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}")
+  if [[ -z "${CONTACT_EXPORT_ROOT}" ]]; then
+    echo "[ERROR] ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT is an active data input but CONTACT_EXPORT_ROOT is unset." >&2
+    echo "[ERROR] Set CONTACT_EXPORT_ROOT so the complete contact tree is included in training provenance." >&2
+    exit 2
+  fi
+  if [[ "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" != "${CONTACT_EXPORT_CLIPS_ROOT}" ]]; then
+    echo "[ERROR] Adaptive-sampling contact data must use the provenance-bound CONTACT_EXPORT_ROOT tree." >&2
+    echo "[ERROR] adaptive=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT} expected=${CONTACT_EXPORT_CLIPS_ROOT}" >&2
+    exit 2
+  fi
+fi
+
+if [[ "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}" == "True" ]]; then
+  if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" != "1" || -z "${CONTACT_EXPORT_ROOT}" ]]; then
+    echo "[ERROR] CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True requires active offline contact guidance and CONTACT_EXPORT_ROOT." >&2
+    exit 2
+  fi
+  case "${DEFAULT_POSE_PREPEND_ENABLED,,}" in
+    1|true|yes|on)
+      ;;
+    *)
+      echo "[ERROR] CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True requires DEFAULT_POSE_PREPEND_ENABLED=True." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
+  echo "[ERROR] Pure-RL generalist provenance cannot claim teacher-free training while a teacher-rollout reference reward is active." >&2
+  echo "[ERROR] Use a non-rollout-reference reward config, or add an explicit rollout-reference asset manifest before launching." >&2
+  exit 2
+fi
+
+GENERALIST_CHECKPOINT_CACHE_ROOT=${GENERALIST_CHECKPOINT_CACHE_ROOT:-${TMPDIR:-/tmp}/holosoma-generalist-checkpoints-${USER:-unknown}}
+if [[ -n "${RESUME_CKPT}" ]]; then
+  RESUME_CKPT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/resolve_exact_checkpoint.py" \
+    --ref "${RESUME_CKPT}" \
+    --cache-root "${GENERALIST_CHECKPOINT_CACHE_ROOT}/training-resume")
+  echo "[INFO] Scientifically pinned training-resume checkpoint: ${RESUME_CKPT}"
+fi
+if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+  POLICY_INIT_CKPT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/resolve_exact_checkpoint.py" \
+    --ref "${POLICY_INIT_CKPT}" \
+    --cache-root "${GENERALIST_CHECKPOINT_CACHE_ROOT}/policy-init")
+  echo "[INFO] Scientifically pinned policy-init checkpoint: ${POLICY_INIT_CKPT}"
+fi
+
+TORCH_DIST_BACKEND=$(echo "${TORCH_DIST_BACKEND:-nccl}" | tr '[:upper:]' '[:lower:]')
+case "${TORCH_DIST_BACKEND}" in
+  nccl|gloo)
+    ;;
+  *)
+    echo "[ERROR] TORCH_DIST_BACKEND must be nccl or gloo. Got: ${TORCH_DIST_BACKEND}" >&2
+    exit 2
+    ;;
+esac
+hierarchical_reduce_normalized=$(echo "${HOLOSOMA_HIERARCHICAL_GRAD_REDUCE:-0}" | tr '[:upper:]' '[:lower:]')
+case "${hierarchical_reduce_normalized}" in
+  1|true|yes|on)
+    GENERALIST_NCCL_RUNTIME_REQUIRED=1
+    ;;
+  0|false|no|off|"")
+    GENERALIST_NCCL_RUNTIME_REQUIRED=0
+    ;;
+  *)
+    echo "[ERROR] HOLOSOMA_HIERARCHICAL_GRAD_REDUCE must be a boolean. Got: ${HOLOSOMA_HIERARCHICAL_GRAD_REDUCE}" >&2
+    exit 2
+    ;;
+esac
+if [[ "${TORCH_DIST_BACKEND}" == "nccl" ]]; then
+  GENERALIST_NCCL_RUNTIME_REQUIRED=1
+fi
+if [[ "${GENERALIST_NCCL_RUNTIME_REQUIRED}" == "1" ]]; then
+  if [[ -z "${NCCL_LIB_DIR:-}" || -z "${NCCL_LIB_SHA256:-}" ]]; then
+    echo "[ERROR] Scientific NCCL generalist training requires NCCL_LIB_DIR and NCCL_LIB_SHA256." >&2
+    echo "[ERROR] Launch through the verified distributed runtime, or set both to an explicitly pinned libnccl.so.2." >&2
+    exit 2
+  fi
+  GENERALIST_NCCL_RUNTIME_LIB="${NCCL_LIB_DIR}/libnccl.so.2"
+  if [[ ! -f "${GENERALIST_NCCL_RUNTIME_LIB}" ]]; then
+    echo "[ERROR] Pinned NCCL runtime is missing: ${GENERALIST_NCCL_RUNTIME_LIB}" >&2
+    exit 2
+  fi
+  GENERALIST_NCCL_ACTUAL_SHA256=$(sha256sum "${GENERALIST_NCCL_RUNTIME_LIB}" | awk '{print $1}')
+  if [[ "${GENERALIST_NCCL_ACTUAL_SHA256}" != "${NCCL_LIB_SHA256}" ]]; then
+    echo "[ERROR] Pinned NCCL SHA256 mismatch: expected=${NCCL_LIB_SHA256} actual=${GENERALIST_NCCL_ACTUAL_SHA256}" >&2
+    exit 2
+  fi
+  export LD_LIBRARY_PATH="${NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export LD_PRELOAD="${GENERALIST_NCCL_RUNTIME_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+  echo "[INFO] Scientific NCCL runtime verified: ${GENERALIST_NCCL_ACTUAL_SHA256}"
+fi
+
+PROVENANCE_CONTACT_ARGS=()
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  PROVENANCE_CONTACT_ARGS=(--contact-root "${CONTACT_EXPORT_ROOT}")
+fi
+PROVENANCE_POLICY_INIT_ARGS=()
+if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+  PROVENANCE_POLICY_INIT_ARGS=(--policy-init-checkpoint "${POLICY_INIT_CKPT}")
+fi
+PROVENANCE_TRAINING_RESUME_ARGS=()
+if [[ -n "${RESUME_CKPT}" ]]; then
+  PROVENANCE_TRAINING_RESUME_ARGS=(--training-resume-checkpoint "${RESUME_CKPT}")
+fi
+PROVENANCE_MOTION_SHARD_ARGS=()
+if [[ -z "${HOLOSOMA_MOTION_SHARD_MANIFEST:-}" \
+      && -n "${HOLOSOMA_RANK_LOCAL_MOTION_ROOT:-}" ]]; then
+  HOLOSOMA_MOTION_SHARD_MANIFEST="${HOLOSOMA_RANK_LOCAL_MOTION_ROOT%/}/manifest.json"
+fi
+if [[ -n "${HOLOSOMA_MOTION_SHARD_MANIFEST:-}" ]]; then
+  if [[ ! -f "${HOLOSOMA_MOTION_SHARD_MANIFEST}" ]]; then
+    echo "[ERROR] Rank-local motion shard manifest does not exist: ${HOLOSOMA_MOTION_SHARD_MANIFEST}" >&2
+    exit 2
+  fi
+  HOLOSOMA_MOTION_SHARD_MANIFEST=$(realpath "${HOLOSOMA_MOTION_SHARD_MANIFEST}")
+  export HOLOSOMA_MOTION_SHARD_MANIFEST
+  PROVENANCE_MOTION_SHARD_ARGS=(--motion-shard-manifest "${HOLOSOMA_MOTION_SHARD_MANIFEST}")
+fi
+export MOTION_DIR OBJECT_SPEC_PATH CONTACT_EXPORT_ROOT NPROC NNODES TORCH_DIST_BACKEND
+export HOLOSOMA_SOURCE_ROOT="${SCRIPT_DIR}"
+export NCCL_LIB_SHA256=${NCCL_LIB_SHA256:-}
+HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/compute_training_provenance.py" \
+  --training-regime pure_rl \
+  --motion-dir "${MOTION_DIR}" \
+  --object-map "${OBJECT_SPEC_PATH}" \
+  --contact-interval-runtime-prepend-compensation "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION_PROVENANCE}" \
+  "${PROVENANCE_CONTACT_ARGS[@]}" \
+  "${PROVENANCE_POLICY_INIT_ARGS[@]}" \
+  "${PROVENANCE_TRAINING_RESUME_ARGS[@]}" \
+  "${PROVENANCE_MOTION_SHARD_ARGS[@]}" \
+  --source-root "${SCRIPT_DIR}")
+export HOLOSOMA_TRAINING_PROVENANCE
+echo "[INFO] training_provenance=${HOLOSOMA_TRAINING_PROVENANCE}"
 
 default_pose_prepend_enabled_normalized=$(echo "${DEFAULT_POSE_PREPEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
 case "${default_pose_prepend_enabled_normalized}" in
@@ -2248,6 +2592,8 @@ echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_or
 echo "[INFO] limits_dof_pos weight=${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+echo "[INFO] contact_interval_runtime_prepend_compensation=${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}"
+echo "[INFO] export_onnx=${EXPORT_ONNX}"
 if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
   echo "[INFO] contact_aware_sparse_root_command_mode=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
 fi
@@ -2274,10 +2620,16 @@ fi
 if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
   echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 fi
-echo "[INFO] GPU_SELECTION=all-visible"
+TRAIN_ENTRY=src/holosoma/holosoma/train_agent.py
+if [[ "${HOLOSOMA_RANK_VISIBLE_DEVICES}" == "1" ]]; then
+  TRAIN_ENTRY=src/holosoma/holosoma/train_agent_rank_visible.py
+  echo "[INFO] GPU_SELECTION=rank-visible-per-worker"
+else
+  echo "[INFO] GPU_SELECTION=all-visible"
+fi
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
-echo "[INFO] NPROC=${NPROC} NNODES=${NNODES} NODE_RANK=${NODE_RANK} MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
-echo "[INFO] PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] NPROC=${NPROC} NNODES=${NNODES} NODE_RANK=${NODE_RANK} GLOBAL_WORLD_SIZE=${GLOBAL_WORLD_SIZE} MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
+echo "[INFO] PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS} effective_per_rank_envs=$((NUM_ENVS / GLOBAL_WORLD_SIZE))"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 echo "[INFO] actor_history_disabled=${DISABLE_ACTOR_HISTORY} critic_history_disabled=${DISABLE_CRITIC_HISTORY} policy_history_length=${POLICY_HISTORY_LENGTH:-<config-default>}"
 if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
@@ -2293,7 +2645,7 @@ echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COU
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 
 train_cmd=(
-  src/holosoma/holosoma/train_agent.py
+  "${TRAIN_ENTRY}"
   "exp:${EXP}"
   "command:${COMMAND_CONFIG}"
   "reward:${REWARD_CONFIG}"
@@ -2313,6 +2665,7 @@ train_cmd=(
   --observation-overrides.disable-actor-history "${DISABLE_ACTOR_HISTORY}"
   --observation-overrides.disable-critic-history "${DISABLE_CRITIC_HISTORY}"
   --algo.config.save-interval="${SAVE_INTERVAL}"
+  --training.export-onnx="${EXPORT_ONNX}"
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
@@ -2325,6 +2678,7 @@ train_cmd=(
   --reward.terms.limits-dof-pos.weight="${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
+  --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation="${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}"
 )
 if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
   train_cmd+=(
@@ -2445,7 +2799,7 @@ fi
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
 else
-  torchrun_args=(torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}")
+  torchrun_args=("${PYTHON_BIN}" -m torch.distributed.run --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}")
   if (( NNODES > 1 )); then
     torchrun_args+=(--nnodes="${NNODES}" --node_rank="${NODE_RANK}" --master_addr="${MASTER_ADDR}")
   fi

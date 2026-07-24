@@ -30,6 +30,11 @@ class RewardManager:
         Device where tensors should be allocated.
     """
 
+    # BaseTask uses this explicit capability instead of probing a reset call
+    # with an unsupported keyword.  Legacy/fake reward managers without the
+    # marker continue to receive the historical ``reset(env_ids)`` call.
+    supports_include_all_episode_extras = True
+
     def __init__(self, cfg: RewardManagerCfg, env: Any, device: str):
         self.cfg = cfg
         self.env = env
@@ -198,13 +203,23 @@ class RewardManager:
 
         return self._reward_buf
 
-    def reset(self, env_ids: torch.Tensor | None = None) -> dict[str, dict[str, torch.Tensor]]:
+    def reset(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        include_all: bool = True,
+    ) -> dict[str, dict[str, torch.Tensor]]:
         """Reset reward tracking and return episodic sums for logging.
 
         Parameters
         ----------
         env_ids : torch.Tensor or None, optional
             Environment IDs to reset. If ``None``, reset all environments.
+        include_all : bool, default=True
+            Whether to also snapshot full-batch ``episode_all`` and
+            ``raw_episode_all`` statistics.  Sparse rollout consumers set this
+            to ``False`` so a subset reset only reads and normalizes completed
+            rows.  The default preserves the historical Direct/FastSAC output.
 
         Returns
         -------
@@ -218,6 +233,9 @@ class RewardManager:
                     "raw_episode_all": {...},
                 }
         """
+        if not isinstance(include_all, bool):
+            raise TypeError("include_all must be a boolean.")
+
         extras: dict[str, dict[str, torch.Tensor]] = {
             "episode": {},
             "episode_all": {},
@@ -241,28 +259,51 @@ class RewardManager:
         def _clone(tensor: torch.Tensor) -> torch.Tensor:
             return tensor.detach().clone()
 
+        def _selected_normalized_snapshot(tensor: torch.Tensor) -> torch.Tensor:
+            """Copy and normalize only rows whose episodes completed."""
+
+            if env_ids_tensor is None:
+                snapshot = tensor.detach().clone()
+            else:
+                # Advanced tensor indexing owns its result, so zeroing the
+                # source buffers below cannot mutate the returned snapshot.
+                snapshot = tensor.detach()[env_ids_slice]
+            if snapshot.numel() > 0:
+                snapshot.div_(self.env.max_episode_length_s)
+            return snapshot
+
         # Populate scaled reward statistics
         for term_name in self._term_names:
-            rew_all = self._episode_sums[term_name] / self.env.max_episode_length_s
-            extras["episode_all"][f"rew_{term_name}"] = _clone(rew_all)
-            if env_ids_tensor is None:
-                extras["episode"][f"rew_{term_name}"] = _clone(rew_all)
+            episode_sum = self._episode_sums[term_name]
+            if include_all:
+                rew_all = episode_sum / self.env.max_episode_length_s
+                extras["episode_all"][f"rew_{term_name}"] = _clone(rew_all)
+                if env_ids_tensor is None:
+                    extras["episode"][f"rew_{term_name}"] = _clone(rew_all)
+                else:
+                    extras["episode"][f"rew_{term_name}"] = _clone(rew_all[env_ids_slice])
             else:
-                extras["episode"][f"rew_{term_name}"] = _clone(rew_all[env_ids_slice])
+                extras["episode"][f"rew_{term_name}"] = _selected_normalized_snapshot(episode_sum)
 
             # Reset episodic sums for the completed environments
-            self._episode_sums[term_name][env_ids_slice] = 0.0
+            episode_sum[env_ids_slice] = 0.0
 
         # Populate raw (unscaled) reward statistics
         for term_name in self._term_names:
-            rew_raw_all = self._episode_sums_raw[term_name] / self.env.max_episode_length_s
-            extras["raw_episode_all"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
-            if env_ids_tensor is None:
-                extras["raw_episode"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
+            raw_episode_sum = self._episode_sums_raw[term_name]
+            if include_all:
+                rew_raw_all = raw_episode_sum / self.env.max_episode_length_s
+                extras["raw_episode_all"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
+                if env_ids_tensor is None:
+                    extras["raw_episode"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
+                else:
+                    extras["raw_episode"][f"raw_rew_{term_name}"] = _clone(rew_raw_all[env_ids_slice])
             else:
-                extras["raw_episode"][f"raw_rew_{term_name}"] = _clone(rew_raw_all[env_ids_slice])
+                extras["raw_episode"][f"raw_rew_{term_name}"] = _selected_normalized_snapshot(
+                    raw_episode_sum
+                )
 
-            self._episode_sums_raw[term_name][env_ids_slice] = 0.0
+            raw_episode_sum[env_ids_slice] = 0.0
 
         # Reset stateful reward terms
         for instance in self._term_instances.values():

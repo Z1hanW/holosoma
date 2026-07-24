@@ -451,7 +451,7 @@ if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
   export PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-mujoco848}"
 fi
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
-export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-}"
 export HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION="${HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION:-0}"
 if ! is_truthy_env "$HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION"; then
   unset HOLOSOMA_POLICY_PERCEPTION_OBS_FILE
@@ -484,9 +484,6 @@ export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NO
 export USE_TRAINING_SIM_CONFIG="${USE_TRAINING_SIM_CONFIG:-1}"
 export HOLOSOMA_SKIP_STIFF_PROMPT="${HOLOSOMA_SKIP_STIFF_PROMPT:-1}"
 export POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-1}"
-export USE_ROOT_REFERENCE_AT_CLIP_START="${USE_ROOT_REFERENCE_AT_CLIP_START:-0}"
-export HOLOSOMA_RESET_TO_DEFAULT_POSE="${HOLOSOMA_RESET_TO_DEFAULT_POSE:-1}"
-export HOLOSOMA_DEFAULT_POSE_INIT="${HOLOSOMA_DEFAULT_POSE_INIT:-1}"
 export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
 export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
@@ -494,7 +491,6 @@ export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_RO
 export SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
 export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-1}"
 export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-1}"
-export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-training_default_pose}"
 export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 if [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" && "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" != \[* ]]; then
   MUJOCO_OBJECT_CONTACT_BODY_MARKERS="$(
@@ -613,52 +609,10 @@ if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
 fi
 if [[ -z "${INFERENCE_CONFIG:-}" ]]; then
   INFERENCE_CONFIG="$(
-    "$INFER_PYTHON_BIN" - <<'PY' "$MODEL_LOCAL"
-import json
-import sys
-
-import onnx
-
-model = onnx.load(sys.argv[1])
-input_dims = {
-    value.name: [dim.dim_value or dim.dim_param for dim in value.type.tensor_type.shape.dim]
-    for value in model.graph.input
-}
-obs_shape = input_dims.get("obs", [])
-obs_dim = obs_shape[1] if len(obs_shape) >= 2 and isinstance(obs_shape[1], int) else None
-metadata = {}
-for prop in model.metadata_props:
-    try:
-        metadata[prop.key] = json.loads(prop.value)
-    except Exception:
-        metadata[prop.key] = prop.value
-actor_input_dim = (
-    metadata.get("experiment_config", {})
-    .get("algo", {})
-    .get("config", {})
-    .get("module_dict", {})
-    .get("actor", {})
-    .get("input_dim")
-)
-if "perception_obs" in input_dims and obs_dim == 94 and actor_input_dim == [
-    "actor_obs_root_contact_aware",
-    "actor_obs_drop_button",
-    "actor_obs_proprio_with_actions_no_linvel",
-]:
-    print("g1-29dof-wbt-object-contact-aware-drop-button-depth-distill")
-    raise SystemExit(0)
-if "perception_obs" in input_dims and obs_dim == 96 and actor_input_dim == [
-    "actor_obs_root_contact_aware",
-    "actor_obs_proprio",
-    "actor_obs_actions",
-]:
-    print("g1-29dof-wbt-object-contact-aware-depth-distill")
-else:
-    print("g1-29dof-wbt-object-distill")
-PY
+    "$INFER_PYTHON_BIN" "$ROOT_DIR/scripts/mj_infer_inference_config.py" "$MODEL_LOCAL"
   )"
 fi
-export INFERENCE_CONFIG="${INFERENCE_CONFIG:-g1-29dof-wbt-object-distill}"
+export INFERENCE_CONFIG
 export RUN_SECONDS="${RUN_SECONDS:-0}"
 
 echo "[INFO] motion_file=$MOTION_FILE"

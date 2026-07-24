@@ -10,6 +10,23 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from prepare_as_rank_shards import (
+    MOTION_TRANSITION_SOURCE_KEY,
+    resolve_motion_transition_source,
+)
+
+
+_ENTRY_SINGLE_MESH_KEYS = (
+    "object_mesh_path",
+    "object_visual_mesh_path",
+    "object_collision_mesh_path",
+)
+_ENTRY_MULTI_MESH_KEYS = (
+    "object_mesh_paths",
+    "object_visual_mesh_paths",
+    "object_collision_mesh_paths",
+)
+
 
 def _resolve_path(raw: str, base_dir: Path) -> Path:
     path = Path(str(raw).strip()).expanduser()
@@ -82,10 +99,34 @@ def _canonicalize_one_link_urdf(src_urdf: Path, dst_urdf: Path) -> None:
     tree.write(dst_urdf, encoding="utf-8", xml_declaration=True)
 
 
-def prepare_single_slot_map(*, motion_dir: Path, object_map: Path, output_map: Path) -> tuple[int, int]:
+def prepare_single_slot_map(
+    *,
+    motion_dir: Path,
+    object_map: Path,
+    output_map: Path,
+    active_clip_ids: set[str] | None = None,
+) -> tuple[int, int]:
     metadata, clips = _load_clip_map(object_map)
     if not clips:
         raise ValueError(f"Object map has no clips: {object_map}")
+    if active_clip_ids is not None:
+        normalized_active = {str(clip_id) for clip_id in active_clip_ids}
+        missing = sorted(normalized_active.difference(clips))
+        if missing:
+            raise ValueError(
+                f"Object map is missing {len(missing)} active clip(s): {', '.join(missing[:10])}"
+            )
+        clips = {clip_id: clips[clip_id] for clip_id in sorted(normalized_active)}
+
+    transition_source = resolve_motion_transition_source(
+        metadata,
+        active_clip_count=len(clips),
+        infer_if_missing=True,
+        role=f"single-slot source map {object_map} {MOTION_TRANSITION_SOURCE_KEY}",
+    )
+    assert transition_source is not None
+    metadata = dict(metadata)
+    metadata[MOTION_TRANSITION_SOURCE_KEY] = transition_source
 
     output_dir = output_map.parent / "_single_slot_urdfs"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -122,10 +163,28 @@ def prepare_single_slot_map(*, motion_dir: Path, object_map: Path, output_map: P
             converted_count += 1
 
         entry["object_urdf_path"] = canonical_rel
-        raw_mesh = str(entry.get("object_mesh_path", "")).strip()
-        if raw_mesh:
-            mesh_path = _resolve_path(raw_mesh, object_map.parent)
-            entry["object_mesh_path"] = _relpath(mesh_path, motion_dir)
+        for key in _ENTRY_SINGLE_MESH_KEYS:
+            raw_mesh = str(entry.get(key, "")).strip()
+            if raw_mesh:
+                mesh_path = _resolve_path(raw_mesh, object_map.parent)
+                entry[key] = _relpath(mesh_path, motion_dir)
+        for key in _ENTRY_MULTI_MESH_KEYS:
+            raw_values = entry.get(key)
+            if raw_values is None:
+                continue
+            if isinstance(raw_values, str):
+                raw_values = [raw_values]
+            if not isinstance(raw_values, (list, tuple)) or not raw_values:
+                raise ValueError(f"Clip '{clip_id}' has invalid {key}; expected a non-empty path list")
+            rewritten_meshes: list[str] = []
+            for index, raw_mesh in enumerate(raw_values):
+                normalized_mesh = str(raw_mesh).strip()
+                if not normalized_mesh:
+                    raise ValueError(f"Clip '{clip_id}' has an empty {key}[{index}] path")
+                rewritten_meshes.append(
+                    _relpath(_resolve_path(normalized_mesh, object_map.parent), motion_dir)
+                )
+            entry[key] = rewritten_meshes
         updated_clips[str(clip_id)] = entry
 
     output_payload = dict(metadata)
@@ -156,10 +215,10 @@ def main() -> int:
         output_map = output_map.resolve()
 
     try:
-        clip_count, urdf_count = prepare_single_slot_map(
-            motion_dir=motion_dir,
-            object_map=object_map,
-            output_map=output_map,
+            clip_count, urdf_count = prepare_single_slot_map(
+                motion_dir=motion_dir,
+                object_map=object_map,
+                output_map=output_map,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to prepare single-slot object map: {exc}", file=sys.stderr)

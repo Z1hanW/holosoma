@@ -45,6 +45,13 @@ from holosoma.utils.rotations import (  # noqa: E402
 )
 from holosoma.utils.safe_torch_import import torch  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.visual_motion_transitions import (  # noqa: E402
+    configured_control_dt_s,
+    configured_simulator_type,
+    list_motion_source_clips,
+    resolve_motion_transition_source_for_motion_path,
+    resolve_visual_motion_transition_plan,
+)
 from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
@@ -354,9 +361,22 @@ def _maybe_add_default_pose_transitions(
     robot_dof: int,
     fps: float,
     default_joint_pos: np.ndarray,
+    source_clip_count: int,
+    motion_transition_source: dict[str, object] | None,
+    simulator_type: str,
+    control_dt_s: float,
 ) -> np.ndarray:
     if qpos.shape[0] == 0:
         return qpos
+
+    transition_plan = resolve_visual_motion_transition_plan(
+        motion_cfg,
+        fps=fps,
+        control_dt_s=control_dt_s,
+        source_clip_count=source_clip_count,
+        motion_transition_source=motion_transition_source,
+        simulator_type=simulator_type,
+    )
 
     has_object = qpos.shape[1] >= (7 + robot_dof + 7)
     if default_joint_pos.shape[0] != robot_dof:
@@ -369,8 +389,8 @@ def _maybe_add_default_pose_transitions(
     motion_root_quat_end_wxyz = qpos[-1, 3:7]
     motion_root_quat_end_xyzw = motion_root_quat_end_wxyz[[1, 2, 3, 0]]
 
-    if motion_cfg.enable_default_pose_prepend and motion_cfg.default_pose_prepend_duration_s > 0.0:
-        num_steps = int(round(motion_cfg.default_pose_prepend_duration_s * fps))
+    if transition_plan.prepend_steps > 0:
+        num_steps = transition_plan.prepend_steps
         default_root_pos, default_root_quat = _build_default_root_pose(
             robot_config,
             motion_root_pos_start,
@@ -390,8 +410,8 @@ def _maybe_add_default_pose_transitions(
         if segment.shape[0] > 0:
             qpos = np.concatenate([segment, qpos], axis=0)
 
-    if motion_cfg.enable_default_pose_append and motion_cfg.default_pose_append_duration_s > 0.0:
-        num_steps = int(round(motion_cfg.default_pose_append_duration_s * fps))
+    if transition_plan.append_steps > 0:
+        num_steps = transition_plan.append_steps
         default_root_pos, default_root_quat = _build_default_root_pose(
             robot_config,
             motion_root_pos_end,
@@ -416,6 +436,12 @@ def _maybe_add_default_pose_transitions(
 
 def _load_motion_qpos(cfg: ExperimentConfig, robot_config: RobotConfig) -> tuple[np.ndarray, int]:
     motion_cfg = _get_motion_config(cfg)
+    source_clip_count = len(
+        list_motion_source_clips(Path(_resolve_data_path(motion_cfg.motion_file)))
+    )
+    motion_transition_source = resolve_motion_transition_source_for_motion_path(
+        Path(_resolve_data_path(motion_cfg.motion_file))
+    )
     robot_body_names = [FAKE_BODY_NAME_ALIASES.get(name, name) for name in robot_config.body_names]
     motion = MotionLoader(
         motion_cfg.motion_file,
@@ -449,6 +475,10 @@ def _load_motion_qpos(cfg: ExperimentConfig, robot_config: RobotConfig) -> tuple
         robot_dof=len(robot_config.dof_names),
         fps=float(fps),
         default_joint_pos=default_joint_pos,
+        source_clip_count=source_clip_count,
+        motion_transition_source=motion_transition_source,
+        simulator_type=configured_simulator_type(cfg.simulator),
+        control_dt_s=configured_control_dt_s(cfg.simulator),
     )
     return qpos, fps
 

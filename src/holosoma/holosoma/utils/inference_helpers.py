@@ -115,14 +115,37 @@ def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, 
     return inner_actor, input_dim
 
 
-def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
+def export_policy_as_onnx(
+    wrapper,
+    onnx_file_path: str,
+    example_obs_dict,
+    *,
+    perception_input_name: str | None = None,
+):
     # Ensure parent directory exists
     os.makedirs(Path(onnx_file_path).parent, exist_ok=True)
     example_inputs = [example_obs_dict["actor_obs"]]
     input_names = ["actor_obs"]
-    if "perception_obs" in example_obs_dict:
-        example_inputs.append(example_obs_dict["perception_obs"])
-        input_names.append("perception_obs")
+    extra_input_names = [name for name in example_obs_dict if name != "actor_obs"]
+    if perception_input_name:
+        if perception_input_name in {"obs", "actor_obs", "time_step"}:
+            raise ValueError(
+                f"Perception input name {perception_input_name!r} is reserved for actor/time inputs."
+            )
+        if perception_input_name not in example_obs_dict:
+            raise ValueError(
+                f"Requested perception input {perception_input_name!r} is absent from example_obs_dict."
+            )
+        extra_input_names = [perception_input_name]
+    if len(extra_input_names) > 1:
+        raise ValueError(
+            "Pure policy ONNX export supports at most one external perception input, "
+            f"got {extra_input_names}."
+        )
+    if extra_input_names:
+        perception_name = extra_input_names[0]
+        example_inputs.append(example_obs_dict[perception_name])
+        input_names.append(perception_name)
 
     # --- SUPPRESS LOGS START ---
     # Silence onnxscript and onnx_ir debug/info noise
@@ -133,6 +156,8 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
     # --- SUPPRESS LOGS END ---
 
     export_inputs = tuple(example_inputs) if len(example_inputs) > 1 else example_inputs[0]
+    dynamic_axes = {name: {0: "batch"} for name in input_names}
+    dynamic_axes["action"] = {0: "batch"}
     torch.onnx.export(
         wrapper,
         export_inputs,
@@ -140,6 +165,7 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
         verbose=False,
         input_names=input_names,
         output_names=["action"],
+        dynamic_axes=dynamic_axes,
         opset_version=14,
         dynamo=False,
     )
@@ -302,10 +328,58 @@ def attach_onnx_metadata(onnx_path: str, metadata: dict[str, Any]) -> None:
     """
     model = onnx.load(onnx_path)
 
+    def reject_nonfinite_json(constant: str):
+        raise ValueError(f"non-finite JSON constant {constant!r}")
+
+    existing_keys: set[str] = set()
+    duplicate_existing_keys: list[str] = []
+    for prop in model.metadata_props:
+        if not prop.key:
+            raise ValueError("Cannot attach metadata to an ONNX model with an empty metadata key.")
+        if prop.key in existing_keys and prop.key not in duplicate_existing_keys:
+            duplicate_existing_keys.append(prop.key)
+        existing_keys.add(prop.key)
+        try:
+            json.loads(prop.value, parse_constant=reject_nonfinite_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Existing ONNX metadata value for {prop.key!r} is not strict finite JSON."
+            ) from exc
+    if duplicate_existing_keys:
+        raise ValueError(
+            "Cannot attach metadata to an ONNX model with ambiguous duplicate keys: "
+            f"{duplicate_existing_keys}."
+        )
+
+    invalid_keys = [key for key in metadata if not isinstance(key, str) or not key]
+    if invalid_keys:
+        raise ValueError(f"ONNX metadata keys must be non-empty strings, got {invalid_keys!r}.")
+
+    # A policy graph may already carry exporter metadata.  Replacing a key by
+    # appending another metadata_props entry creates a duplicate whose
+    # interpretation depends on the consumer (first-wins vs last-wins). Keep
+    # unrelated entries and publish exactly one value for every updated key.
+    retained_entries = [
+        (prop.key, prop.value)
+        for prop in model.metadata_props
+        if prop.key not in metadata
+    ]
+    del model.metadata_props[:]
+    for key, value in retained_entries:
+        entry = model.metadata_props.add()
+        entry.key = key
+        entry.value = value
+
     for k, v in metadata.items():
         entry = onnx.StringStringEntryProto()
         entry.key = k
-        entry.value = json.dumps(v)
+        try:
+            # NaN/Infinity are accepted by Python's JSON implementation but
+            # are outside standard JSON and make scientific metadata
+            # consumer-dependent. Refuse to serialize them into an artifact.
+            entry.value = json.dumps(v, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"ONNX metadata value for {k!r} is not finite JSON data.") from exc
         model.metadata_props.append(entry)
 
     onnx.save(model, onnx_path)

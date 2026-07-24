@@ -333,7 +333,14 @@ for clip_dir in clip_dirs:
     else:
         clip_id = ""
     if not clip_id:
-        clip_id = clip_dir.name.split("_", 1)[1] if "_" in clip_dir.name else clip_dir.name
+        normalized = clip_dir.name.strip()
+        if normalized in npz_ids:
+            clip_id = normalized
+        else:
+            prefix, separator, suffix = normalized.partition("_")
+            clip_id = suffix.strip() if separator and prefix.isdecimal() and suffix.strip() else normalized
+    if clip_id in contact_ids:
+        raise SystemExit(f"[ERROR] Duplicate contact directories resolve to clip {clip_id!r}")
     contact_ids.add(clip_id)
     for file_name in required_files:
         if not (clip_dir / file_name).is_file():

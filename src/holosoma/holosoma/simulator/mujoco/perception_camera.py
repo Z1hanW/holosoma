@@ -133,7 +133,13 @@ class MuJoCoDepthCamera:
         depth = self._render_depth_with_clip(renderer)
         depth_array = self._sanitize_depth_array(depth)
         depth_array = self._orient_render_array(depth_array)
-        self._maybe_dump_debug(render_data, depth=depth_array)
+        try:
+            self._maybe_dump_debug(render_data, depth=depth_array)
+        finally:
+            # Debug rendering temporarily switches the shared renderer through
+            # RGB and segmentation modes.  Keep diagnostics observational so
+            # the next policy capture cannot inherit segmentation state.
+            self._set_renderer_mode(depth=True)
         return torch.as_tensor(depth_array, device=self._device, dtype=torch.float32).unsqueeze(0)
 
     def _render_depth_with_clip(self, renderer: mujoco.Renderer) -> np.ndarray:
@@ -156,8 +162,22 @@ class MuJoCoDepthCamera:
         rgb = renderer.render()
         rgb_array = self._sanitize_rgb_array(rgb)
         rgb_array = self._orient_render_array(rgb_array)
-        self._maybe_dump_debug(None, rgb=rgb_array)
+        try:
+            self._maybe_dump_debug(None, rgb=rgb_array)
+        finally:
+            self._set_renderer_mode(depth=False)
         return rgb_array
+
+    def _set_renderer_mode(self, *, depth: bool) -> None:
+        if self._renderer is None:
+            raise RuntimeError("MuJoCoDepthCamera.setup() must be called before capture.")
+        # Reset both mutually exclusive flags before selecting the requested
+        # output.  Calling only enable_depth_rendering() is insufficient after
+        # a segmentation debug pass.
+        self._renderer.disable_depth_rendering()
+        self._renderer.disable_segmentation_rendering()
+        if depth:
+            self._renderer.enable_depth_rendering()
 
     def _prepare_renderer(self, *, depth: bool) -> tuple[mujoco.Renderer, mujoco.MjData]:
         if self._renderer is None or self._camera_id is None:
@@ -179,10 +199,7 @@ class MuJoCoDepthCamera:
         else:
             self._update_camera_pose(render_data)
 
-        if depth:
-            self._renderer.enable_depth_rendering()
-        else:
-            self._renderer.disable_depth_rendering()
+        self._set_renderer_mode(depth=depth)
         self._update_scene_with_active_camera(self._renderer, render_data)
         return self._renderer, render_data
 

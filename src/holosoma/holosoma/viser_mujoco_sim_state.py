@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import inspect
+import math
+import numbers
 import os
 import signal
 import subprocess
@@ -43,6 +45,10 @@ from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub  # noqa: E402
+from holosoma_inference.utils.policy_contract import (  # noqa: E402
+    PolicyContractError,
+    motion_transition_contract_from_metadata,
+)
 from holosoma_inference.utils.policy_overlay import PolicyOverlaySub  # noqa: E402
 from holosoma_inference.utils.sim_control import ManualRootCommandPub, SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
@@ -105,6 +111,8 @@ class MujocoSimStateViewerConfig:
     manual_root_dy: float = 0.0
     manual_root_dyaw: float = 0.0
     manual_root_publisher_enabled: bool = True
+    manual_pickup_button_enabled: bool = False
+    manual_pickup_button: bool = True
     manual_drop_button_enabled: bool = False
     manual_drop_button: bool = False
     keyboard_root_command: bool = False
@@ -719,18 +727,35 @@ def _infer_default_pose_start(cfg: MujocoSimStateViewerConfig) -> bool:
             .get("params", {})
             .get("motion_config", {})
         )
-        if not isinstance(motion_cfg, dict):
-            return False
-        return bool(
-            (
-                motion_cfg.get("enable_default_pose_prepend")
-                and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0
-            )
-            or (
-                motion_cfg.get("enable_default_pose_append")
-                and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0
-            )
+        motion_cfg = motion_cfg if isinstance(motion_cfg, dict) else {}
+
+        def _requested_transition(phase: str) -> bool:
+            enabled = motion_cfg.get(f"enable_default_pose_{phase}", False)
+            duration = motion_cfg.get(f"default_pose_{phase}_duration_s", 0.0)
+            if not isinstance(enabled, bool):
+                raise ValueError(f"motion_config.enable_default_pose_{phase} must be boolean.")
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, numbers.Real)
+                or not math.isfinite(float(duration))
+                or float(duration) < 0.0
+            ):
+                raise ValueError(
+                    f"motion_config.default_pose_{phase}_duration_s must be finite and non-negative."
+                )
+            return enabled and float(duration) > 0.0
+
+        raw_transition_requested = _requested_transition("prepend") or _requested_transition("append")
+        transition_contract = motion_transition_contract_from_metadata(
+            metadata,
+            required=raw_transition_requested,
         )
+        return bool(
+            transition_contract is not None
+            and transition_contract["prepend"]["applied"]
+        )
+    except (PolicyContractError, ValueError):
+        raise
     except Exception as exc:
         logger.debug("Unable to infer default-pose rollout start from model metadata: {}", exc)
         return False
@@ -1015,6 +1040,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     if auto_motion_init_env not in {"raw_motion", "training_default_pose"}:
         auto_motion_init_env = ""
 
+    manual_pickup_button_cb = None
+    manual_pickup_reset_btn = None
     manual_drop_button_cb = None
     manual_drop_reset_btn = None
     with server.gui.add_folder("Manual Root Command", order=20.0):
@@ -1028,6 +1055,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         manual_root_dy = server.gui.add_number("dY", initial_value=float(cfg.manual_root_dy), min=-3.0, max=3.0, step=0.01)
         manual_root_dyaw = server.gui.add_number("dYaw", initial_value=float(cfg.manual_root_dyaw), min=-3.1416, max=3.1416, step=0.01)
         manual_root_zero_btn = server.gui.add_button("Zero command")
+        if bool(cfg.manual_pickup_button_enabled):
+            manual_pickup_button_cb = server.gui.add_checkbox(
+                "Pickup Button",
+                initial_value=bool(cfg.manual_pickup_button),
+            )
+            manual_pickup_reset_btn = server.gui.add_button("Reset Pickup Button")
         if bool(cfg.manual_drop_button_enabled):
             manual_drop_button_cb = server.gui.add_checkbox(
                 "Drop Button",
@@ -1435,6 +1468,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         ]
         enabled = bool(manual_root_enabled_cb.value)
         mode = str(manual_root_mode_dropdown.value)
+        pickup_button_value = None
+        if manual_pickup_button_cb is not None:
+            pickup_button_value = 1.0 if bool(manual_pickup_button_cb.value) else 0.0
         drop_button_value = None
         if manual_drop_button_cb is not None:
             drop_button_value = 1.0 if bool(manual_drop_button_cb.value) else 0.0
@@ -1443,18 +1479,21 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 enabled=enabled,
                 mode=mode,
                 command=command,
+                pickup_button=pickup_button_value,
                 drop_button=drop_button_value,
             )
         status = "manual" if enabled else "motion"
         publisher_status = "enabled" if manual_root_pub is not None and manual_root_pub.enabled else "disabled"
-        drop_line = ""
+        button_lines = ""
+        if pickup_button_value is not None:
+            button_lines += f"\n\npickup_button: `{pickup_button_value:.0f}`"
         if drop_button_value is not None:
-            drop_line = f"\n\ndrop_button: `{drop_button_value:.0f}`"
+            button_lines += f"\n\ndrop_button: `{drop_button_value:.0f}`"
         manual_root_md.content = (
             f"status: `{status}`\n\n"
             f"mode: `{mode}`\n\n"
             f"command: `[{command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}]`"
-            f"{drop_line}"
+            f"{button_lines}"
             "\n\n"
             f"publisher: `{publisher_status}`\n\n"
             f"port: `{cfg.sparse_root_command_port}`"
@@ -1581,8 +1620,11 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             reset_pending_clock_rewind = False
             pre_reset_sim_time_ms = None
             last_seen_sim_time_ms = None
+            if manual_pickup_button_cb is not None:
+                manual_pickup_button_cb.value = True
             if manual_drop_button_cb is not None:
                 manual_drop_button_cb.value = False
+            if manual_pickup_button_cb is not None or manual_drop_button_cb is not None:
                 _publish_manual_root_command()
             state_md.content = "Waiting for simulator state after reset..."
             actor_md.content = ""
@@ -1603,8 +1645,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     def _request_sim_reset(reason: str) -> None:
         nonlocal pending_restart_reason, offset_initialized, received_first_state, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms
-        if control_pub.enabled:
-            control_pub.request_reset(reason)
+        reset_sent = bool(control_pub.enabled and control_pub.request_reset(reason))
+        if reset_sent:
             offset_xy[:] = 0.0
             state_md.content = f"Reset requested over sim-control ({reason})..."
             actor_md.content = ""
@@ -1618,15 +1660,18 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             reset_request_time_monotonic = time.monotonic()
             reset_pending_clock_rewind = True
             pre_reset_sim_time_ms = last_seen_sim_time_ms
+            if manual_pickup_button_cb is not None:
+                manual_pickup_button_cb.value = True
             if manual_drop_button_cb is not None:
                 manual_drop_button_cb.value = False
+            if manual_pickup_button_cb is not None or manual_drop_button_cb is not None:
                 _publish_manual_root_command()
             logger.info("Requested simulator reset over sim-control ({})", reason)
         elif cfg.launch_rollout:
             pending_restart_reason = "gui_restart_fallback"
-            state_md.content = "Control channel unavailable, falling back to full restart..."
+            state_md.content = "Reset request was not sent, falling back to full restart..."
         else:
-            logger.warning("Reset rollout requested, but sim-control is unavailable")
+            logger.warning("Reset rollout requested, but sim-control did not accept the request")
 
     @show_object_cb.on_update
     def _(_evt) -> None:
@@ -1766,6 +1811,21 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     @manual_root_dyaw.on_update
     def _(_evt) -> None:
         _publish_manual_root_command()
+
+    if manual_pickup_button_cb is not None:
+
+        @manual_pickup_button_cb.on_update
+        def _(_evt) -> None:
+            _publish_manual_root_command()
+
+    if manual_pickup_reset_btn is not None:
+
+        @manual_pickup_reset_btn.on_click
+        def _(_evt) -> None:
+            if manual_pickup_button_cb is not None:
+                # Training convention: pickup=1 before t1 and 0 from t1 on.
+                manual_pickup_button_cb.value = True
+            _publish_manual_root_command()
 
     if manual_drop_button_cb is not None:
 

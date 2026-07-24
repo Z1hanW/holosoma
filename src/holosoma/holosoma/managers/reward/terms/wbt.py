@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, List
@@ -18,9 +19,14 @@ from holosoma.managers.command.terms.wbt import (
     _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES,
     _CONTACT_PRIOR_REGION_NAMES,
     _CONTACT_PRIOR_REGION_POSITION_BODY_NAMES,
+    _convert_contact_interval_timebase,
     _normalize_contact_prior_region_name,
 )
 from holosoma.managers.reward.base import RewardTermBase
+from holosoma.utils.contact_intervals import (
+    infer_contact_export_clip_id,
+    resolve_contact_export_clip_id,
+)
 from holosoma.utils.rotations import (
     quat_apply_broadcast_left,
     quat_error_magnitude,
@@ -55,6 +61,38 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
     assert motion_command is not None, "motion_command not found in command manager"
     assert isinstance(motion_command, MotionCommand), f"Expected MotionCommand, got {type(motion_command)}"
     return motion_command
+
+
+def _rollout_reference_uses_episodic_motion_end(env: WholeBodyTrackingManager) -> bool:
+    """Whether the active environment terminates before sampling clip frame L-1."""
+
+    if os.environ.get("HOLOSOMA_DISABLE_MOTION_END_RESET", "0").lower() in ("1", "true", "yes", "on"):
+        return False
+    manager = getattr(env, "termination_manager", None)
+    term_names = tuple(str(name) for name in getattr(manager, "_term_names", ()))
+    term_cfgs = tuple(getattr(manager, "_term_cfgs", ()))
+    for index, term_name in enumerate(term_names):
+        if index >= len(term_cfgs):
+            # Lightweight test/dummy managers may expose only names.  The real
+            # TerminationManager always carries aligned cfg entries.
+            if term_name == "motion_ends":
+                return True
+            continue
+        func = getattr(term_cfgs[index], "func", None)
+        if isinstance(func, str):
+            func_name = func.rsplit(":", 1)[-1]
+        else:
+            func_name = str(getattr(func, "__name__", ""))
+        if func_name == "motion_ends":
+            return True
+    return False
+
+
+def _required_rollout_reference_steps(clip_length: int, *, episodic_motion_end: bool) -> int:
+    # BaseTask checks termination/reward before MotionCommand.step().  With
+    # motion_end_mask >= L-2, episodic execution rewards indices 0..L-2;
+    # continuing execution additionally rewards L-1 before clip rollover.
+    return max(1, clip_length - 1) if episodic_motion_end else clip_length
 
 
 def _get_cached_name_subset_indexes(
@@ -128,19 +166,62 @@ def _get_dof_subset_indexes(
     )
 
 
+def _get_sim_body_subset(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> tuple[tuple[str, ...], torch.Tensor]:
+    """Resolve and cache simulator-body host names together with device indexes."""
+
+    cache = getattr(env, "_wbt_reward_sim_body_subset_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(env, "_wbt_reward_sim_body_subset_cache", cache)
+
+    key = (tuple(body_names) if body_names is not None else None, body_name_pattern)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    all_names = list(env.simulator.body_names)  # type: ignore[attr-defined]
+    if body_names is not None:
+        missing = [name for name in body_names if name not in all_names]
+        if missing:
+            raise ValueError(f"Requested names {missing} are not available in {all_names}.")
+        indexes = [all_names.index(name) for name in body_names]
+    elif body_name_pattern:
+        regex = re.compile(body_name_pattern)
+        indexes = [idx for idx, name in enumerate(all_names) if regex.match(name)]
+    else:
+        indexes = list(range(len(all_names)))
+
+    if not indexes:
+        raise ValueError(
+            f"No names matched names={list(body_names) if body_names is not None else None} "
+            f"pattern={body_name_pattern!r} in {all_names}."
+        )
+
+    selection = (
+        tuple(all_names[index] for index in indexes),
+        torch.tensor(indexes, dtype=torch.long, device=env.device),
+    )
+    cache[key] = selection
+    return selection
+
+
 def _get_sim_body_subset_indexes(
     env: WholeBodyTrackingManager,
     *,
     body_names: list[str] | tuple[str, ...] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    return _get_cached_name_subset_indexes(
+    _, selected_indexes = _get_sim_body_subset(
         env,
-        cache_name="_wbt_reward_sim_body_subset_cache",
-        all_names=list(env.simulator.body_names),  # type: ignore[attr-defined]
-        names=body_names,
-        pattern=body_name_pattern,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
     )
+    return selected_indexes
 
 
 def _get_object_contact_force_history(
@@ -149,12 +230,14 @@ def _get_object_contact_force_history(
     body_names: list[str] | tuple[str, ...] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    selected_indexes = _get_sim_body_subset_indexes(
+    cached_names, _ = _get_sim_body_subset(
         env,
         body_names=body_names,
         body_name_pattern=body_name_pattern,
     )
-    selected_names = [env.simulator.body_names[int(idx)] for idx in selected_indexes.detach().cpu().tolist()]  # type: ignore[attr-defined]
+    # Preserve the previous downstream API (a fresh list on every call) while
+    # avoiding the former device-to-host index transfer and synchronization.
+    selected_names = list(cached_names)
     motion_command = env.command_manager.get_state("motion_command")
     if isinstance(motion_command, MotionCommand):
         return motion_command.get_body_object_contact_force_history(selected_names)
@@ -174,7 +257,10 @@ def _get_object_contact_force_history(
 #########################################################################################################
 
 
-def penalty_action_rate(env: WholeBodyTrackingManager) -> torch.Tensor:
+def penalty_action_rate(
+    env: WholeBodyTrackingManager,
+    max_penalty: float | None = None,
+) -> torch.Tensor:
     """Penalize changes in actions between steps.
 
     Args:
@@ -185,7 +271,10 @@ def penalty_action_rate(env: WholeBodyTrackingManager) -> torch.Tensor:
     """
     actions = env.action_manager.action
     prev_actions = env.action_manager.prev_action
-    return torch.sum(torch.square(prev_actions - actions), dim=1)
+    penalty = torch.sum(torch.square(prev_actions - actions), dim=1)
+    if max_penalty is None or max_penalty <= 0.0:
+        return penalty
+    return torch.clamp(penalty, max=float(max_penalty))
 
 
 def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.95) -> torch.Tensor:
@@ -286,9 +375,7 @@ def _resolve_rollout_reference_root(raw_root: str) -> Path | None:
 
 
 def _infer_clip_id_from_dir_name(dir_name: str) -> str:
-    if "_" not in dir_name:
-        return dir_name.strip()
-    return dir_name.split("_", 1)[1].strip()
+    return infer_contact_export_clip_id(dir_name)
 
 
 def _gather_clip_timestep_values(values: torch.Tensor, clip_indices: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
@@ -338,7 +425,7 @@ def _get_rollout_reference_bank(
 ) -> dict[str, torch.Tensor] | None:
     resolved_root = _resolve_rollout_reference_root(rollout_reference_root)
     if resolved_root is None:
-        return None
+        raise ValueError("rollout_reference_root must be a non-empty path when rollout-reference rewards are enabled.")
 
     cache = getattr(env, "_rollout_reference_bank_cache", None)
     if cache is None:
@@ -346,6 +433,7 @@ def _get_rollout_reference_bank(
         setattr(env, "_rollout_reference_bank_cache", cache)
 
     cache_key = str(resolved_root)
+    episodic_motion_end = _rollout_reference_uses_episodic_motion_end(env)
     expected_clip_ids = tuple(str(clip_id) for clip_id in motion_command.motion.clip_ids)
     expected_body_names = tuple(str(name) for name in motion_command.motion_cfg.body_names_to_track)
     expected_ref_name = str(motion_command.motion_cfg.body_name_ref[0])
@@ -356,27 +444,24 @@ def _get_rollout_reference_bank(
         and cached_entry.get("clip_ids") == expected_clip_ids
         and cached_entry.get("body_names") == expected_body_names
         and cached_entry.get("ref_name") == expected_ref_name
+        and cached_entry.get("episodic_motion_end") == episodic_motion_end
     ):
         return cached_entry.get("bank")
 
     if not resolved_root.is_dir():
-        logger.warning(
-            "Rollout reference tracking disabled: rollout reference root '{}' does not exist.",
-            resolved_root,
+        raise FileNotFoundError(
+            "Rollout-reference rewards are enabled, but the configured root does not exist or is not a directory: "
+            f"'{resolved_root}'. Refusing to silently replace the configured rewards with zeros."
         )
-        cache[cache_key] = {
-            "clip_ids": expected_clip_ids,
-            "body_names": expected_body_names,
-            "ref_name": expected_ref_name,
-            "bank": None,
-        }
-        return None
 
     num_clips = int(motion_command.motion.num_clips)
     num_bodies = len(expected_body_names)
     clip_name_to_index = {clip_name: idx for idx, clip_name in enumerate(motion_command.motion.clip_ids)}
 
     clip_payloads: dict[int, dict[str, np.ndarray]] = {}
+    clip_sources: dict[int, Path] = {}
+    duplicate_clip_sources: dict[str, list[str]] = {}
+    matching_load_errors: dict[str, str] = {}
     max_steps = 0
     has_any_object = False
 
@@ -386,6 +471,7 @@ def _get_rollout_reference_bank(
         rollout_path = clip_dir / "teacher_rollout_reference.npz"
         if not rollout_path.is_file():
             continue
+        loaded_clip_id = ""
         try:
             with np.load(rollout_path, allow_pickle=False) as data:
                 clip_id = ""
@@ -397,35 +483,64 @@ def _get_rollout_reference_bank(
                         try:
                             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                             clip_id = str(metadata.get("clip_id", "")).strip()
-                        except Exception:
+                        except Exception as exc:
+                            inferred_clip_id = resolve_contact_export_clip_id(
+                                clip_dir.name,
+                                clip_name_to_index,
+                            )
+                            if inferred_clip_id in clip_name_to_index:
+                                loaded_clip_id = inferred_clip_id
+                                raise ValueError(
+                                    "invalid rollout-reference metadata for active clip "
+                                    f"{inferred_clip_id!r}: {metadata_path}: {exc}"
+                                ) from exc
                             clip_id = ""
                 if not clip_id:
-                    clip_id = _infer_clip_id_from_dir_name(clip_dir.name)
+                    clip_id = resolve_contact_export_clip_id(clip_dir.name, clip_name_to_index)
                 if not clip_id or clip_id not in clip_name_to_index:
                     continue
+                loaded_clip_id = clip_id
 
                 if "tracked_body_names" in data.files:
                     loaded_body_names = tuple(str(name) for name in np.asarray(data["tracked_body_names"]).tolist())
                     if loaded_body_names != expected_body_names:
-                        logger.warning(
-                            "Skipping rollout reference '{}' because tracked_body_names do not match training bodies.",
-                            rollout_path,
+                        raise ValueError(
+                            f"tracked_body_names {loaded_body_names!r} do not match active training bodies "
+                            f"{expected_body_names!r}"
                         )
-                        continue
                 if "ref_body_name" in data.files:
                     loaded_ref_name = str(np.asarray(data["ref_body_name"]).item())
                     if loaded_ref_name != expected_ref_name:
-                        logger.warning(
-                            "Skipping rollout reference '{}' because ref_body_name '{}' != '{}'.",
-                            rollout_path,
-                            loaded_ref_name,
-                            expected_ref_name,
+                        raise ValueError(
+                            f"ref_body_name {loaded_ref_name!r} does not match active reference body "
+                            f"{expected_ref_name!r}"
                         )
-                        continue
 
                 valid_steps = np.asarray(data["valid_steps"], dtype=np.bool_).reshape(-1)
                 if valid_steps.size == 0:
-                    continue
+                    raise ValueError("valid_steps is empty")
+                if not bool(valid_steps.any()):
+                    raise ValueError("valid_steps does not contain any usable reference frame")
+                clip_index = int(clip_name_to_index[clip_id])
+                clip_length = int(motion_command.motion.clip_lengths[clip_index].item())
+                required_reference_steps = _required_rollout_reference_steps(
+                    clip_length,
+                    episodic_motion_end=episodic_motion_end,
+                )
+                motion_end_mode = "episodic" if episodic_motion_end else "continuing"
+                if valid_steps.size < required_reference_steps:
+                    raise ValueError(
+                        f"rollout reference has {valid_steps.size} frames but {motion_end_mode} motion execution "
+                        f"requires {required_reference_steps} reward-bearing frames (clip_length={clip_length})"
+                    )
+                if not bool(valid_steps[:required_reference_steps].all()):
+                    first_invalid = int(np.flatnonzero(~valid_steps[:required_reference_steps])[0])
+                    raise ValueError(
+                        "rollout reference is missing a usable frame inside the reward-bearing motion range: "
+                        f"first_invalid_step={first_invalid}, "
+                        f"required_reference_steps={required_reference_steps}, "
+                        f"clip_length={clip_length}, motion_end_mode={motion_end_mode}"
+                    )
                 body_pos_local = np.asarray(data["body_pos_local"], dtype=np.float32).reshape(valid_steps.size, num_bodies, 3)
                 body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32).reshape(valid_steps.size, num_bodies, 4)
                 body_lin_vel_w = np.asarray(data["body_lin_vel_w"], dtype=np.float32).reshape(valid_steps.size, num_bodies, 3)
@@ -461,23 +576,82 @@ def _get_rollout_reference_bank(
                     payload["object_ang_vel_w"] = np.asarray(data["object_ang_vel_w"], dtype=np.float32).reshape(valid_steps.size, 3)
                     has_any_object = True
 
-                clip_payloads[int(clip_name_to_index[clip_id])] = payload
+                if motion_command.motion.has_object and "object_pos_local" not in payload:
+                    raise ValueError(
+                        "active motion contains an object, but the rollout reference has no complete object state"
+                    )
+
+                non_finite_keys = [
+                    key
+                    for key, value in payload.items()
+                    if np.issubdtype(value.dtype, np.floating) and not bool(np.isfinite(value).all())
+                ]
+                if non_finite_keys:
+                    raise ValueError(f"non-finite values found in arrays {non_finite_keys}")
+
+                for quat_key in ("body_quat_w", "ref_quat_w", "root_quat_w", "object_quat_w"):
+                    quat_value = payload.get(quat_key)
+                    if quat_value is None:
+                        continue
+                    valid_quat = quat_value[valid_steps]
+                    quat_norm = np.linalg.norm(valid_quat, axis=-1)
+                    if quat_norm.size == 0 or not bool(np.all(np.abs(quat_norm - 1.0) <= 1.0e-3)):
+                        min_norm = float(quat_norm.min()) if quat_norm.size else float("nan")
+                        max_norm = float(quat_norm.max()) if quat_norm.size else float("nan")
+                        raise ValueError(
+                            f"{quat_key} must contain unit quaternions on valid steps; "
+                            f"norm range=[{min_norm}, {max_norm}]"
+                        )
+
+                if clip_index in clip_payloads:
+                    duplicate_clip_sources.setdefault(
+                        clip_id,
+                        [str(clip_sources[clip_index])],
+                    ).append(str(rollout_path))
+                    continue
+                clip_payloads[clip_index] = payload
+                clip_sources[clip_index] = rollout_path
                 max_steps = max(max_steps, int(valid_steps.size))
         except Exception as exc:
-            logger.warning("Skipping invalid teacher rollout reference '{}': {}", rollout_path, exc)
+            if loaded_clip_id in clip_name_to_index:
+                matching_load_errors[loaded_clip_id] = f"{rollout_path}: {exc}"
+            logger.warning("Ignoring invalid teacher rollout reference '{}': {}", rollout_path, exc)
 
-    if max_steps <= 0:
-        logger.warning(
-            "Rollout reference tracking disabled: no matching rollout references found in '{}'.",
-            resolved_root,
+    if duplicate_clip_sources:
+        raise RuntimeError(
+            "Rollout-reference rewards found multiple directories for an active clip: "
+            + "; ".join(
+                f"{clip_id}={sources}"
+                for clip_id, sources in sorted(duplicate_clip_sources.items())
+            )
         )
-        cache[cache_key] = {
-            "clip_ids": expected_clip_ids,
-            "body_names": expected_body_names,
-            "ref_name": expected_ref_name,
-            "bank": None,
-        }
-        return None
+
+    invalid_duplicate_sources = {
+        clip_id: error
+        for clip_id, error in matching_load_errors.items()
+        if int(clip_name_to_index[clip_id]) in clip_payloads
+    }
+    if invalid_duplicate_sources:
+        raise RuntimeError(
+            "Rollout-reference rewards found both a valid and an invalid directory for an active clip: "
+            + "; ".join(
+                f"{clip_id}={error}"
+                for clip_id, error in sorted(invalid_duplicate_sources.items())
+            )
+        )
+
+    missing_clip_ids = [
+        clip_id for clip_id, clip_index in clip_name_to_index.items() if int(clip_index) not in clip_payloads
+    ]
+    if missing_clip_ids:
+        matching_error_details = [matching_load_errors[clip_id] for clip_id in missing_clip_ids if clip_id in matching_load_errors]
+        detail_suffix = "" if not matching_error_details else " Invalid matching files: " + "; ".join(matching_error_details)
+        raise RuntimeError(
+            "Rollout-reference rewards require one valid teacher_rollout_reference.npz for every active clip. "
+            f"Missing or invalid clip ids under '{resolved_root}': {missing_clip_ids}.{detail_suffix}"
+        )
+    if max_steps <= 0:
+        raise RuntimeError(f"No usable rollout-reference frames were found under '{resolved_root}'.")
 
     def _zeros(shape: tuple[int, ...]) -> torch.Tensor:
         return torch.zeros(shape, device=env.device, dtype=torch.float32)
@@ -547,6 +721,7 @@ def _get_rollout_reference_bank(
         "clip_ids": expected_clip_ids,
         "body_names": expected_body_names,
         "ref_name": expected_ref_name,
+        "episodic_motion_end": episodic_motion_end,
         "bank": bank,
     }
     return bank
@@ -1100,6 +1275,13 @@ class OfflineContactPointGuidance(RewardTermBase):
         self._clip_region_contact_schedule: torch.Tensor | None = None
         self._clip_region_contact_schedule_lengths: torch.Tensor | None = None
         self._clip_region_has_contact_schedule: torch.Tensor | None = None
+        # These banks are immutable after their one-time load.  Cache their
+        # aggregate availability on the host so the reward hot path never
+        # calls CUDA ``any().item()`` merely to rediscover static metadata.
+        self._contact_bank_has_intervals = False
+        self._contact_bank_has_schedule = False
+        self._contact_bank_has_missing_schedule = True
+        self._contact_bank_pickup_steps_by_clip: torch.Tensor | None = None
         self._contact_bank_available = False
         self._contact_bank_initialized = False
 
@@ -1247,22 +1429,27 @@ class OfflineContactPointGuidance(RewardTermBase):
         self._clip_region_has_contact_schedule = torch.zeros(
             (num_clips, num_regions), device=self.env.device, dtype=torch.bool
         )
+        self._contact_bank_has_intervals = False
+        self._contact_bank_has_schedule = False
+        self._contact_bank_has_missing_schedule = True
+        self._contact_bank_pickup_steps_by_clip = None
         self._contact_bank_available = False
 
         if self.contact_export_root is None:
-            logger.warning("OfflineContactPointGuidance disabled: contact_export_root is empty.")
-            return
-        if not self.contact_export_root.is_dir():
-            logger.warning(
-                "OfflineContactPointGuidance disabled: contact export root '{}' does not exist.",
-                self.contact_export_root,
+            raise ValueError(
+                "OfflineContactPointGuidance is enabled with non-zero reward weight, but contact_export_root is empty."
             )
-            return
+        if not self.contact_export_root.is_dir():
+            raise FileNotFoundError(
+                "OfflineContactPointGuidance is enabled, but the configured contact export root does not exist or "
+                f"is not a directory: '{self.contact_export_root}'."
+            )
 
         clip_name_to_index = {clip_name: idx for idx, clip_name in enumerate(motion_command.motion.clip_ids)}
         clip_region_points: dict[tuple[int, int], np.ndarray] = {}
         clip_region_intervals: dict[tuple[int, int], tuple[int, int]] = {}
         clip_region_schedules: dict[tuple[int, int], np.ndarray] = {}
+        clip_source_dirs: dict[int, Path] = {}
         max_points = 0
         max_schedule_steps = 0
 
@@ -1275,18 +1462,49 @@ class OfflineContactPointGuidance(RewardTermBase):
                 try:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 except Exception as exc:
+                    inferred_clip_id = resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        clip_name_to_index,
+                    )
+                    if inferred_clip_id in clip_name_to_index:
+                        raise RuntimeError(
+                            "Invalid offline-contact metadata for an active clip: "
+                            f"clip={inferred_clip_id!r}, path={metadata_path}: {exc}"
+                        ) from exc
                     logger.warning("Skipping invalid contact metadata '{}': {}", metadata_path, exc)
+                    continue
+                if not isinstance(metadata, dict):
+                    inferred_clip_id = resolve_contact_export_clip_id(
+                        clip_dir.name,
+                        clip_name_to_index,
+                    )
+                    if inferred_clip_id in clip_name_to_index:
+                        raise RuntimeError(
+                            "Offline-contact metadata for an active clip must be a JSON object: "
+                            f"clip={inferred_clip_id!r}, path={metadata_path}."
+                        )
+                    logger.warning(
+                        "Skipping non-object contact metadata for inactive directory '{}'.",
+                        metadata_path,
+                    )
                     continue
 
             clip_id = str(metadata.get("clip_id", "")).strip()
             if not clip_id:
-                clip_id = self._infer_clip_id_from_dir_name(clip_dir.name)
+                clip_id = resolve_contact_export_clip_id(clip_dir.name, clip_name_to_index)
             if not clip_id or clip_id not in clip_name_to_index:
                 continue
+            clip_index = clip_name_to_index[clip_id]
+            previous_source = clip_source_dirs.get(clip_index)
+            if previous_source is not None:
+                raise RuntimeError(
+                    "Multiple offline-contact directories resolve to the same active clip: "
+                    f"clip={clip_id!r}, first={previous_source}, second={clip_dir}."
+                )
+            clip_source_dirs[clip_index] = clip_dir
             if self.require_stable_contact and metadata and not bool(metadata.get("stable_contact_success", False)):
                 continue
 
-            clip_index = clip_name_to_index[clip_id]
             for region_idx, region_name in enumerate(self.region_names):
                 export_label = _CONTACT_EXPORT_LABEL_BY_REGION[region_name]
                 points_path = clip_dir / f"{export_label}_contact_points.npy"
@@ -1295,8 +1513,9 @@ class OfflineContactPointGuidance(RewardTermBase):
                 try:
                     points = np.asarray(np.load(points_path), dtype=np.float32).reshape(-1, 3)
                 except Exception as exc:
-                    logger.warning("Skipping invalid contact point cloud '{}': {}", points_path, exc)
-                    continue
+                    raise RuntimeError(f"Invalid contact point cloud '{points_path}': {exc}") from exc
+                if not bool(np.isfinite(points).all()):
+                    raise RuntimeError(f"Invalid contact point cloud '{points_path}': contains NaN or Inf values.")
                 if points.shape[0] < self.min_target_points:
                     continue
                 clip_region_points[(clip_index, region_idx)] = points
@@ -1309,9 +1528,37 @@ class OfflineContactPointGuidance(RewardTermBase):
                         logger.warning("Skipping invalid contact interval '{}': {}", interval_path, exc)
                     else:
                         if interval_steps.size >= 2:
-                            start_step = int(interval_steps[0])
-                            end_step = int(interval_steps[1])
+                            converted_interval = _convert_contact_interval_timebase(
+                                (int(interval_steps[0]), int(interval_steps[1])),
+                                metadata=metadata,
+                                motion_fps=float(motion_command.motion.fps),
+                            )
+                            compensation_enabled = bool(
+                                getattr(
+                                    getattr(motion_command, "motion_cfg", None),
+                                    "contact_interval_runtime_prepend_compensation",
+                                    False,
+                                )
+                            )
+                            runtime_prepend_offset = (
+                                int(getattr(motion_command, "_runtime_default_pose_prepend_steps", 0) or 0)
+                                if compensation_enabled
+                                and bool(getattr(motion_command, "_runtime_default_pose_prepend_enabled", False))
+                                else 0
+                            )
+                            start_step = max(0, int(converted_interval[0]) - runtime_prepend_offset)
+                            end_step = int(converted_interval[1]) - runtime_prepend_offset
                             if start_step >= 0 and end_step > start_step:
+                                clip_lengths = getattr(motion_command.motion, "clip_lengths", None)
+                                if clip_lengths is not None:
+                                    clip_length = int(clip_lengths[clip_index].item())
+                                    if start_step >= clip_length or end_step > clip_length:
+                                        raise RuntimeError(
+                                            "Contact schedule interval is outside the active motion-time range "
+                                            "after runtime-prepend conversion: "
+                                            f"clip={clip_id!r}, region={region_name!r}, "
+                                            f"interval={(start_step, end_step)}, clip_length={clip_length}."
+                                        )
                                 clip_region_intervals[(clip_index, region_idx)] = (start_step, end_step)
                 schedule_path = clip_dir / f"{export_label}_contact_active_mask.npy"
                 if schedule_path.is_file():
@@ -1325,11 +1572,10 @@ class OfflineContactPointGuidance(RewardTermBase):
                             max_schedule_steps = max(max_schedule_steps, int(contact_schedule.shape[0]))
 
         if max_points <= 0:
-            logger.warning(
-                "OfflineContactPointGuidance disabled: no matching region contact targets found in '{}'.",
-                self.contact_export_root,
+            raise RuntimeError(
+                "OfflineContactPointGuidance is enabled, but no matching valid region contact targets were found in "
+                f"'{self.contact_export_root}'."
             )
-            return
 
         points_tensor = torch.zeros(
             (num_clips, num_regions, max_points, 3),
@@ -1352,6 +1598,44 @@ class OfflineContactPointGuidance(RewardTermBase):
         self._clip_region_points = points_tensor
         self._clip_region_point_mask = point_mask
         self._clip_region_has_targets = has_targets
+        matched_clip_count = int(has_targets.any(dim=1).sum().item())
+        require_complete_target_coverage = os.environ.get(
+            "HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if require_complete_target_coverage and matched_clip_count != num_clips:
+            missing_clip_ids = [
+                str(motion_command.motion.clip_ids[index])
+                for index in range(num_clips)
+                if not bool(has_targets[index].any().item())
+            ]
+            raise RuntimeError(
+                "Complete offline contact-target coverage is required, but valid targets were loaded for only "
+                f"{matched_clip_count}/{num_clips} clips. missing_preview={missing_clip_ids[:20]}."
+            )
+        unmeasurable_position_regions = [
+            region_name
+            for region_idx, region_name in enumerate(self.region_names)
+            if bool(has_targets[:, region_idx].any().item())
+            and not self._region_position_body_names.get(region_name)
+        ]
+        if unmeasurable_position_regions:
+            raise RuntimeError(
+                "Contact targets are present for regions that have no position measurement bodies in the active "
+                f"simulator: {unmeasurable_position_regions}."
+            )
+        if self.use_force_term:
+            unmeasurable_force_regions = [
+                region_name
+                for region_idx, region_name in enumerate(self.region_names)
+                if bool(has_targets[:, region_idx].any().item())
+                and not self._region_force_body_names.get(region_name)
+            ]
+            if unmeasurable_force_regions:
+                raise RuntimeError(
+                    "Force-gated contact targets are present for regions that have no force measurement bodies in "
+                    f"the active simulator: {unmeasurable_force_regions}."
+                )
         contact_intervals = torch.full((num_clips, num_regions, 2), -1, device=self.env.device, dtype=torch.long)
         has_intervals = torch.zeros((num_clips, num_regions), device=self.env.device, dtype=torch.bool)
         for key, interval in clip_region_intervals.items():
@@ -1362,6 +1646,7 @@ class OfflineContactPointGuidance(RewardTermBase):
             has_intervals[clip_index, region_idx] = True
         self._clip_region_contact_intervals = contact_intervals
         self._clip_region_has_contact_intervals = has_intervals
+        self._contact_bank_has_intervals = bool(has_intervals.any().item())
         if max_schedule_steps > 0:
             schedule_tensor = torch.zeros(
                 (num_clips, num_regions, max_schedule_steps),
@@ -1379,9 +1664,28 @@ class OfflineContactPointGuidance(RewardTermBase):
             self._clip_region_contact_schedule = schedule_tensor
             self._clip_region_contact_schedule_lengths = schedule_lengths
             self._clip_region_has_contact_schedule = has_schedule
+        assert self._clip_region_has_contact_schedule is not None
+        self._contact_bank_has_schedule = bool(self._clip_region_has_contact_schedule.any().item())
+        schedule_coverage = has_intervals | self._clip_region_has_contact_schedule
+        self._contact_bank_has_missing_schedule = bool((~schedule_coverage).any().item())
+        if self.contact_schedule_missing_mode == "after_pickup" and self._contact_bank_has_missing_schedule:
+            pickup_steps_getter = getattr(motion_command, "_get_clip_pickup_steps_by_clip", None)
+            if callable(pickup_steps_getter):
+                try:
+                    self._contact_bank_pickup_steps_by_clip = pickup_steps_getter().to(
+                        device=self.env.device,
+                        dtype=torch.long,
+                    )
+                except Exception:
+                    self._contact_bank_pickup_steps_by_clip = torch.zeros(
+                        (num_clips,), device=self.env.device, dtype=torch.long
+                    )
+            else:
+                self._contact_bank_pickup_steps_by_clip = torch.zeros(
+                    (num_clips,), device=self.env.device, dtype=torch.long
+                )
         self._contact_bank_available = bool(has_targets.any().item())
         if self._contact_bank_available:
-            matched_clip_count = int(has_targets.any(dim=1).sum().item())
             logger.info(
                 "OfflineContactPointGuidance loaded {} clip(s) with targets from '{}'.",
                 matched_clip_count,
@@ -1390,9 +1694,7 @@ class OfflineContactPointGuidance(RewardTermBase):
 
     @staticmethod
     def _infer_clip_id_from_dir_name(dir_name: str) -> str:
-        if "_" not in dir_name:
-            return dir_name.strip()
-        return dir_name.split("_", 1)[1].strip()
+        return infer_contact_export_clip_id(dir_name)
 
     def _compute_current_region_measurements(self) -> tuple[torch.Tensor, torch.Tensor]:
         num_envs = self.env.num_envs
@@ -1456,7 +1758,7 @@ class OfflineContactPointGuidance(RewardTermBase):
 
         interval_bank = self._clip_region_contact_intervals
         has_interval_bank = self._clip_region_has_contact_intervals
-        if interval_bank is not None and has_interval_bank is not None and bool(has_interval_bank.any().item()):
+        if interval_bank is not None and has_interval_bank is not None and self._contact_bank_has_intervals:
             interval_steps = interval_bank.index_select(0, clip_indices)
             has_intervals = has_interval_bank.index_select(0, clip_indices)
             current_steps = self.motion_command.time_steps.to(device=self.env.device, dtype=torch.long).unsqueeze(-1)
@@ -1479,7 +1781,7 @@ class OfflineContactPointGuidance(RewardTermBase):
             has_schedule_bank is not None
             and schedule_bank is not None
             and schedule_lengths_bank is not None
-            and bool(has_schedule_bank.any().item())
+            and self._contact_bank_has_schedule
         ):
             has_schedule = has_schedule_bank.index_select(0, clip_indices)
             schedule_lengths = schedule_lengths_bank.index_select(0, clip_indices)
@@ -1503,7 +1805,7 @@ class OfflineContactPointGuidance(RewardTermBase):
             schedule_active = torch.where(use_schedule, valid_schedule_steps & scheduled_values, schedule_active)
             missing_schedule = missing_schedule & ~has_schedule
 
-        if not missing_schedule.any():
+        if not self._contact_bank_has_missing_schedule:
             return schedule_active
 
         if self.contact_schedule_missing_mode == "always_on":
@@ -1511,15 +1813,8 @@ class OfflineContactPointGuidance(RewardTermBase):
         if self.contact_schedule_missing_mode == "inactive":
             return torch.where(missing_schedule, torch.zeros_like(schedule_active), schedule_active)
 
-        pickup_steps_getter = getattr(self.motion_command, "_get_clip_pickup_steps_by_clip", None)
-        if callable(pickup_steps_getter):
-            try:
-                pickup_steps_by_clip = pickup_steps_getter().to(device=self.env.device, dtype=torch.long)
-            except Exception:
-                pickup_steps_by_clip = torch.zeros(
-                    (int(self.motion_command.motion.num_clips),), device=self.env.device, dtype=torch.long
-                )
-        else:
+        pickup_steps_by_clip = self._contact_bank_pickup_steps_by_clip
+        if pickup_steps_by_clip is None:
             pickup_steps_by_clip = torch.zeros(
                 (int(self.motion_command.motion.num_clips),), device=self.env.device, dtype=torch.long
             )

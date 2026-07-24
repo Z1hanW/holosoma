@@ -11,6 +11,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 
 DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
 DEFAULT_KEEP_AS_BANK=carryany_filter_scale_noscale_keep169_20260513
@@ -18,9 +20,17 @@ DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT="data/ds_as_data/${DEFAULT_KEEP_AS_BANK}/co
 AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/${DEFAULT_AS_BANK}"}}
 AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
 AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-195}}
-POLICY_HISTORY_LENGTH_FROM_ENV=0
+REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist-offline-contact-guidance}
+REWARD_CONFIG_NORMALIZED=$(echo "${REWARD_CONFIG}" | tr '[:upper:]_' '[:lower:]-')
+USE_OFFLINE_CONTACT_GUIDANCE=0
+case "${REWARD_CONFIG_NORMALIZED}" in
+  *offline-contact-guidance*)
+    USE_OFFLINE_CONTACT_GUIDANCE=1
+    ;;
+esac
+POLICY_HISTORY_LENGTH_EXPLICIT=0
 if [[ -n "${POLICY_HISTORY_LENGTH:-}" || -n "${HISTORY_LENGTH:-}" ]]; then
-  POLICY_HISTORY_LENGTH_FROM_ENV=1
+  POLICY_HISTORY_LENGTH_EXPLICIT=1
 fi
 POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
 # Optional override knobs forwarded to train_object_generalist_ds.sh:
@@ -37,6 +47,14 @@ POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
 #   BOX_RESUME_CKPT
 #     Explicit .pt checkpoint used by RESUME_FROM_BOX.
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
+if [[ -n "${TRAINING_SEED}" ]]; then
+  if [[ ! "${TRAINING_SEED}" =~ ^[0-9]+$ ]] \
+    || (( ${#TRAINING_SEED} > 10 )) \
+    || (( 10#${TRAINING_SEED} > 4294967295 )); then
+    echo "[ERROR] TRAINING_SEED/SEED must be an integer in [0, 4294967295]. Got: ${TRAINING_SEED}" >&2
+    exit 2
+  fi
+fi
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 RESUME_FROM_BOX=${RESUME_FROM_BOX:-0}
@@ -49,7 +67,11 @@ AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
 AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
 
 if [[ -z "${CONTACT_EXPORT_ROOT:-}" && -z "${AS_CONTACT_EXPORT_ROOT:-}" ]]; then
-  CONTACT_EXPORT_ROOT="${DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT}"
+  if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
+    CONTACT_EXPORT_ROOT="${DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT}"
+  else
+    CONTACT_EXPORT_ROOT=""
+  fi
 else
   CONTACT_EXPORT_ROOT="${CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT}}"
 fi
@@ -90,22 +112,24 @@ case "${AS_OBJECT_MAP_ABS}" in
     ;;
 esac
 
-case "${CONTACT_EXPORT_ROOT}" in
-  /nfs|/nfs/*)
-    echo "[ERROR] CONTACT_EXPORT_ROOT must be local, not NFS: ${CONTACT_EXPORT_ROOT}" >&2
-    echo "[ERROR] Copy contact_export_from_retarget under data/ds_as_data/ first." >&2
-    exit 2
-    ;;
-esac
-case "${CONTACT_EXPORT_ROOT}" in
-  "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
-    ;;
-  *)
-    echo "[ERROR] CONTACT_EXPORT_ROOT must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${CONTACT_EXPORT_ROOT}" >&2
-    exit 2
-    ;;
-esac
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  case "${CONTACT_EXPORT_ROOT}" in
+    /nfs|/nfs/*)
+      echo "[ERROR] CONTACT_EXPORT_ROOT must be local, not NFS: ${CONTACT_EXPORT_ROOT}" >&2
+      echo "[ERROR] Copy contact_export_from_retarget under data/ds_as_data/ first." >&2
+      exit 2
+      ;;
+  esac
+  case "${CONTACT_EXPORT_ROOT}" in
+    "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
+      ;;
+    *)
+      echo "[ERROR] CONTACT_EXPORT_ROOT must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+      echo "[ERROR] Got: ${CONTACT_EXPORT_ROOT}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 if [[ ! -d "${AS_DATA_DIR_ABS}" ]]; then
   echo "[ERROR] AS_DATA_DIR does not exist: ${AS_DATA_DIR}" >&2
@@ -124,7 +148,7 @@ if [[ ! -f "${AS_OBJECT_MAP_ABS}" ]]; then
   exit 2
 fi
 
-if [[ ! -d "${CONTACT_EXPORT_ROOT}" ]]; then
+if [[ -n "${CONTACT_EXPORT_ROOT}" && ! -d "${CONTACT_EXPORT_ROOT}" ]]; then
   echo "[ERROR] Missing local contact export root: ${CONTACT_EXPORT_ROOT}" >&2
   echo "[ERROR] Expected copied data at: ${DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT}" >&2
   exit 2
@@ -159,8 +183,11 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
       exit 2
       ;;
   esac
-  if [[ "${POLICY_HISTORY_LENGTH_FROM_ENV}" == "0" ]]; then
-    POLICY_HISTORY_LENGTH="${BOX_RESUME_HISTORY_LENGTH}"
+  if [[ "${POLICY_HISTORY_LENGTH_EXPLICIT}" == "0" ]]; then
+    echo "[ERROR] RESUME_FROM_BOX requires an explicit target policy history contract." >&2
+    echo "[ERROR] Set POLICY_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH} for a history-${BOX_RESUME_HISTORY_LENGTH} warm start," >&2
+    echo "[ERROR] or leave RESUME_FROM_BOX=0 to train the documented history-5 policy from scratch." >&2
+    exit 2
   elif [[ "${POLICY_HISTORY_LENGTH}" != "${BOX_RESUME_HISTORY_LENGTH}" ]]; then
     echo "[ERROR] RESUME_FROM_BOX checkpoint is no-history and requires POLICY_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH}." >&2
     echo "[ERROR] Got POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}. Start from scratch for history=${POLICY_HISTORY_LENGTH}, or unset it for RESUME_FROM_BOX." >&2
@@ -205,7 +232,7 @@ case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-python3 - "${AS_DATA_DIR_ABS}" "${AS_OBJECT_MAP_ABS}" "${AS_EXPECTED_TOTAL}" <<'PY'
+"${PYTHON_BIN}" - "${AS_DATA_DIR_ABS}" "${AS_OBJECT_MAP_ABS}" "${AS_EXPECTED_TOTAL}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -285,55 +312,39 @@ print(
 )
 PY
 
-AS_SINGLE_SLOT_MOTION_DIR=${AS_SINGLE_SLOT_MOTION_DIR:-"${AS_DATA_DIR}/_single_slot_motion_bank"}
-AS_SINGLE_SLOT_MOTION_DIR_ABS=$(realpath -m "${AS_SINGLE_SLOT_MOTION_DIR}")
-case "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" in
+# AS_SINGLE_SLOT_MOTION_DIR remains a backward-compatible alias for the base;
+# the effective payload directory is always the returned by-source/<digest>.
+AS_SINGLE_SLOT_MOTION_BASE=${AS_SINGLE_SLOT_MOTION_BASE:-${AS_SINGLE_SLOT_MOTION_DIR:-"${AS_DATA_DIR}/_single_slot_motion_bank"}}
+AS_SINGLE_SLOT_MOTION_BASE_ABS=$(realpath -m "${AS_SINGLE_SLOT_MOTION_BASE}")
+case "${AS_SINGLE_SLOT_MOTION_BASE_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] Generated AS single-slot motion bank must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${AS_SINGLE_SLOT_MOTION_DIR_ABS}" >&2
+    echo "[ERROR] Generated AS single-slot motion-bank base must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_SINGLE_SLOT_MOTION_BASE_ABS}" >&2
     exit 2
     ;;
 esac
 
-python3 - "${AS_DATA_DIR_ABS}" "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" <<'PY'
-import shutil
-import sys
-from pathlib import Path
-
-source_dir = Path(sys.argv[1]).resolve()
-view_dir = Path(sys.argv[2]).resolve()
-if view_dir == source_dir or source_dir not in view_dir.parents:
-    raise SystemExit(f"[ERROR] Refusing unexpected generated motion view path: {view_dir}")
-
-marker = view_dir / ".generated_by_train_as_general"
-if view_dir.exists():
-    if not marker.exists():
-        raise SystemExit(
-            f"[ERROR] Refusing to clean non-generated AS motion view: {view_dir}. "
-            "Choose an empty AS_SINGLE_SLOT_MOTION_DIR or remove it manually."
-        )
-    for child in view_dir.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-else:
-    view_dir.mkdir(parents=True)
-
-for npz_path in sorted(source_dir.glob("*.npz")):
-    target = view_dir / npz_path.name
-    target.symlink_to(npz_path.resolve())
-marker.write_text("generated by train_as_general.sh\n", encoding="utf-8")
-PY
+AS_SINGLE_SLOT_SOURCE_MOTION_DIR=$(realpath -m "${AS_DATA_DIR_ABS}")
+AS_SINGLE_SLOT_SOURCE_OBJECT_MAP=$(realpath -m "${AS_OBJECT_MAP_ABS}")
+AS_SINGLE_SLOT_MOTION_DIR_ABS=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_immutable_single_slot_bank.py" \
+  --source-motion-dir "${AS_SINGLE_SLOT_SOURCE_MOTION_DIR}" \
+  --source-object-map "${AS_SINGLE_SLOT_SOURCE_OBJECT_MAP}" \
+  --output-base "${AS_SINGLE_SLOT_MOTION_BASE_ABS}")
+AS_SINGLE_SLOT_MOTION_DIR_ABS=$(realpath -m "${AS_SINGLE_SLOT_MOTION_DIR_ABS}")
+case "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" in
+  "${AS_SINGLE_SLOT_MOTION_BASE_ABS}/by-source/"*)
+    ;;
+  *)
+    echo "[ERROR] Immutable AS generalist bank escaped its content-addressed base." >&2
+    echo "[ERROR] base=${AS_SINGLE_SLOT_MOTION_BASE_ABS} output=${AS_SINGLE_SLOT_MOTION_DIR_ABS}" >&2
+    exit 2
+    ;;
+esac
 
 AS_SINGLE_SLOT_OBJECT_MAP="${AS_SINGLE_SLOT_MOTION_DIR_ABS}/_clip_object_urdf_map.json"
-AS_OBJECT_MAP=$(python3 "${SCRIPT_DIR}/scripts/prepare_single_slot_object_map.py" \
-  --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" \
-  --object-map "${AS_OBJECT_MAP_ABS}" \
-  --output-map "${AS_SINGLE_SLOT_OBJECT_MAP}")
-AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
+AS_OBJECT_MAP_ABS=$(realpath -m "${AS_SINGLE_SLOT_OBJECT_MAP}")
 case "${AS_OBJECT_MAP_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
@@ -343,7 +354,8 @@ case "${AS_OBJECT_MAP_ABS}" in
     exit 2
     ;;
 esac
-AS_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR}"
+AS_OBJECT_MAP="${AS_OBJECT_MAP_ABS}"
+AS_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR_ABS}"
 AS_DATA_DIR_ABS="${AS_SINGLE_SLOT_MOTION_DIR_ABS}"
 
 export DATA_MODE=mix-naive
@@ -362,10 +374,17 @@ export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${AS_OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
 export HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS="${HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS:-0}"
 export HOLOSOMA_MOTION_METRICS_INTERVAL="${HOLOSOMA_MOTION_METRICS_INTERVAL:-16}"
+if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
+  export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1
+  export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=1
+else
+  export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=${HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE:-0}
+  export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=${HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE:-0}
+fi
 unset OBJECT_GEOMETRY_MODE
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
-export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist-offline-contact-guidance}
+export REWARD_CONFIG
 export CONTACT_EXPORT_ROOT
 export GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-0}
 export DISABLE_ACTOR_HISTORY=False
@@ -377,13 +396,6 @@ export INIT_AT_RANDOM_EP_LEN
 export WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 
 export SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack}
-
-if [[ -n "${TRAINING_SEED}" ]]; then
-  if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then
-    echo "[ERROR] TRAINING_SEED/SEED must be an integer. Got: ${TRAINING_SEED}" >&2
-    exit 2
-  fi
-fi
 
 if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
   case "$(echo "${INIT_AT_RANDOM_EP_LEN}" | tr '[:upper:]' '[:lower:]')" in
@@ -402,11 +414,11 @@ fi
 
 if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
   case "${RANDOMIZATION_PRESET}" in
-    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay)
+    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay|g1_29dof_wbt_w_object_teacher_state_robust)
       ;;
     *)
       echo "[ERROR] RANDOMIZATION/RANDOMIZATION_PRESET must be one of:" >&2
-      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay" >&2
+      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay, g1_29dof_wbt_w_object_teacher_state_robust" >&2
       echo "[ERROR] Got: ${RANDOMIZATION_PRESET}" >&2
       exit 2
       ;;
@@ -429,6 +441,7 @@ echo "[INFO] HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=${HOLOSOMA_REQUIRE_SINGLE_SLOT
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
 echo "[INFO] HOLOSOMA_MOTION_METRICS_INTERVAL=${HOLOSOMA_MOTION_METRICS_INTERVAL}"
+echo "[INFO] contact_coverage_contract intervals=${HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE} targets=${HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE}"
 echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-8192} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 

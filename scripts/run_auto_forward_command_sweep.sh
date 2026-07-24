@@ -10,6 +10,7 @@ RUN_GAP_S=${RUN_GAP_S:-5}
 VISER_PORT=${VISER_PORT:-7077}
 POLICY_CHECKPOINT=${POLICY_CHECKPOINT:-outputs/checkpoints/swl41n4x/model_31500.pt}
 PYTHON_BIN=${PYTHON_BIN:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python}
+INFER_EXTRA_ARGS=${INFER_EXTRA_ARGS:-}
 OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${REPO_ROOT}/data/debug_auto_forward_after_lift_single_clip"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
 OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-1}
@@ -29,6 +30,7 @@ python_bin=${PYTHON_BIN}
 omomo_data_dir=${OMOMO_DATA_DIR}
 omomo_object_map=${OMOMO_OBJECT_MAP}
 omomo_expected_total=${OMOMO_EXPECTED_TOTAL}
+infer_extra_args=${INFER_EXTRA_ARGS}
 EOF
 
 printf "cmd_x\tstatus\tpid\tlog_path\tjsonl_path\tstarted_utc\tended_utc\n" > "${OUT_ROOT}/status.tsv"
@@ -81,7 +83,7 @@ for command_spec in ${COMMAND_SWEEP}; do
     VISER_PORT='${VISER_PORT}' \
     LOGURU_LEVEL='${LOGURU_LEVEL:-INFO}' \
     PY_LOG_LEVEL='${PY_LOG_LEVEL:-INFO}' \
-    bash infer_as_joystick.sh '${POLICY_CHECKPOINT}'
+    bash infer_as_joystick.sh '${POLICY_CHECKPOINT}' ${INFER_EXTRA_ARGS}
   " > "${run_log}" 2>&1 &
   pid=$!
 
@@ -122,5 +124,11 @@ for command_spec in ${COMMAND_SWEEP}; do
 
   sleep "${RUN_GAP_S}"
 done
+
+if compgen -G "${OUT_ROOT}/*.jsonl" >/dev/null; then
+  "${PYTHON_BIN}" scripts/analyze_auto_forward_handedness.py "${OUT_ROOT}" --out-dir "${OUT_ROOT}"
+else
+  echo "[SWEEP] no JSONL logs found; skipping auto-forward handedness analysis" >&2
+fi
 
 echo "[SWEEP] complete out_root=${OUT_ROOT}"

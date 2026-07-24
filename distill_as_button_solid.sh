@@ -39,8 +39,8 @@ Useful env vars:
   SOLID_TARGET_BANK_NAME=<name>  override generated filtered bank name
   CORL_SOLID80_BANK_NAME=<name>  override preferred cp_corl.sh bank name
   CHECK_ONLY=1               count matching clips in the selected source bank
-  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369-recovered/model_22000.pt
-  BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
+  RESUME_FROM_BOX=1          initialize policy weights from an architecture-compatible box-button checkpoint
+  BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer; actor keys/shapes must match exactly
   RESUME_FROM_PREVIOUS=1     initialize actor policy weights from previous AS distill run
   PREVIOUS_RESUME_RUN=<url>  previous run URL; default swl41n4x
   PREVIOUS_RESUME_CKPT=<checkpoint>  explicit previous checkpoint; otherwise latest model_*.pt is used
@@ -49,6 +49,7 @@ EOF
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 CHECK_ONLY=${CHECK_ONLY:-0}
 RESUME_FROM_PREVIOUS=${RESUME_FROM_PREVIOUS:-0}
@@ -172,7 +173,7 @@ resolve_remote_wandb_checkpoint_name() {
   local entity="$1"
   local project="$2"
   local run_id="$3"
-  "${PYTHON_BIN:-python}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+  "${PYTHON_BIN}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
 import re
 import sys
 from pathlib import Path
@@ -253,6 +254,14 @@ if [[ "${RESUME_FROM_PREVIOUS}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
   echo "[ERROR] --resume-from-previous and --resume-from-box are mutually exclusive." >&2
   exit 2
 fi
+if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
+  _previous_student_policy_type="$(echo "${STUDENT_POLICY_TYPE:-mlp}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+  if [[ "${_previous_student_policy_type}" != "mlp" ]]; then
+    echo "[ERROR] RESUME_FROM_PREVIOUS=1 uses the saved single-button MLP policy profile and cannot initialize STUDENT_POLICY_TYPE=${_previous_student_policy_type}." >&2
+    echo "[ERROR] Use an architecture-matched full flow checkpoint through RESUME_CKPT." >&2
+    exit 2
+  fi
+fi
 
 export AS_SUCCESS133_FINAL0P5="${AS_SUCCESS133_FINAL0P5:-1}"
 export RESUME_FROM_BOX
@@ -282,7 +291,12 @@ if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
       exit 2
       ;;
   esac
+  PREVIOUS_POLICY_INIT_CACHE_ROOT=${PREVIOUS_POLICY_INIT_CACHE_ROOT:-"${HOME}/.cache/holosoma/policy_init"}
+  PREVIOUS_RESUME_CKPT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/resolve_exact_checkpoint.py" \
+    --ref "${PREVIOUS_RESUME_CKPT}" \
+    --cache-root "${PREVIOUS_POLICY_INIT_CACHE_ROOT}")
   export POLICY_INIT_CKPT="${PREVIOUS_RESUME_CKPT}"
+  export AS_POLICY_INIT_PROFILE=drop_button_mlp_perception
   unset POLICY_INIT_CHECKPOINT
   unset RESUME_CKPT
   unset RESUME_CHECKPOINT
@@ -296,7 +310,7 @@ if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
 fi
 SOLID_ALLOWED_OBJECT_CATEGORIES=${SOLID_ALLOWED_OBJECT_CATEGORIES:-'["box","bin","barrel","ball"]'}
 SOLID_ALLOWED_OBJECT_CATEGORIES=$(
-  python3 - "${SOLID_ALLOWED_OBJECT_CATEGORIES}" <<'PY'
+  "${PYTHON_BIN}" - "${SOLID_ALLOWED_OBJECT_CATEGORIES}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -359,13 +373,6 @@ if [[ -z "${USER_SET_AS_SUCCESS133_BANK_NAME}" && -z "${USER_SET_OMOMO_DATA_DIR}
 fi
 SOLID_SOURCE_BANK=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/${AS_SUCCESS133_BANK_NAME}"}
 SOLID_SOURCE_MAP=${OMOMO_OBJECT_MAP:-"${SOLID_SOURCE_BANK}/_clip_object_urdf_map.json"}
-case "${SOLID_SOURCE_BANK}:${SOLID_SOURCE_MAP}:${AS_SUCCESS133_BANK_NAME}:${CORL_SOLID80_BANK_NAME}" in
-  *primitiveproj*)
-    echo "[ERROR] Refusing primitiveproj object bank for solid AS distill." >&2
-    echo "[ERROR] Generate/use a mesh-physics bank instead." >&2
-    exit 2
-    ;;
-esac
 SOLID_CONTACT_EXPORT_NAME=${SOLID_CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
 DEFAULT_SOLID_CLIP_LIST="${SOLID_SOURCE_BANK}/clean80_strict_success_solid_no_falldown_clips.txt"
 if [[ -z "${SOLID_CLIP_LIST:-}" && -f "${DEFAULT_SOLID_CLIP_LIST}" ]]; then
@@ -378,11 +385,12 @@ fi
 SOLID_TARGET_BANK_NAME=${SOLID_TARGET_BANK_NAME:-}
 
 if [[ "${CHECK_ONLY}" == "1" ]]; then
-  python3 - "${SOLID_SOURCE_BANK}" "${SOLID_SOURCE_MAP}" "${SOLID_ALLOWED_OBJECT_CATEGORIES}" "${SOLID_CLIP_LIST}" <<'PY'
+  "${PYTHON_BIN}" - "${SOLID_SOURCE_BANK}" "${SOLID_SOURCE_MAP}" "${SOLID_ALLOWED_OBJECT_CATEGORIES}" "${SOLID_CLIP_LIST}" <<'PY'
 from __future__ import annotations
 
 import json
 import sys
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
@@ -443,6 +451,43 @@ def category_for(clip_id: str, entry: object) -> str:
     return "other"
 
 
+def validate_mesh_geometry(clip_id: str, entry: object) -> None:
+    if not isinstance(entry, dict):
+        raise SystemExit(f"[ERROR] Solid object map entry for {clip_id} must contain object_urdf_path metadata")
+    raw_urdf = str(entry.get("object_urdf_path", "")).strip()
+    if not raw_urdf:
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} is missing object_urdf_path")
+    urdf = Path(raw_urdf).expanduser()
+    if not urdf.is_absolute():
+        urdf = (map_path.parent / urdf).resolve()
+    if not urdf.is_file():
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF is missing: {urdf}")
+    try:
+        root = ET.parse(urdf).getroot()
+    except Exception as exc:
+        raise SystemExit(f"[ERROR] Invalid object URDF for {clip_id}: {urdf}: {exc}") from exc
+    primitive_tags = [name for name in ("box", "sphere", "cylinder", "capsule") if root.findall(f".//{name}")]
+    if primitive_tags:
+        raise SystemExit(
+            f"[ERROR] Solid clip {clip_id} uses primitive geometry {primitive_tags} in {urdf}; "
+            "the bank name is not used to infer geometry"
+        )
+    mesh_paths = []
+    for mesh in root.findall(".//mesh"):
+        raw_mesh = str(mesh.get("filename", "")).strip()
+        if not raw_mesh:
+            raise SystemExit(f"[ERROR] Empty mesh filename for {clip_id} in {urdf}")
+        mesh_path = Path(raw_mesh).expanduser()
+        if not mesh_path.is_absolute():
+            mesh_path = (urdf.parent / mesh_path).resolve()
+        mesh_paths.append(mesh_path)
+    if not mesh_paths:
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} has no mesh geometry in {urdf}")
+    missing = [path for path in mesh_paths if not path.is_file()]
+    if missing:
+        raise SystemExit(f"[ERROR] Solid clip {clip_id} references missing mesh assets: {missing[:6]}")
+
+
 counts = Counter()
 missing_npz = []
 selected = []
@@ -460,6 +505,7 @@ for clip_id, entry in clips.items():
     if not (motion_dir / f"{clip_id}.npz").is_file():
         missing_npz.append(clip_id)
         continue
+    validate_mesh_geometry(clip_id, entry)
     selected.append(clip_id)
 
 if list_missing_from_map:
@@ -480,250 +526,66 @@ PY
   exit 0
 fi
 
-SOLID_PREP_OUTPUT=$(
-  python3 - "${SOLID_SOURCE_BANK}" "${SOLID_SOURCE_MAP}" "${SOLID_ALLOWED_OBJECT_CATEGORIES}" "${SOLID_CONTACT_EXPORT_NAME}" "${SOLID_CLIP_LIST}" "${SOLID_TARGET_BANK_NAME}" <<'PY'
-from __future__ import annotations
-
-import json
-import os
-import re
-import shutil
-import sys
-import xml.etree.ElementTree as ET
-from collections import Counter
-from pathlib import Path
-
-source_bank = Path(sys.argv[1]).expanduser().resolve()
-source_map = Path(sys.argv[2]).expanduser().resolve()
-allowed = set(json.loads(sys.argv[3]))
-contact_export_name = sys.argv[4].strip() or "contact_export_from_teacher_success133_final0p5"
-clip_list_raw = sys.argv[5].strip()
-target_bank_name_raw = sys.argv[6].strip()
-
-if not source_bank.is_dir():
-    raise SystemExit(f"[ERROR] Solid source bank does not exist: {source_bank}")
-if not source_map.is_file():
-    raise SystemExit(f"[ERROR] Solid source object map does not exist: {source_map}")
-if clip_list_raw:
-    clip_list_path = Path(clip_list_raw).expanduser().resolve()
-    if not clip_list_path.is_file():
-        raise SystemExit(f"[ERROR] SOLID_CLIP_LIST does not exist: {clip_list_path}")
-    allowed_clip_ids = {
-        line.strip()
-        for line in clip_list_path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    if not allowed_clip_ids:
-        raise SystemExit(f"[ERROR] SOLID_CLIP_LIST is empty: {clip_list_path}")
-else:
-    clip_list_path = None
-    allowed_clip_ids = None
-
-payload = json.loads(source_map.read_text(encoding="utf-8"))
-clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
-if not isinstance(clips, dict) or not clips:
-    raise SystemExit(f"[ERROR] Invalid object map: {source_map}")
-
-
-def category_for(clip_id: str, entry: object) -> str:
-    parts = [clip_id]
-    if isinstance(entry, dict):
-        for key in ("object_name", "object_urdf_path", "object_mesh_path", "object_category", "category", "object_type"):
-            value = str(entry.get(key, "")).strip()
-            if not value:
-                continue
-            if key.endswith("_path"):
-                path = Path(value)
-                parts.extend([path.name, path.stem])
-            else:
-                parts.append(value)
-    else:
-        path = Path(str(entry).strip())
-        parts.extend([path.name, path.stem])
-    raw = " ".join(parts).lower().replace("-", "_")
-    if "barrel" in raw:
-        return "barrel"
-    if "bin" in raw or "trash" in raw or "basket" in raw:
-        return "bin"
-    if "ball" in raw or "sphere" in raw:
-        return "ball"
-    if "box" in raw or "cube" in raw or "largebox" in raw:
-        return "box"
-    return "other"
-
-
-counts = Counter()
-selected: dict[str, object] = {}
-missing_npz: list[str] = []
-list_missing_from_map = set(allowed_clip_ids or ())
-for clip_id, entry in clips.items():
-    category = category_for(clip_id, entry)
-    counts[category] += 1
-    if allowed_clip_ids is not None:
-        if clip_id in allowed_clip_ids:
-            list_missing_from_map.discard(clip_id)
-        else:
-            continue
-    if category not in allowed:
-        continue
-    source_npz = source_bank / f"{clip_id}.npz"
-    if not source_npz.is_file():
-        missing_npz.append(clip_id)
-        continue
-    selected[clip_id] = entry
-
-if list_missing_from_map:
-    preview = ", ".join(sorted(list_missing_from_map)[:20])
-    raise SystemExit(f"[ERROR] SOLID_CLIP_LIST contains clips missing from object map: {preview}")
-if missing_npz:
-    preview = ", ".join(missing_npz[:20])
-    raise SystemExit(f"[ERROR] Allowed solid clips missing .npz files: {preview}")
-if not selected:
-    raise SystemExit(f"[ERROR] No clips matched allowed solid categories {sorted(allowed)} in {source_bank}")
-
-slug = "_".join(category for category in ("box", "bin", "barrel", "ball") if category in allowed)
-safe_source_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_bank.name).strip("_")
-if target_bank_name_raw:
-    target_bank = source_bank.parent / target_bank_name_raw
-else:
-    target_bank = source_bank.parent / f"{safe_source_name}_solid_{slug}"
-marker = target_bank / ".generated_by_distill_as_button_solid"
-
-if target_bank.exists():
-    if not marker.exists():
-        raise SystemExit(
-            f"[ERROR] Refusing to overwrite non-generated solid bank: {target_bank}. "
-            "Remove it manually or choose another source bank."
-        )
-    for child in target_bank.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-else:
-    target_bank.mkdir(parents=True)
-
-for clip_id in sorted(selected):
-    source_npz = (source_bank / f"{clip_id}.npz").resolve()
-    target_npz = target_bank / f"{clip_id}.npz"
-    target_npz.symlink_to(os.path.relpath(source_npz, start=target_bank))
-
-def absolutize_entry_paths(entry: object) -> object:
-    if not isinstance(entry, dict):
-        raw = str(entry).strip()
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = (source_map.parent / candidate).resolve()
-        return str(candidate)
-    updated = dict(entry)
-    for key in ("object_urdf_path", "object_mesh_path"):
-        raw = str(updated.get(key, "")).strip()
-        if not raw:
-            continue
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = (source_map.parent / candidate).resolve()
-        updated[key] = str(candidate)
-    return updated
-
-
-def validate_mesh_urdf(clip_id: str, entry: object) -> dict:
-    updated = absolutize_entry_paths(entry)
-    if not isinstance(updated, dict):
-        raise SystemExit(f"[ERROR] Solid object map entry for {clip_id} must be a dict with object_urdf_path.")
-
-    urdf_raw = str(updated.get("object_urdf_path", "")).strip()
-    if not urdf_raw:
-        raise SystemExit(f"[ERROR] Solid clip {clip_id} is missing object_urdf_path.")
-    urdf = Path(urdf_raw).expanduser()
-    if not urdf.is_file():
-        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF is missing: {urdf}")
-
-    try:
-        root = ET.parse(urdf).getroot()
-    except Exception as exc:
-        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF is invalid: {urdf}: {exc}") from exc
-
-    primitive_tags = [
-        tag_name
-        for tag_name in ("box", "sphere", "cylinder", "capsule")
-        if root.findall(f".//{tag_name}")
-    ]
-    if primitive_tags:
-        raise SystemExit(
-            f"[ERROR] Solid clip {clip_id} object URDF contains primitive geometry {primitive_tags}: {urdf}. "
-            "Use mesh geometry for realmesh object training."
-        )
-
-    mesh_refs: list[Path] = []
-    for mesh_tag in root.findall(".//mesh"):
-        raw_mesh = str(mesh_tag.get("filename", "")).strip()
-        if not raw_mesh:
-            raise SystemExit(f"[ERROR] Solid clip {clip_id} has an empty mesh filename in {urdf}")
-        mesh_path = Path(raw_mesh).expanduser()
-        if not mesh_path.is_absolute():
-            mesh_path = (urdf.parent / mesh_path).resolve()
-        mesh_refs.append(mesh_path)
-
-    if not mesh_refs:
-        raise SystemExit(
-            f"[ERROR] Solid clip {clip_id} object URDF has no mesh geometry: {urdf}. "
-            "Refusing fallback box/cuboid URDFs for solid AS distill."
-        )
-
-    missing_meshes = [path for path in mesh_refs if not path.is_file()]
-    if missing_meshes:
-        preview = ", ".join(str(path) for path in missing_meshes[:6])
-        raise SystemExit(f"[ERROR] Solid clip {clip_id} object URDF references missing mesh file(s): {preview}")
-
-    return updated
-
-
-filtered_payload = {"clips": {clip_id: validate_mesh_urdf(clip_id, selected[clip_id]) for clip_id in sorted(selected)}}
-(target_bank / "_clip_object_urdf_map.json").write_text(
-    json.dumps(filtered_payload, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
+# Publish a new content-addressed generation instead of clearing a directory
+# that an active MotionLoader may still be consuming.
+SOLID_PREP_ARGS=(
+  --source-bank "${SOLID_SOURCE_BANK}"
+  --source-map "${SOLID_SOURCE_MAP}"
+  --allowed-categories-json "${SOLID_ALLOWED_OBJECT_CATEGORIES}"
+  --contact-export-name "${SOLID_CONTACT_EXPORT_NAME}"
 )
+if [[ -n "${SOLID_CLIP_LIST}" ]]; then
+  SOLID_PREP_ARGS+=(--clip-list "${SOLID_CLIP_LIST}")
+fi
+if [[ -n "${SOLID_TARGET_BANK_NAME}" ]]; then
+  SOLID_PREP_ARGS+=(--target-bank-name "${SOLID_TARGET_BANK_NAME}")
+fi
+if [[ -n "${AS_CONTACT_EXPORT_ROOT:-}" ]]; then
+  SOLID_PREP_ARGS+=(--contact-root "${AS_CONTACT_EXPORT_ROOT}")
+fi
+SOLID_PREP_OUTPUT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_immutable_solid_bank.py" "${SOLID_PREP_ARGS[@]}")
 
-for metadata_name in ("teacher_export_summary.json", "teacher_export_summary.csv", "source_teacher_export.txt"):
-    source_metadata = source_bank / metadata_name
-    if source_metadata.exists():
-        (target_bank / metadata_name).symlink_to(os.path.relpath(source_metadata.resolve(), start=target_bank))
-
-source_contact_root_raw = os.environ.get("AS_CONTACT_EXPORT_ROOT", "").strip()
-source_contact_root = Path(source_contact_root_raw).expanduser()
-if not source_contact_root_raw:
-    source_contact_root = source_bank / contact_export_name
-source_contact_root = source_contact_root.resolve()
-if not source_contact_root.is_dir():
-    raise SystemExit(f"[ERROR] Missing contact export root for solid bank: {source_contact_root}")
-target_contact_root = target_bank / contact_export_name
-target_contact_root.symlink_to(os.path.relpath(source_contact_root, start=target_bank))
-
-marker.write_text(
-    "generated by distill_as_button_solid.sh\n"
-    f"source_bank={source_bank}\n"
-    f"allowed={json.dumps(sorted(allowed))}\n"
-    f"clip_list={clip_list_path if clip_list_path is not None else ''}\n"
-    f"selected={len(selected)}\n",
-    encoding="utf-8",
-)
-
-print(f"SOLID_BANK_NAME={target_bank.name}")
-print(f"SOLID_BANK_DIR={target_bank}")
-print(f"SOLID_OBJECT_MAP={target_bank / '_clip_object_urdf_map.json'}")
-print(f"SOLID_SELECTED_CLIP_COUNT={len(selected)}")
-print("SOLID_CATEGORY_COUNTS=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
-PY
-)
 
 while IFS='=' read -r key value; do
   case "${key}" in
-    SOLID_BANK_NAME|SOLID_BANK_DIR|SOLID_OBJECT_MAP|SOLID_SELECTED_CLIP_COUNT|SOLID_CATEGORY_COUNTS)
+    SOLID_BANK_NAME|SOLID_BANK_DIR|SOLID_OBJECT_MAP|SOLID_SELECTED_CLIP_COUNT|SOLID_CATEGORY_COUNTS|SOLID_SOURCE_DIGEST)
       printf -v "${key}" '%s' "${value}"
       ;;
   esac
 done <<< "${SOLID_PREP_OUTPUT}"
+
+if ! [[ "${SOLID_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "[ERROR] Immutable solid-AS preparation returned a malformed source digest: ${SOLID_SOURCE_DIGEST:-<empty>}" >&2
+  exit 2
+fi
+if ! [[ "${SOLID_SELECTED_CLIP_COUNT:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] Immutable solid-AS preparation returned an invalid selected clip count: ${SOLID_SELECTED_CLIP_COUNT:-<empty>}" >&2
+  exit 2
+fi
+
+# batch_ne.sh seals these two values only after every launch node has built and
+# verified the same external-AS closure.  Re-check the values returned by the
+# real wrapper materialization so a source-bank mutation between that barrier
+# and this entrypoint cannot redirect training onto a newly generated view.
+if [[ -n "${HOLOSOMA_EXTERNAL_AS_SOLID_SOURCE_DIGEST:-}" \
+      || -n "${HOLOSOMA_EXTERNAL_AS_SELECTED_CLIP_COUNT:-}" ]]; then
+  if ! [[ "${HOLOSOMA_EXTERNAL_AS_SOLID_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "[ERROR] Sealed external-AS contract has a malformed solid source digest." >&2
+    exit 2
+  fi
+  if ! [[ "${HOLOSOMA_EXTERNAL_AS_SELECTED_CLIP_COUNT:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] Sealed external-AS contract has an invalid selected clip count." >&2
+    exit 2
+  fi
+  if [[ "${SOLID_SOURCE_DIGEST}" != "${HOLOSOMA_EXTERNAL_AS_SOLID_SOURCE_DIGEST}" ]]; then
+    echo "[ERROR] Effective solid-AS source changed after the all-node barrier: actual=${SOLID_SOURCE_DIGEST} expected=${HOLOSOMA_EXTERNAL_AS_SOLID_SOURCE_DIGEST}" >&2
+    exit 2
+  fi
+  if [[ "${SOLID_SELECTED_CLIP_COUNT}" != "${HOLOSOMA_EXTERNAL_AS_SELECTED_CLIP_COUNT}" ]]; then
+    echo "[ERROR] Effective solid-AS clip count changed after the all-node barrier: actual=${SOLID_SELECTED_CLIP_COUNT} expected=${HOLOSOMA_EXTERNAL_AS_SELECTED_CLIP_COUNT}" >&2
+    exit 2
+  fi
+fi
 
 export AS_SUCCESS133_BANK_NAME="${SOLID_BANK_NAME}"
 export OMOMO_DATA_DIR="${SOLID_BANK_DIR}"
@@ -737,6 +599,7 @@ echo "[INFO] solid_allowed_object_categories=${SOLID_ALLOWED_OBJECT_CATEGORIES}"
 echo "[INFO] source_bank=${SOLID_SOURCE_BANK}"
 echo "[INFO] solid_clip_list=${SOLID_CLIP_LIST:-<none>}"
 echo "[INFO] prepared_solid_bank=${SOLID_BANK_DIR}"
+echo "[INFO] solid_source_digest=${SOLID_SOURCE_DIGEST}"
 echo "[INFO] selected_solid_clips=${SOLID_SELECTED_CLIP_COUNT} category_counts=${SOLID_CATEGORY_COUNTS}"
 echo "[INFO] resume_from_box=${RESUME_FROM_BOX}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then

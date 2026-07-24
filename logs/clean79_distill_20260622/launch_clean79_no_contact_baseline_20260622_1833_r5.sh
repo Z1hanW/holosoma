@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/ubuntu/FAR/holosoma
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC=8
+export NNODES=1
+export PER_GPU_ENVS=128
+export PYTHON_BIN=/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python3
+export OMNI_KIT_ACCEPT_EULA=YES
+export ACCEPT_EULA=Y
+
+export AS_SUCCESS133_FINAL0P5=1
+export AS_SUCCESS133_BANK_NAME=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_solid80_clean_box_bin_barrel_ball_meshphys_v1
+export OMOMO_EXPECTED_TOTAL=79
+
+export RESUME_FROM_BOX=1
+export BOX_RESUME_CKPT=/home/ubuntu/.cache/holosoma/checkpoints/as_ch51_convex_pretrain_model_22000.pt
+export RESUME_FROM_BOX_CKPT=/home/ubuntu/.cache/holosoma/checkpoints/as_ch51_convex_pretrain_model_22000.pt
+
+export AS_CONTACT_AWARE=0
+export ROOT_COMMAND_MODE=default
+export STUDENT_ACTOR_INPUTS="['actor_obs_root','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
+export USE_ADAPTIVE_TIMESTEPS_SAMPLER=False
+
+export RUN_NAME=g1_w_object_distill_as_button_clean79_no_contact_baseline_m58000_e128_r5
+export TRAINING_NAME=g1_29dof_wbt_w_object_distill_as_button_clean79_no_contact_baseline_m58000_depth_e128_r5
+export SCHEDULE_NAME=as_clean79_no_contact_drop_button_ppo_first_m58000
+export SCHEDULE_NOTES=clean79_no_contact_baseline_m58000_e128_r5
+export NUM_LEARNING_ITERATIONS=40000
+export SAVE_INTERVAL=100
+export WANDB_RESUME_SAME_RUN=0
+
+export NCCL_IB_DISABLE=1
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
+
+export OBJECT_GEOMETRY_MODE=mesh
+export HOLOSOMA_OBJECT_SPAWN_MODE=single_slot_multi_urdf
+export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=1
+
+bash ./distill_as_button.sh no-contact-aware wandb://zihanw22/carry-any/bcleb5oi/model_58000.pt

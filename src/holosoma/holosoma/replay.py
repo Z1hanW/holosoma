@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,118 @@ def _replay_debug_paths() -> tuple[Path, Path]:
     return csv_path, hits_dir
 
 
+def _prepare_first_kinematic_trajectory(env: Any, torch_module: Any) -> Any:
+    """Start direct replay from the same transition state as a training reset.
+
+    Command setup configures runtime-hold buffers after the environment's
+    constructor-level reset.  Without this explicit first-trajectory reset, a
+    direct replay recognizes global transition semantics but starts at raw
+    motion frame zero with the runtime prepend inactive.  Formal replay must
+    instead begin from motion timestep zero and activate the configured hold.
+    """
+
+    motion_command = env.command_manager.get_state("motion_command")
+    env_ids = torch_module.arange(
+        int(env.num_envs),
+        device=motion_command.time_steps.device,
+        dtype=torch_module.long,
+    )
+    motion_command.time_steps[env_ids] = 0
+    if bool(getattr(motion_command, "_runtime_default_pose_prepend_enabled", False)):
+        activate = getattr(motion_command, "_activate_runtime_default_pose_prepend", None)
+        if not callable(activate):
+            raise RuntimeError(
+                "Runtime default-pose prepend is enabled but direct replay cannot activate it."
+            )
+        activate(env_ids)
+    return motion_command
+
+
+def _transition_step_count(transition_contract: dict[str, Any], key: str) -> int:
+    section = transition_contract.get(key, {})
+    if not isinstance(section, dict):
+        raise RuntimeError(f"Replay transition contract {key!r} section must be a mapping.")
+    steps = section.get("steps", 0)
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+        raise RuntimeError(
+            f"Replay transition contract {key!r} steps must be a non-negative integer."
+        )
+    return steps
+
+
+def _expected_replay_frame_count(
+    source_frame_count: int,
+    transition_contract: dict[str, Any],
+) -> int:
+    """Return the complete materialized replay length for one selected clip."""
+
+    if isinstance(source_frame_count, bool) or not isinstance(source_frame_count, int):
+        raise RuntimeError("Replay source frame count must be an integer.")
+    if source_frame_count <= 0:
+        raise RuntimeError("Replay source frame count must be positive.")
+
+    source_semantics = transition_contract.get("source_semantics")
+    if source_semantics == "global_multi_clip_runtime":
+        return (
+            source_frame_count
+            + _transition_step_count(transition_contract, "prepend")
+            + _transition_step_count(transition_contract, "append")
+        )
+    # Static-splice transitions are already part of MotionLoader.clip_lengths.
+    return source_frame_count
+
+
+def _source_frame_to_materialized_index(source_frame: int, prepend_frames: int) -> int:
+    """Map a non-negative source frame onto its materialized replay index."""
+
+    if (
+        isinstance(source_frame, bool)
+        or not isinstance(source_frame, int)
+        or source_frame < 0
+    ):
+        raise ValueError("source_frame must be a non-negative integer")
+    if (
+        isinstance(prepend_frames, bool)
+        or not isinstance(prepend_frames, int)
+        or prepend_frames < 0
+    ):
+        raise ValueError("prepend_frames must be a non-negative integer")
+    return source_frame + prepend_frames
+
+
+def _replay_reached_full_source_terminal(motion_command: Any, env_id: int) -> bool:
+    """End direct replay only after rendering source frame ``L - 1``.
+
+    ``MotionCommand.motion_end_mask`` intentionally remains at ``L - 2`` for
+    episodic training.  Direct replay needs the complete source artifact, so it
+    owns this separate terminal predicate.  An active runtime prepend is never
+    terminal even for a one-frame source clip.
+    """
+
+    runtime_active = getattr(
+        motion_command,
+        "_runtime_default_pose_prepend_active",
+        None,
+    )
+    if runtime_active is not None and bool(runtime_active[env_id].item()):
+        return False
+
+    clip_lengths = getattr(motion_command, "current_clip_lengths", None)
+    if callable(clip_lengths):
+        clip_lengths = clip_lengths()
+    if clip_lengths is None:
+        get_clip_lengths = getattr(motion_command, "_current_clip_lengths", None)
+        if not callable(get_clip_lengths):
+            raise RuntimeError("Replay motion command does not expose current clip lengths.")
+        clip_lengths = get_clip_lengths()
+
+    source_frame_count = int(clip_lengths[env_id].item())
+    if source_frame_count <= 0:
+        raise RuntimeError("Replay selected a motion clip with no source frames.")
+    motion_step = int(motion_command.time_steps[env_id].item())
+    return motion_step >= source_frame_count - 1
+
+
 def replay(tyro_config: ExperimentConfig):
     simulation_app = init_sim_imports(tyro_config)
 
@@ -157,12 +270,27 @@ def replay(tyro_config: ExperimentConfig):
     tyro_env_config = get_tyro_env_config(tyro_config)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     env = get_class(env_target)(tyro_env_config, device=device)
+    motion_command = _prepare_first_kinematic_trajectory(env, torch)
+    transition_contract = motion_command.get_motion_transition_contract()
+    from holosoma.managers.command.terms.wbt import motion_transition_contract_sha256
+
+    print(
+        "[INFO] Replay motion transition contract: "
+        f"{json.dumps(transition_contract, sort_keys=True)} "
+        f"sha256={motion_transition_contract_sha256(transition_contract)}"
+    )
     video_recorder = getattr(getattr(env, "simulator", None), "video_recorder", None)
     record_env_id = 0
     if video_recorder is not None and video_recorder.enabled:
         record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
         if not video_recorder.is_recording:
             video_recorder.start_recording(episode_id=0)
+
+    source_frame_count = int(motion_command.current_clip_lengths[record_env_id].item())
+    expected_replay_frame_count = _expected_replay_frame_count(
+        source_frame_count,
+        transition_contract,
+    )
 
     wandb, wandb_run = _init_replay_wandb(tyro_config)
     if wandb_run is not None:
@@ -224,9 +352,56 @@ def replay(tyro_config: ExperimentConfig):
 
     done = False
     step = 0
+    motion_clock_path_raw = os.environ.get("HOLOSOMA_REPLAY_MOTION_CLOCK_CSV", "").strip()
+    motion_clock_fh = None
+    if motion_clock_path_raw:
+        motion_clock_path = Path(motion_clock_path_raw).expanduser()
+        motion_clock_path.parent.mkdir(parents=True, exist_ok=True)
+        motion_clock_fh = motion_clock_path.open("x", encoding="utf-8", buffering=1)
+        motion_clock_fh.write(
+            "physical_step,motion_step,runtime_active_before,runtime_active_after,runtime_step_after\n"
+        )
     while not done:
-        env.simulator.sim.step()
-        done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
+        # The reset/reference state at runtime-prepend alpha zero is a real
+        # materialized frame.  Render it once without advancing the command;
+        # subsequent iterations retain the historical step-then-render order.
+        capture_initial_state = step == 0
+        runtime_active_before = False
+        runtime_active_tensor = getattr(
+            motion_command,
+            "_runtime_default_pose_prepend_active",
+            None,
+        )
+        if runtime_active_tensor is not None:
+            runtime_active_before = bool(runtime_active_tensor[record_env_id].item())
+        if not capture_initial_state:
+            env.simulator.sim.step()
+        env.step_visualize_motion(  # type: ignore[attr-defined]
+            None,
+            advance_motion=not capture_initial_state,
+        )
+        done = _replay_reached_full_source_terminal(motion_command, record_env_id)
+        if motion_clock_fh is not None:
+            runtime_active_after = False
+            runtime_step_after = 0
+            runtime_active_tensor = getattr(
+                motion_command,
+                "_runtime_default_pose_prepend_active",
+                None,
+            )
+            runtime_step_tensor = getattr(
+                motion_command,
+                "_runtime_default_pose_prepend_step",
+                None,
+            )
+            if runtime_active_tensor is not None:
+                runtime_active_after = bool(runtime_active_tensor[record_env_id].item())
+            if runtime_step_tensor is not None:
+                runtime_step_after = int(runtime_step_tensor[record_env_id].item())
+            motion_clock_fh.write(
+                f"{step},{int(motion_command.time_steps[record_env_id].item())},"
+                f"{int(runtime_active_before)},{int(runtime_active_after)},{runtime_step_after}\n"
+            )
         if video_recorder is not None and video_recorder.enabled:
             # Replay already advances once per motion-command frame, so applying
             # control decimation again would under-sample the output video.
@@ -426,6 +601,13 @@ def replay(tyro_config: ExperimentConfig):
                 print(f"[WARN] Replay step debug failed at step={step}: {exc}")
         step += 1
 
+    if step != expected_replay_frame_count:
+        raise RuntimeError(
+            "Replay materialized frame count differs from the authenticated transition "
+            f"contract: captured={step}, expected={expected_replay_frame_count}, "
+            f"source_frames={source_frame_count}."
+        )
+
     if wandb_run is not None and depth_log_video and depth_video_frames:
         control_freq = 30.0
         try:
@@ -452,6 +634,10 @@ def replay(tyro_config: ExperimentConfig):
 
     if video_recorder is not None and video_recorder.enabled and video_recorder.is_recording:
         video_recorder.stop_recording()
+    if motion_clock_fh is not None:
+        motion_clock_fh.close()
+        motion_clock_fh = None
+        print(f"[INFO] Replay motion clock CSV saved: {motion_clock_path_raw}")
 
     keep_open = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_KEEP_OPEN"), default=False)
     if keep_open:
@@ -494,6 +680,8 @@ def replay(tyro_config: ExperimentConfig):
     if step_debug_fh is not None:
         step_debug_fh.close()
         print(f"[INFO] Replay step debug CSV saved: {step_debug_csv_path}")
+    if motion_clock_fh is not None:
+        motion_clock_fh.close()
 
     close_simulation_app(simulation_app)
 

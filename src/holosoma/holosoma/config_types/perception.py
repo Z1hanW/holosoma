@@ -178,6 +178,47 @@ class PerceptionConfig:
     camera_warp_hole_prob: float = 0.0
     """Probability threshold for synthetic hole masks when enabled."""
 
+    camera_warp_hole_reference_batch_size: int | None = None
+    """Training producer batch used for batch-normalized Perlin hole fields.
+
+    ``None`` binds the reference to the live environment count during training.
+    Evaluation/export and direct split simulation must set the saved training
+    count explicitly so reducing evaluation to one environment does not change
+    the learned sensor distribution.
+    """
+
+    camera_warp_hole_seed_semantics: str = "legacy_fixed_v1"
+    """Seed contract for synthetic Perlin holes.
+
+    ``legacy_fixed_v1`` preserves the historical far-tracking field, whose
+    gradients ignored the configured experiment seed.  New scientific runs
+    opt into ``rank_local_v2`` so the field is a deterministic function of
+    ``training.seed + global_rank``.  The legacy default is intentional for
+    configs serialized before this field existed.
+    """
+
+    camera_warp_hole_octave_profile: str = "legacy_single_octave_v1"
+    """Versioned octave layout for synthetic Perlin holes.
+
+    Historical far-tracking code activates one octave while retaining five
+    candidate resolution/period entries; the original intent is not assumed.
+    Naming and preserving that observed lineage prevents a future edit from
+    silently turning the inactive candidates into a different sensor-noise
+    distribution.
+    """
+
+    reset_refresh_semantics: str = "legacy_full_v1"
+    """Perception lifecycle at an episode reset.
+
+    ``legacy_full_v1`` records the historical vectorized behavior where any
+    reset caused another full-environment producer update.  It is inherently
+    coupled to peer environments and cannot be reproduced exactly by one-env
+    direct simulation.  New scientific runs use ``targeted_v2``: only reset
+    environments refresh, without advancing the shared temporal-noise clock.
+    The legacy default is intentional for configs serialized before this field
+    existed; current presets opt into v2 explicitly.
+    """
+
     camera_warp_additive_noise_std: float = 0.0
     """Per-pixel additive Gaussian depth noise standard deviation in meters after warp artifacts."""
 
@@ -231,6 +272,9 @@ class PerceptionConfig:
 
     encoder_pretrained_path: str | None = None
     """Optional local checkpoint path for external perception backbones."""
+
+    encoder_pretrained_sha256: str | None = None
+    """Required SHA-256 for a local external-backbone checkpoint when pretrained is enabled."""
 
     encoder_freeze_backbone: bool = True
     """Freeze external perception backbones and train only the projection head when supported."""

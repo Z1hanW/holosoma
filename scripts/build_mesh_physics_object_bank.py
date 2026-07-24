@@ -25,10 +25,12 @@ import trimesh
 
 
 DEFAULT_MASS_PRIORS: dict[str, dict[str, float]] = {
-    "barrel": {"default": 1.2, "min": 0.5, "max": 2.5},
-    "bin": {"default": 0.8, "min": 0.3, "max": 2.0},
-    "box": {"default": 1.5, "min": 0.5, "max": 4.0},
-    "ball": {"default": 0.5, "min": 0.1, "max": 1.5},
+    # These are exact nominal URDF masses. Runtime density uncertainty is
+    # represented separately by the coupled mass/inertia scale randomizer.
+    "barrel": {"default": 1.5, "min": 1.5, "max": 1.5},
+    "bin": {"default": 1.0, "min": 1.0, "max": 1.0},
+    "box": {"default": 1.0, "min": 1.0, "max": 1.0},
+    "ball": {"default": 0.5, "min": 0.5, "max": 0.5},
     "other": {"default": 1.0, "min": 0.1, "max": 5.0},
 }
 
@@ -142,6 +144,17 @@ def _base_mass_for_category(category: str, priors: dict[str, dict[str, float]]) 
     min_mass = float(prior.get("min", 0.001))
     max_mass = float(prior.get("max", max(min_mass, mass)))
     return float(np.clip(mass, min_mass, max_mass))
+
+
+def _source_urdf_mass(src_urdf: Path) -> float:
+    root = ET.parse(src_urdf).getroot()
+    current = _read_current_inertial(root)
+    if "urdf_mass_kg" not in current:
+        raise ValueError(f"Source URDF has no inertial mass to preserve: {src_urdf}")
+    mass = float(current["urdf_mass_kg"])
+    if not math.isfinite(mass) or mass <= 0.0:
+        raise ValueError(f"Source URDF mass must be positive and finite, got {mass!r}: {src_urdf}")
+    return mass
 
 
 def _load_mesh(path: Path) -> trimesh.Trimesh:
@@ -336,14 +349,18 @@ def _link_or_copy(src: Path, dst: Path, mode: str) -> None:
 def _materialize_bank_assets(input_bank: Path, output_bank: Path, mode: str) -> None:
     output_bank.mkdir(parents=True, exist_ok=True)
     skip_names = {
+        ".generated_by_solid80_clean_nfs_packager",
         "_clip_object_urdf_map.json",
+        "cp_corl_local_manifest.json",
         "clip_object_urdf_map.json",
         "_mesh_physics_manifest.json",
         "_mesh_physics_report.csv",
         "_mesh_physics_urdfs",
+        "nfs_package_manifest.json",
     }
+    skip_prefixes = ("_scientific_", "_single_slot_")
     for child in sorted(input_bank.iterdir()):
-        if child.name in skip_names:
+        if child.name in skip_names or child.name.startswith(skip_prefixes):
             continue
         _link_or_copy(child, output_bank / child.name, mode)
 
@@ -382,7 +399,13 @@ def build_bank(args: argparse.Namespace) -> None:
     if output_bank.exists() and args.overwrite:
         shutil.rmtree(output_bank)
 
-    priors = _load_mass_priors(Path(args.mass_priors_json).expanduser().resolve() if args.mass_priors_json else None)
+    if args.mass_mode == "source_urdf" and args.mass_priors_json:
+        raise ValueError("--mass-priors-json cannot be combined with --mass-mode=source_urdf")
+    priors = (
+        {}
+        if args.mass_mode == "source_urdf"
+        else _load_mass_priors(Path(args.mass_priors_json).expanduser().resolve() if args.mass_priors_json else None)
+    )
     _materialize_bank_assets(input_bank, output_bank, args.asset_mode)
 
     metadata, clips = _load_clip_map(object_map)
@@ -405,7 +428,10 @@ def build_bank(args: argparse.Namespace) -> None:
 
         cached = generated_by_src.get(src_urdf)
         category = _category_for(clip_id, entry)
-        base_mass = _base_mass_for_category(category, priors)
+        if args.mass_mode == "source_urdf":
+            base_mass = _source_urdf_mass(src_urdf)
+        else:
+            base_mass = _base_mass_for_category(category, priors)
         if cached is None:
             stem_source = str(entry.get("object_name", "") or src_urdf.stem)
             stem = _safe_stem(stem_source)
@@ -437,6 +463,7 @@ def build_bank(args: argparse.Namespace) -> None:
         entry["mesh_physics_source_urdf_path"] = str(src_urdf)
         entry["mesh_physics_category"] = category
         entry["mesh_physics_base_mass_kg"] = base_mass
+        entry["mesh_physics_mass_mode"] = args.mass_mode
         updated_clips[clip_id] = entry
 
     output_payload: dict[str, Any] = dict(metadata)
@@ -444,6 +471,7 @@ def build_bank(args: argparse.Namespace) -> None:
     output_payload["mesh_physics"] = {
         "source_bank": str(input_bank),
         "source_object_map": str(object_map),
+        "mass_mode": args.mass_mode,
         "mass_priors": priors,
         "non_watertight_fallback": args.non_watertight_fallback,
         "unique_urdf_count": len(generated_by_src),
@@ -468,6 +496,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-bank", required=True, help="Source motion/object bank directory.")
     parser.add_argument("--object-map", default="", help="Source clip-object map. Defaults to INPUT/_clip_object_urdf_map.json.")
     parser.add_argument("--output-bank", required=True, help="Output bank directory.")
+    parser.add_argument(
+        "--mass-mode",
+        choices=("category_priors", "source_urdf"),
+        default="category_priors",
+        help=(
+            "Choose category priors or preserve each source URDF mass while "
+            "recomputing only its mesh-derived COM and inertia."
+        ),
+    )
     parser.add_argument("--mass-priors-json", default="", help="Optional category mass prior JSON override.")
     parser.add_argument(
         "--asset-mode",

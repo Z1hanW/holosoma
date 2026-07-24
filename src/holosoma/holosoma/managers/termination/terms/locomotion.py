@@ -12,7 +12,10 @@ def _apply_probability(mask: torch.Tensor, probability: float, device: torch.dev
         return mask
     if probability <= 0.0:
         return torch.zeros_like(mask, dtype=torch.bool)
-    sample = torch.rand(1, device=device)
+    # Each environment is an independent rollout.  A single broadcast sample
+    # couples every violating environment to the same Bernoulli decision and
+    # produces artificial batch-wide termination bursts.
+    sample = torch.rand(mask.shape, device=device)
     return mask & (sample < probability)
 
 

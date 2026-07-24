@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace as dataclass_replace
+import io
 import json
 import math
 import os
@@ -21,7 +22,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma"))
 sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma_inference"))
 
-from holosoma_inference.tools.patch_motion_onnx import patch_model
+from holosoma_inference.tools.patch_motion_onnx import (
+    _load_motion_clip,
+    _maybe_apply_training_motion_transitions,
+    patch_model,
+)
+from holosoma_inference.utils.embedded_motion_timeline import (
+    embedded_motion_timeline_contract_from_metadata,
+    read_stable_regular_file_bytes,
+)
 
 
 DEFAULT_MODEL = Path(
@@ -734,8 +743,17 @@ def _resolve_policy_action_scales(
     return scales
 
 
-def _read_motion_summary(motion_path: Path, dof_names: list[str]) -> dict:
-    with np.load(motion_path, allow_pickle=True) as data:
+def _read_motion_summary(
+    motion_path: Path,
+    dof_names: list[str],
+    *,
+    metadata: dict,
+) -> dict:
+    motion_payload = read_stable_regular_file_bytes(
+        motion_path,
+        label="Depth-demo motion source",
+    )
+    with np.load(io.BytesIO(motion_payload), allow_pickle=False) as data:
         body_names = _decode_names(np.asarray(data["body_names"]))
         joint_names = _decode_names(np.asarray(data["joint_names"]))
         root_idx = _resolve_root_body_index(body_names)
@@ -761,24 +779,88 @@ def _read_motion_summary(motion_path: Path, dof_names: list[str]) -> dict:
     joint_pos = joint_pos[:, joint_indices]
     joint_vel = joint_vel[:, joint_indices]
 
+    motion_cfg = (
+        metadata.get("experiment_config", {})
+        .get("command", {})
+        .get("setup_terms", {})
+        .get("motion_command", {})
+        .get("params", {})
+        .get("motion_config", {})
+    )
+    body_name_ref = motion_cfg.get("body_name_ref", ["torso_link"])
+    ref_body_name = (
+        body_name_ref[0]
+        if isinstance(body_name_ref, list) and body_name_ref
+        else "torso_link"
+    )
+    effective_motion, source_motion_sha256 = _load_motion_clip(
+        motion_path,
+        dof_names,
+        ref_body_name,
+        motion_payload=motion_payload,
+    )
+    timeline_contract = embedded_motion_timeline_contract_from_metadata(
+        metadata,
+        required=True,
+    )
+    assert timeline_contract is not None
+    if source_motion_sha256 != timeline_contract["source_motion_sha256"]:
+        raise RuntimeError(
+            "Motion source changed between ONNX patching and demo-config materialization."
+        )
+    if timeline_contract["materialization"] != "effective_training_timeline":
+        raise RuntimeError(
+            "Depth demo assets require the effective training motion timeline, not an unsafe raw diagnostic."
+        )
+    _maybe_apply_training_motion_transitions(
+        effective_motion,
+        metadata,
+        dof_names=dof_names,
+        ref_body_name=ref_body_name,
+    )
+    frame_count = int(effective_motion["joint_pos"].shape[0])
+    if frame_count != timeline_contract["embedded_frame_count"]:
+        raise RuntimeError(
+            "Demo motion timeline frame count diverged from patched ONNX provenance."
+        )
+    joint_pos = effective_motion["joint_pos"]
+    joint_vel = effective_motion["joint_vel"]
+    root_pos_w = effective_motion["root_pos_w"]
+    root_quat_wxyz = effective_motion["root_quat_wxyz"]
+    prepend_steps = int(timeline_contract["effective_prepend_steps"])
+    append_steps = int(timeline_contract["effective_append_steps"])
+    init_state = metadata.get("experiment_config", {}).get("robot", {}).get("init_state", {})
+    if prepend_steps > 0 and isinstance(init_state, dict):
+        initial_root_lin_vel_w = np.asarray(
+            init_state.get("lin_vel", [0.0, 0.0, 0.0]), dtype=np.float32
+        )
+        initial_root_ang_vel_w = np.asarray(
+            init_state.get("ang_vel", [0.0, 0.0, 0.0]), dtype=np.float32
+        )
+    else:
+        initial_root_lin_vel_w = (
+            body_lin_vel_w[0, root_idx, :].astype(np.float32)
+            if body_lin_vel_w is not None
+            else np.zeros(3, dtype=np.float32)
+        )
+        initial_root_ang_vel_w = (
+            body_ang_vel_w[0, root_idx, :].astype(np.float32)
+            if body_ang_vel_w is not None
+            else np.zeros(3, dtype=np.float32)
+        )
+
     return {
         "fps": fps,
-        "frame_count": int(body_pos_w.shape[0]),
-        "duration_s": float(body_pos_w.shape[0] / fps) if fps > 0.0 else 0.0,
-        "root_pos_w": body_pos_w[:, root_idx, :].astype(np.float32).tolist(),
-        "root_quat_wxyz": body_quat_w[:, root_idx, :].astype(np.float32).tolist(),
-        "initial_root_pos_w": body_pos_w[0, root_idx, :].astype(np.float32).tolist(),
-        "initial_root_quat_wxyz": body_quat_w[0, root_idx, :].astype(np.float32).tolist(),
-        "initial_root_lin_vel_w": (
-            body_lin_vel_w[0, root_idx, :].astype(np.float32).tolist()
-            if body_lin_vel_w is not None
-            else [0.0, 0.0, 0.0]
-        ),
-        "initial_root_ang_vel_w": (
-            body_ang_vel_w[0, root_idx, :].astype(np.float32).tolist()
-            if body_ang_vel_w is not None
-            else [0.0, 0.0, 0.0]
-        ),
+        "frame_count": frame_count,
+        "duration_s": float(frame_count / fps) if fps > 0.0 else 0.0,
+        "transition_prepend_steps": prepend_steps,
+        "transition_append_steps": append_steps,
+        "root_pos_w": root_pos_w.astype(np.float32).tolist(),
+        "root_quat_wxyz": root_quat_wxyz.astype(np.float32).tolist(),
+        "initial_root_pos_w": root_pos_w[0].astype(np.float32).tolist(),
+        "initial_root_quat_wxyz": root_quat_wxyz[0].astype(np.float32).tolist(),
+        "initial_root_lin_vel_w": initial_root_lin_vel_w.tolist(),
+        "initial_root_ang_vel_w": initial_root_ang_vel_w.tolist(),
         "reset_joint_pos": joint_pos[0].astype(np.float32).tolist(),
         "reset_joint_vel": joint_vel[0].astype(np.float32).tolist(),
         "initial_joint_pos": joint_pos[0].astype(np.float32).tolist(),
@@ -801,7 +883,7 @@ def _read_motion_summary(motion_path: Path, dof_names: list[str]) -> dict:
 
 def _read_motion_object_urdf_path(motion_path: Path) -> str:
     default_urdf = "holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
-    with np.load(motion_path, allow_pickle=True) as data:
+    with np.load(motion_path, allow_pickle=False) as data:
         if "object_urdf_path" not in data:
             return default_urdf
         raw = _scalar_str(data["object_urdf_path"]).strip()
@@ -1394,7 +1476,11 @@ def _stage_clip_bundle(
     obs_dim = int(obs_shape[1]) if obs_shape and len(obs_shape) > 1 else 0
     perception_dim = int(perception_shape[1]) if perception_shape and len(perception_shape) > 1 else None
     dof_names = list(metadata["dof_names"])
-    motion_summary = _read_motion_summary(motion_path.resolve(), dof_names)
+    motion_summary = _read_motion_summary(
+        motion_path.resolve(),
+        dof_names,
+        metadata=metadata,
+    )
     control_cfg = _extract_control_cfg(metadata)
     metadata_effort_limits = _extract_training_effort_limits(metadata, dof_names)
     if metadata_effort_limits != training_effort_limits:

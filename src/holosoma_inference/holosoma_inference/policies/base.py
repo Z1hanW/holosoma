@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
+import stat
 import sys
 import threading
 import time
@@ -31,8 +33,21 @@ from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
+from holosoma_inference.utils.embedded_motion_timeline import (
+    validate_embedded_motion_timeline_model,
+)
+from holosoma_inference.utils.contact_sidecar_contract import (
+    embedded_contact_sidecar_contract_from_metadata,
+)
+from holosoma_inference.utils.button_window_contract import (
+    embedded_button_window_contract_from_metadata,
+)
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub
+from holosoma_inference.utils.policy_contract import (
+    perception_observation_contract_sha256_from_metadata,
+    validate_onnx_policy_contract,
+)
 from holosoma_inference.utils.rate import RateLimiter
 from holosoma_inference.utils.sim_control import PolicyControlPull
 from holosoma_inference.utils.wandb import load_checkpoint
@@ -144,6 +159,26 @@ class BasePolicy:
         self.obs_dict = self.obs_config.obs_dict
         self.obs_dim_dict = self._calculate_obs_dim_dict()
         self.history_length_dict = self.obs_config.history_length_dict
+        self.obs_term_clips: dict[str, tuple[float, float] | None] = {}
+        for term_names in self.obs_dict.values():
+            for term in term_names:
+                descriptor = self.obs_config.term_descriptors.get(term)
+                clip = None if descriptor is None else descriptor.clip
+                if clip is None:
+                    self.obs_term_clips[term] = None
+                    continue
+                lower, upper = float(clip[0]), float(clip[1])
+                if not np.isfinite(lower) or not np.isfinite(upper) or lower > upper:
+                    raise ValueError(
+                        f"Inference observation term {term!r} clip must contain finite ordered bounds, "
+                        f"got {clip!r}."
+                    )
+                self.obs_term_clips[term] = (lower, upper)
+        self.observation_clip = float(self.obs_config.clip_observations)
+        if not np.isfinite(self.observation_clip) or self.observation_clip <= 0.0:
+            raise ValueError(
+                f"Inference observation clip must be finite and > 0, got {self.observation_clip!r}."
+            )
 
         # Initialize per-term history buffers using deques
         self._initialize_history_state()
@@ -168,6 +203,14 @@ class BasePolicy:
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
 
+    def _reset_observation_history_state(self) -> None:
+        """Restore observation/action history to the state used after a training reset."""
+        self._initialize_history_state()
+        if hasattr(self, "last_policy_action"):
+            self.last_policy_action.fill(0.0)
+        if hasattr(self, "scaled_policy_action"):
+            self.scaled_policy_action.fill(0.0)
+
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
         if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
@@ -176,6 +219,11 @@ class BasePolicy:
                 sim_state_port=self.config.task.sim_state_port,
                 sim_control_port=self.config.task.sim_control_port,
                 use_joystick=self.config.task.use_joystick,
+                sim_state_max_wall_age_ms=getattr(
+                    self.config.task,
+                    "sim_state_max_wall_age_ms",
+                    500.0,
+                ),
             )
         else:
             self.interface = InterfaceWrapper(
@@ -186,6 +234,7 @@ class BasePolicy:
             )
         self._perception_obs_sub: PerceptionObsSub | None = None
         self._perception_obs_shm_sub: PerceptionObsShmSub | None = None
+        self._perception_contract_sha256: str | None = None
         if bool(getattr(self.config.task, "use_split_perception_obs", False)):
             if bool(getattr(self.config.task, "use_split_perception_obs_shm", False)):
                 self._perception_obs_shm_sub = PerceptionObsShmSub(
@@ -198,7 +247,14 @@ class BasePolicy:
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
-        self.policy_action_scale = float(policy_action_scale)
+        self._configured_policy_action_scale = float(policy_action_scale)
+        if not np.isfinite(self._configured_policy_action_scale) or self._configured_policy_action_scale <= 0.0:
+            raise ValueError(
+                "Inference policy_action_scale must be finite and > 0, "
+                f"got {self._configured_policy_action_scale!r}."
+            )
+        self.policy_action_scale = self._configured_policy_action_scale
+        self.policy_action_clip = 100.0
         self.policy_action_scales = np.full((1, self.num_dofs), self.policy_action_scale, dtype=np.float32)
         self.rl_rate = rl_rate
         self.model_paths = self._collect_model_paths(model_path)
@@ -208,11 +264,16 @@ class BasePolicy:
         resolved_paths: list[str] = []
 
         for path in self.model_paths:
+            # A preceding model's metadata must not leak scale/clip values into
+            # a legacy or partially serialized model loaded afterwards.
+            self.policy_action_scale = self._configured_policy_action_scale
+            self.policy_action_clip = 100.0
             local_path = self._resolve_model_path(str(path))
             resolved_paths.append(local_path)
             self.setup_policy(local_path)
             self._policy_states.append(self._capture_policy_state())
 
+        self._validate_policy_state_collection(self._policy_states)
         self.model_paths = resolved_paths
         self.active_policy_index = 0
         self.active_model_path = None
@@ -220,6 +281,7 @@ class BasePolicy:
 
         # Determine KP/KD values: config override > ONNX metadata > error
         self._resolve_control_gains()
+        self._logged_training_pd_sync = False
 
     def _collect_model_paths(self, model_path):
         """Normalize model_path into a list of up to nine entries."""
@@ -259,6 +321,10 @@ class BasePolicy:
             "onnx_kp": self.onnx_kp,
             "onnx_kd": self.onnx_kd,
             "onnx_metadata": getattr(self, "_onnx_metadata", None),
+            "onnx_artifact_sha256": getattr(self, "_onnx_artifact_sha256", None),
+            "perception_contract_sha256": getattr(self, "_perception_contract_sha256", None),
+            "policy_action_scale": float(self.policy_action_scale),
+            "policy_action_clip": float(self.policy_action_clip),
             "policy_action_scales": self.policy_action_scales.copy(),
         }
 
@@ -271,7 +337,20 @@ class BasePolicy:
         self.onnx_kp = state["onnx_kp"]
         self.onnx_kd = state["onnx_kd"]
         self._onnx_metadata = state.get("onnx_metadata")
+        self._onnx_artifact_sha256 = state.get("onnx_artifact_sha256")
+        self._perception_contract_sha256 = state.get("perception_contract_sha256")
+        self.policy_action_scale = float(state["policy_action_scale"])
+        self.policy_action_clip = float(state["policy_action_clip"])
         self.policy_action_scales = state["policy_action_scales"].copy()
+
+    def _validate_policy_state_collection(self, states: list[dict]) -> None:
+        """Hook for policy types with extra per-slot contract state."""
+        perception_contracts = {state.get("perception_contract_sha256") for state in states}
+        if len(perception_contracts) > 1:
+            raise ValueError(
+                "Preloaded perception policy slots must use one identical producer observation contract; "
+                f"found={sorted(str(value) for value in perception_contracts)}."
+            )
 
     def _activate_policy(self, index: int, announce: bool = True):
         """Activate a preloaded policy."""
@@ -380,13 +459,44 @@ class BasePolicy:
         value = os.environ.get("HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART", "")
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _require_finite_array(value, *, label: str, dtype=np.float32) -> np.ndarray:
+        """Convert a runtime tensor to ndarray and reject NaN/Inf fail-closed."""
+
+        try:
+            array = np.asarray(value, dtype=dtype)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be a numeric array.") from exc
+        if array.size == 0:
+            raise ValueError(f"{label} must not be empty.")
+        try:
+            finite_mask = np.isfinite(array)
+        except TypeError as exc:
+            raise ValueError(f"{label} must contain only numeric values.") from exc
+        if not bool(np.all(finite_mask)):
+            bad_indices = np.argwhere(~finite_mask)
+            raise FloatingPointError(
+                f"{label} contains {int((~finite_mask).sum())} non-finite value(s); "
+                f"first_indices={bad_indices[:8].tolist()}."
+            )
+        return array
+
     def _has_valid_robot_state(self, robot_state_data: np.ndarray) -> bool:
-        if robot_state_data is None or robot_state_data.ndim != 2 or robot_state_data.shape[0] < 1:
+        if robot_state_data is None:
             return False
-        quat = robot_state_data[0, 3:7]
+        try:
+            state = np.asarray(robot_state_data, dtype=np.float32)
+        except (TypeError, ValueError):
+            return False
+        minimum_state_dim = 7 + self.num_dofs + 6 + self.num_dofs
+        if state.ndim != 2 or state.shape[0] < 1 or state.shape[1] < minimum_state_dim:
+            return False
+        if not bool(np.all(np.isfinite(state[:, :minimum_state_dim]))):
+            return False
+        quat = state[0, 3:7]
         if float(np.linalg.norm(quat)) < 0.5:
             return False
-        joint_pos = robot_state_data[0, 7 : 7 + self.num_dofs]
+        joint_pos = state[0, 7 : 7 + self.num_dofs]
         return bool(np.any(np.abs(joint_pos) > 1e-6) or np.any(np.abs(quat) > 1e-6))
 
     def _can_finish_pending_policy_start(self, robot_state_data: np.ndarray) -> bool:  # noqa: ARG002
@@ -465,25 +575,100 @@ class BasePolicy:
     # Policy Methods
     # ============================================================================
 
+    def _load_onnx_session_and_metadata(self, model_path: str):
+        """Bind ORT graph and metadata to one stable, hashed byte payload."""
+
+        path = Path(model_path)
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"ONNX policy must be a regular file: {path}")
+            payload = stream.read()
+            after = os.fstat(stream.fileno())
+        if not payload:
+            raise ValueError(f"ONNX policy is empty: {path}")
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+            or len(payload) != before.st_size
+        ):
+            raise RuntimeError(f"ONNX policy changed while it was being read: {path}")
+
+        artifact_sha256 = hashlib.sha256(payload).hexdigest()
+        onnx_model = onnx.load_model_from_string(payload)
+        def reject_nonfinite_json(constant: str):
+            raise ValueError(f"non-finite JSON constant {constant!r}")
+
+        metadata = {}
+        for prop in onnx_model.metadata_props:
+            if not prop.key:
+                raise ValueError(f"ONNX policy contains an empty metadata key: {path}")
+            if prop.key in metadata:
+                raise ValueError(
+                    "ONNX policy contains an ambiguous duplicate metadata key "
+                    f"{prop.key!r}: {path}"
+                )
+
+            try:
+                metadata[prop.key] = json.loads(
+                    prop.value,
+                    parse_constant=reject_nonfinite_json,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"ONNX metadata {prop.key!r} is not strict finite JSON: {path}"
+                ) from exc
+        allow_unsafe_embedded_timeline = os.environ.get(
+            "HOLOSOMA_ALLOW_UNSAFE_RAW_EMBEDDED_MOTION_TIMELINE",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        validate_embedded_motion_timeline_model(
+            onnx_model,
+            metadata,
+            allow_unsafe_diagnostic=allow_unsafe_embedded_timeline,
+        )
+        embedded_contact_sidecar_contract_from_metadata(metadata)
+        embedded_button_window_contract_from_metadata(metadata)
+        session = onnxruntime.InferenceSession(payload)
+        self._onnx_artifact_sha256 = artifact_sha256
+        logger.info(
+            "Loaded immutable ONNX artifact bytes: name={} sha256={}",
+            path.name,
+            artifact_sha256,
+        )
+        return session, metadata
+
     def setup_policy(self, model_path):
         """Setup ONNX policy model and extract metadata."""
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        self.onnx_policy_session, metadata = self._load_onnx_session_and_metadata(model_path)
         input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
 
         self.onnx_input_names = input_names
         self.onnx_output_names = output_names
 
-        # Extract metadata from ONNX model (hard fault if fails)
-        onnx_model = onnx.load(model_path)
-        metadata = {}
-        for prop in onnx_model.metadata_props:
-            metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
 
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={inp.name: inp.shape for inp in self.onnx_policy_session.get_inputs()},
+            output_shapes={out.name: out.shape for out in self.onnx_policy_session.get_outputs()},
+            input_types={inp.name: inp.type for inp in self.onnx_policy_session.get_inputs()},
+            output_types={out.name: out.type for out in self.onnx_policy_session.get_outputs()},
+            observation=self.config.observation,
+            runtime_dof_names=self.dof_names,
+            runtime_default_dof_angles=self.default_dof_angles,
+            runtime_motor_effort_limits=self.robot_config.motor_effort_limit,
+            runtime_joint2motor=self.robot_config.joint2motor,
+        )
+        self._perception_contract_sha256 = perception_observation_contract_sha256_from_metadata(metadata)
+
         # Extract KP/KD from metadata (will be None if not present)
-        self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
-        self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        self.onnx_kp = self._joint_values_to_motor_order(metadata["kp"], "KP") if "kp" in metadata else None
+        self.onnx_kd = self._joint_values_to_motor_order(metadata["kd"], "KD") if "kd" in metadata else None
 
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
@@ -497,9 +682,12 @@ class BasePolicy:
             #     'actor_obs_upper_body': np.array([...]),
             #     'estimator_obs': np.array([...])
             # }
-            input_feed = {name: obs_dict[name] for name in self.onnx_input_names}
-            outputs = self.onnx_policy_session.run(self.onnx_output_names, input_feed)
-            return outputs[0]  # just return outputs[0] as only "action" is needed
+            input_feed = self._prepare_policy_input_feed(
+                {name: obs_dict[name] for name in self.onnx_input_names}
+            )
+            action_output = "action" if "action" in self.onnx_output_names else "actions"
+            raw_action = self.onnx_policy_session.run([action_output], input_feed)[0]
+            return self._require_finite_array(raw_action, label=f"ONNX output {action_output!r}")
 
         self.policy = policy_act
 
@@ -549,6 +737,63 @@ class BasePolicy:
                 f"KD array length ({len(kd_values)}) does not match num_motors ({self.robot_config.num_motors})"
             )
 
+    def _sync_policy_pd_with_training(self) -> None:
+        """Use the active ONNX policy's training gains during policy control.
+
+        Robot-config gains are useful for startup/pose holding, but applying
+        them to policy actions changes the closed-loop system the actor was
+        trained against.  Policy control therefore restores both the gain
+        vectors and the interface gain multipliers to the ONNX metadata.
+        """
+        if self.onnx_kp is None or self.onnx_kd is None:
+            return
+
+        expected_kp = np.asarray(self.onnx_kp, dtype=np.float32).reshape(-1)
+        expected_kd = np.asarray(self.onnx_kd, dtype=np.float32).reshape(-1)
+        if not np.all(np.isfinite(expected_kp)) or not np.all(np.isfinite(expected_kd)):
+            raise ValueError("ONNX PD metadata contains non-finite values.")
+        if expected_kp.size != self.robot_config.num_motors or expected_kd.size != self.robot_config.num_motors:
+            raise ValueError(
+                "ONNX PD metadata dimensions do not match the active robot: "
+                f"kp={expected_kp.size}, kd={expected_kd.size}, motors={self.robot_config.num_motors}."
+            )
+
+        current_kp = getattr(self.robot_config, "motor_kp", None)
+        current_kd = getattr(self.robot_config, "motor_kd", None)
+        needs_cfg_sync = (
+            current_kp is None
+            or current_kd is None
+            or np.asarray(current_kp).size != expected_kp.size
+            or np.asarray(current_kd).size != expected_kd.size
+            or not np.allclose(np.asarray(current_kp, dtype=np.float32), expected_kp)
+            or not np.allclose(np.asarray(current_kd, dtype=np.float32), expected_kd)
+        )
+
+        if needs_cfg_sync:
+            self.robot_config = replace(
+                self.robot_config,
+                motor_kp=tuple(expected_kp.tolist()),
+                motor_kd=tuple(expected_kd.tolist()),
+            )
+            self.interface.robot_config = self.robot_config
+            if getattr(self.interface, "backend", None) == "sdk2py":
+                self.interface.command_sender.config = self.robot_config
+                self.interface.state_processor.config = self.robot_config
+
+        kp_level = float(getattr(self.interface, "kp_level", 1.0))
+        kd_level = float(getattr(self.interface, "kd_level", 1.0))
+        levels_reset = abs(kp_level - 1.0) > 1.0e-6 or abs(kd_level - 1.0) > 1.0e-6
+        if levels_reset:
+            self.interface.kp_level = 1.0
+            self.interface.kd_level = 1.0
+
+        if needs_cfg_sync or levels_reset:
+            logger.info("Forced active policy PD gains to ONNX/training metadata (gain levels=1.0).")
+            self._logged_training_pd_sync = True
+        elif not getattr(self, "_logged_training_pd_sync", False):
+            logger.info("Active policy PD gains match ONNX/training metadata.")
+            self._logged_training_pd_sync = True
+
     def _calculate_obs_dim_dict(self):
         """Calculate observation dimensions for each observation type."""
         obs_dim_dict = {}
@@ -557,6 +802,33 @@ class BasePolicy:
             for obs_name in self.obs_dict[key]:
                 obs_dim_dict[key] += self.obs_dims[obs_name]
         return obs_dim_dict
+
+    def _joint_values_to_motor_order(self, values, label: str) -> np.ndarray:
+        """Map DOF-ordered ONNX metadata to the runtime motor order."""
+        joint_values = np.asarray(values, dtype=np.float32).reshape(-1)
+        if (
+            joint_values.size != self.num_dofs
+            or not np.all(np.isfinite(joint_values))
+            or np.any(joint_values < 0.0)
+        ):
+            raise ValueError(
+                f"ONNX {label} metadata must contain {self.num_dofs} finite non-negative DOF-ordered values, "
+                f"got shape={joint_values.shape}."
+            )
+        mapping = np.asarray(self.robot_config.joint2motor, dtype=np.int64).reshape(-1)
+        if mapping.size != self.num_dofs:
+            raise ValueError(
+                f"joint2motor length {mapping.size} does not match policy DOF count {self.num_dofs}."
+            )
+        expected_motors = int(self.robot_config.num_motors)
+        if expected_motors != self.num_dofs or sorted(mapping.tolist()) != list(range(expected_motors)):
+            raise ValueError(
+                "Policy control requires a one-to-one DOF/motor mapping; "
+                f"dofs={self.num_dofs}, motors={expected_motors}, joint2motor={mapping.tolist()}."
+            )
+        motor_values = np.empty((expected_motors,), dtype=np.float32)
+        motor_values[mapping] = joint_values
+        return motor_values
 
     def _resolve_motor_kp_from_control_cfg(self, control_cfg: dict) -> np.ndarray | None:
         stiffness_cfg = control_cfg.get("stiffness")
@@ -587,14 +859,33 @@ class BasePolicy:
             self.policy_action_scales = scale_array.reshape(1, -1)
             return
 
-        control_cfg = experiment_cfg.get("robot", {}).get("control", {})
+        saved_robot_cfg = experiment_cfg.get("robot", {})
+        if not isinstance(saved_robot_cfg, dict):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+        control_cfg = saved_robot_cfg.get("control", {})
         if not isinstance(control_cfg, dict):
             self.policy_action_scales = scale_array.reshape(1, -1)
             return
 
+        if control_cfg.get("clip_actions", True):
+            action_clip = control_cfg.get("action_clip_value")
+            if action_clip is not None:
+                self.policy_action_clip = float(action_clip)
+                if not np.isfinite(self.policy_action_clip) or self.policy_action_clip <= 0.0:
+                    raise ValueError(
+                        "ONNX action_clip_value must be finite and > 0, "
+                        f"got {self.policy_action_clip!r}."
+                    )
+
         base_scale = control_cfg.get("action_scale")
         if base_scale is not None:
             self.policy_action_scale = float(base_scale)
+            if not np.isfinite(self.policy_action_scale) or self.policy_action_scale <= 0.0:
+                raise ValueError(
+                    "ONNX action_scale must be finite and > 0, "
+                    f"got {self.policy_action_scale!r}."
+                )
             scale_array.fill(self.policy_action_scale)
 
         if not control_cfg.get("action_scales_by_effort_limit_over_p_gain", False):
@@ -612,29 +903,31 @@ class BasePolicy:
         if motor_kp is None:
             motor_kp = self._resolve_motor_kp_from_control_cfg(control_cfg)
         if motor_kp is None:
-            logger.warning("Training metadata requested per-joint action scaling, but KP values were unavailable.")
-            self._apply_debug_action_scale_multipliers(scale_array)
-            self.policy_action_scales = scale_array.reshape(1, -1)
-            return
+            raise ValueError("Training metadata requested per-joint action scaling, but KP values were unavailable.")
 
         motor_kp = np.asarray(motor_kp, dtype=np.float32)
-        motor_effort = np.asarray(self.robot_config.motor_effort_limit, dtype=np.float32)
-        if motor_kp.shape[0] != self.robot_config.num_motors or motor_effort.shape[0] != self.robot_config.num_motors:
-            logger.warning(
-                "Skipping per-joint action scaling due to shape mismatch: kp={}, effort={}, num_motors={}",
-                motor_kp.shape,
-                motor_effort.shape,
-                self.robot_config.num_motors,
+        saved_joint_effort = np.asarray(saved_robot_cfg.get("dof_effort_limit_list", ()), dtype=np.float32)
+        if motor_kp.shape != (self.robot_config.num_motors,) or saved_joint_effort.shape != (self.num_dofs,):
+            raise ValueError(
+                "Per-joint action scaling metadata has incompatible dimensions: "
+                f"kp={motor_kp.shape}, saved_joint_effort={saved_joint_effort.shape}, "
+                f"motors={self.robot_config.num_motors}, dofs={self.num_dofs}."
             )
-            self._apply_debug_action_scale_multipliers(scale_array)
-            self.policy_action_scales = scale_array.reshape(1, -1)
-            return
+        if (
+            not np.all(np.isfinite(motor_kp))
+            or not np.all(np.isfinite(saved_joint_effort))
+            or np.any(motor_kp < 0.0)
+            or np.any(saved_joint_effort < 0.0)
+        ):
+            raise ValueError(
+                "Per-joint action scaling metadata contains non-finite or negative KP/effort values."
+            )
 
         joint2motor = np.asarray(self.robot_config.joint2motor, dtype=np.int64)
         for joint_idx in range(self.num_dofs):
             motor_idx = int(joint2motor[joint_idx])
             stiffness = float(motor_kp[motor_idx])
-            effort = float(motor_effort[motor_idx])
+            effort = float(saved_joint_effort[joint_idx])
             scale_array[joint_idx] = 0.0 if stiffness == 0.0 else self.policy_action_scale * effort / stiffness
 
         self._apply_debug_action_scale_multipliers(scale_array)
@@ -663,6 +956,8 @@ class BasePolicy:
             if not raw_value:
                 continue
             multiplier = float(raw_value)
+            if not np.isfinite(multiplier) or multiplier <= 0.0:
+                raise ValueError(f"{env_name} must be finite and > 0, got {multiplier!r}.")
             matched = [idx for idx, name in enumerate(self.dof_names) if any(marker in name for marker in markers)]
             if not matched:
                 continue
@@ -671,32 +966,152 @@ class BasePolicy:
         if applied:
             logger.info("Applied debug policy action-scale multipliers: {}", ", ".join(applied))
 
+    def _update_policy_action_state(self, policy_action, *, label: str) -> np.ndarray:
+        """Store raw action history while applying the training control clip.
+
+        Training exposes ``ActionManager.action`` to the next observation.  It
+        contains the raw policy action; the joint action term clips a separate
+        processed copy before applying control.  Inference must preserve that
+        split as well.  The regular observation-group clip is applied later by
+        :meth:`_update_obs_history`.
+        """
+        raw_policy_action = self._require_finite_array(policy_action, label=label)
+        expected_shape = (1, int(self.num_dofs))
+        if raw_policy_action.ndim != 2 or raw_policy_action.shape != expected_shape:
+            raise ValueError(
+                f"{label} must have shape {expected_shape}; refusing NumPy broadcasting or partial-action "
+                f"padding, got {raw_policy_action.shape}."
+            )
+        clipped_policy_action = self._require_finite_array(
+            np.clip(
+                raw_policy_action,
+                -self.policy_action_clip,
+                self.policy_action_clip,
+            ),
+            label="clipped policy action",
+        )
+
+        action_scales = self._require_finite_array(
+            self.policy_action_scales,
+            label="policy action scales",
+        )
+        if action_scales.ndim != 2 or action_scales.shape != expected_shape:
+            raise ValueError(
+                f"Policy action scales must have shape {expected_shape}; refusing NumPy broadcasting, "
+                f"got {action_scales.shape}."
+            )
+        scaled_policy_action = self._require_finite_array(
+            clipped_policy_action * action_scales,
+            label="scaled policy action",
+        )
+        # Commit both pieces together only after every shape/finite check has
+        # succeeded.  A rejected output must not partially advance the action
+        # history consumed by the next observation.
+        self.last_policy_action = raw_policy_action.copy()
+        self.scaled_policy_action = scaled_policy_action
+        return raw_policy_action
+
     def rl_inference(self, robot_state_data):
         """Perform RL inference to get policy action."""
         obs = self.prepare_obs_for_rl(robot_state_data)
-        policy_action = self.policy(obs)
-        policy_action = np.clip(policy_action, -100, 100)
-
-        self.last_policy_action = policy_action.copy()
-        self.scaled_policy_action = policy_action * self.policy_action_scales
+        self._update_policy_action_state(
+            self.policy(obs),
+            label="policy action output",
+        )
 
         return self.scaled_policy_action
+
+    def _prepare_policy_input_feed(self, input_feed: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Apply the serialized training-wide clip to ONNX observation inputs."""
+        observation_inputs = set(self.obs_dict)
+        observation_inputs.update({"obs", "actor_obs", "perception_obs"})
+        observation_inputs.add(getattr(self, "_obs_input_name", None))
+        observation_inputs.add(getattr(self, "_perception_obs_input_name", None))
+
+        metadata = getattr(self, "_onnx_metadata", {})
+        experiment = metadata.get("experiment_config", {}) if isinstance(metadata, dict) else {}
+        algo = experiment.get("algo", {}) if isinstance(experiment, dict) else {}
+        algo_config = algo.get("config", {}) if isinstance(algo, dict) else {}
+        module_dict = algo_config.get("module_dict", {}) if isinstance(algo_config, dict) else {}
+        actor = module_dict.get("actor", {}) if isinstance(module_dict, dict) else {}
+        if isinstance(actor, dict):
+            layer_config = actor.get("layer_config", {})
+            if isinstance(layer_config, dict):
+                observation_inputs.add(layer_config.get("perception_input_name"))
+
+        prepared: dict[str, np.ndarray] = {}
+        for name, value in input_feed.items():
+            if name in observation_inputs:
+                value = self._require_finite_array(
+                    value,
+                    label=f"ONNX observation input {name!r}",
+                )
+                value = np.clip(
+                    value,
+                    -self.observation_clip,
+                    self.observation_clip,
+                ).astype(np.float32, copy=False)
+            else:
+                value = self._require_finite_array(
+                    value,
+                    label=f"ONNX input {name!r}",
+                    dtype=None,
+                )
+            prepared[name] = value
+        return prepared
 
     def _get_split_perception_obs(
         self,
         expected_dim: int | None = None,
         *,
         target_sim_time_ms: float | int | None = None,
+        target_episode_generation: int | None = None,
     ) -> np.ndarray:
         """Return the latest split-sim perception observation for ONNX perception inputs."""
+        if target_episode_generation is not None:
+            if (
+                isinstance(target_episode_generation, bool)
+                or not isinstance(target_episode_generation, (int, np.integer))
+                or int(target_episode_generation) < 0
+                or int(target_episode_generation) > (1 << 63) - 1
+            ):
+                raise ValueError(
+                    "target_episode_generation must be a non-negative integer within the "
+                    f"transport range, got {target_episode_generation!r}."
+                )
+            target_episode_generation = int(target_episode_generation)
+        expected_contract = getattr(self, "_perception_contract_sha256", None)
+        if expected_contract is None:
+            raise RuntimeError(
+                "Perception policy artifact has no authenticated effective producer contract. "
+                "Re-export the policy from a live training environment before scientific split-sim use."
+            )
+        if target_episode_generation is None:
+            raise RuntimeError(
+                "Live split-sim perception requires a pinned simulator episode_generation. "
+                "Refusing an unpaired perception frame; use an authenticated sim-state producer."
+            )
         if self._perception_obs_shm_sub is not None:
             if expected_dim is None:
                 raise RuntimeError("Shared-memory perception obs requires a known expected dimension.")
-            obs = self._perception_obs_shm_sub.get_obs(int(expected_dim))
+            def read_shm_obs() -> np.ndarray | None:
+                if target_sim_time_ms is None:
+                    return self._perception_obs_shm_sub.get_obs(
+                        int(expected_dim),
+                        expected_contract,
+                        expected_episode_generation=target_episode_generation,
+                    )
+                return self._perception_obs_shm_sub.get_obs_at_or_before(
+                    int(expected_dim),
+                    target_sim_time_ms,
+                    expected_contract,
+                    expected_episode_generation=target_episode_generation,
+                )
+            obs = read_shm_obs()
             if obs is None:
                 deadline = time.perf_counter() + 2.0
                 while time.perf_counter() < deadline:
-                    obs = self._perception_obs_shm_sub.get_obs(int(expected_dim))
+                    obs = read_shm_obs()
                     if obs is not None:
                         break
                     time.sleep(0.01)
@@ -713,15 +1128,24 @@ class BasePolicy:
                 "Pass --task.use-split-perception-obs and match --task.perception-obs-port to run_sim."
             )
 
-        if hasattr(self._perception_obs_sub, "get_payload_at_or_before") and target_sim_time_ms is not None:
-            payload = self._perception_obs_sub.get_payload_at_or_before(target_sim_time_ms)
+        can_select_payload = hasattr(self._perception_obs_sub, "get_payload_at_or_before") and (
+            target_sim_time_ms is not None or target_episode_generation is not None
+        )
+        if can_select_payload:
+            payload = self._perception_obs_sub.get_payload_at_or_before(
+                target_sim_time_ms,
+                expected_episode_generation=target_episode_generation,
+            )
         else:
             payload = self._perception_obs_sub.get_payload()
         if payload is None:
             deadline = time.perf_counter() + 2.0
             while time.perf_counter() < deadline:
-                if hasattr(self._perception_obs_sub, "get_payload_at_or_before") and target_sim_time_ms is not None:
-                    payload = self._perception_obs_sub.get_payload_at_or_before(target_sim_time_ms)
+                if can_select_payload:
+                    payload = self._perception_obs_sub.get_payload_at_or_before(
+                        target_sim_time_ms,
+                        expected_episode_generation=target_episode_generation,
+                    )
                 else:
                     payload = self._perception_obs_sub.get_payload()
                 if payload is not None:
@@ -729,6 +1153,26 @@ class BasePolicy:
                 time.sleep(0.01)
         if payload is None:
             raise RuntimeError("Timed out waiting for split-sim perception_obs payload.")
+
+        published_contract = payload.get("perception_contract_sha256")
+        if published_contract != expected_contract:
+            raise RuntimeError(
+                "Split-sim perception producer contract does not match the policy artifact: "
+                f"published={published_contract!r}, expected={expected_contract!r}."
+            )
+
+        if target_episode_generation is not None:
+            published_episode_generation = payload.get("episode_generation")
+            if (
+                isinstance(published_episode_generation, bool)
+                or not isinstance(published_episode_generation, int)
+                or published_episode_generation != target_episode_generation
+            ):
+                raise RuntimeError(
+                    "Split-sim perception episode does not match the pinned simulator state: "
+                    f"published={published_episode_generation!r}, "
+                    f"expected={target_episode_generation}."
+                )
 
         values = payload.get("perception_obs")
         if values is None:
@@ -775,7 +1219,14 @@ class BasePolicy:
                 if term_obs.ndim == 1:
                     term_obs = term_obs.reshape(1, -1)
                 scale = self.obs_scales[term]
-                grouped_terms[term] = (term_obs * scale).astype(np.float32, copy=False)
+                term_obs = (term_obs * scale).astype(np.float32, copy=False)
+                term_clip = self.obs_term_clips.get(term)
+                if term_clip is not None:
+                    term_obs = np.clip(term_obs, term_clip[0], term_clip[1]).astype(
+                        np.float32,
+                        copy=False,
+                    )
+                grouped_terms[term] = term_obs
             current_obs_dict[group] = grouped_terms
         return current_obs_dict
 
@@ -797,7 +1248,11 @@ class BasePolicy:
             flattened_terms: list[np.ndarray] = []
 
             for term in self.obs_terms_sorted[group]:
-                obs = np.asarray(term_dict[term], dtype=np.float32, order="C")
+                obs = self._require_finite_array(
+                    term_dict[term],
+                    label=f"observation term {group}.{term}",
+                )
+                obs = np.asarray(obs, dtype=np.float32, order="C")
                 if obs.ndim == 1:
                     obs = obs.reshape(1, -1)
 
@@ -813,10 +1268,19 @@ class BasePolicy:
                 stacked = np.stack(history[-history_len:], axis=1)
                 flattened_terms.append(stacked.reshape(obs.shape[0], -1))
 
-            group_outputs[group] = (
+            group_output = (
                 np.concatenate(flattened_terms, axis=1).astype(np.float32, copy=False)
                 if flattened_terms
                 else np.zeros((1, 0), dtype=np.float32)
+            )
+            group_outputs[group] = np.clip(
+                group_output,
+                -self.observation_clip,
+                self.observation_clip,
+            ).astype(np.float32, copy=False)
+            self._require_finite_array(
+                group_outputs[group],
+                label=f"flattened observation group {group!r}",
             )
 
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
@@ -885,7 +1349,40 @@ class BasePolicy:
             return q_target
         return dof_pos
 
+    def _pin_control_tick_state(self, robot_state_data) -> None:
+        """Pin the full state payload that produced this tick's robot vector."""
+
+        self._control_tick_robot_state_data = robot_state_data
+        snapshot = None
+        pin_snapshot = getattr(self.interface, "pin_latest_sim_state_for_control_tick", None)
+        if callable(pin_snapshot):
+            snapshot = pin_snapshot()
+        self._control_tick_sim_state_snapshot = snapshot
+        self._control_tick_state_pinned = True
+
+    def _release_control_tick_state(self) -> None:
+        release_snapshot = getattr(self.interface, "release_control_tick_sim_state", None)
+        if callable(release_snapshot):
+            release_snapshot()
+        self._control_tick_state_pinned = False
+        self._control_tick_sim_state_snapshot = None
+        self._control_tick_robot_state_data = None
+
+    def _get_control_tick_robot_state(self):
+        if bool(getattr(self, "_control_tick_state_pinned", False)):
+            return getattr(self, "_control_tick_robot_state_data", None)
+        return self.interface.get_low_state()
+
     def policy_action(self):
+        """Execute one control tick within one pinned split-simulator snapshot."""
+
+        self._control_tick_state_pinned = False
+        try:
+            return self._policy_action_impl()
+        finally:
+            self._release_control_tick_state()
+
+    def _policy_action_impl(self):
         """Execute policy action and send commands to robot."""
 
         kp_override = None
@@ -894,6 +1391,7 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
+            self._pin_control_tick_state(robot_state_data)
 
         if not self._has_valid_robot_state(robot_state_data):
             if not getattr(self, "_logged_waiting_for_robot_state", False):
@@ -964,9 +1462,17 @@ class BasePolicy:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
 
+            q_target = self._require_finite_array(q_target, label="joint position target")
+            if q_target.ndim != 2 or q_target.shape != (1, self.num_dofs):
+                raise ValueError(
+                    "Joint position target must have shape "
+                    f"(1, {self.num_dofs}), got {q_target.shape}."
+                )
+
             # Training/Isaac clips torques, not q targets. Keep q-target clipping opt-in.
             if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
                 np.clip(q_target[0], self.q_min_arr, self.q_max_arr, out=q_target[0])
+                self._require_finite_array(q_target, label="clipped joint position target")
 
             # Prepare command (reuse pre-allocated arrays)
             self.cmd_q[:] = q_target[0]
@@ -976,6 +1482,11 @@ class BasePolicy:
             if bool(getattr(self, "_skip_next_lowcmd_publish", False)):
                 self._skip_next_lowcmd_publish = False
                 return
+            if self.use_policy_action and not self.get_ready_state and kp_override is None and kd_override is None:
+                self._sync_policy_pd_with_training()
+            self._require_finite_array(self.cmd_q, label="outbound joint position command")
+            self._require_finite_array(self.cmd_dq, label="outbound joint velocity command")
+            self._require_finite_array(self.cmd_tau, label="outbound joint torque command")
             self.interface.send_low_command(
                 self.cmd_q,
                 self.cmd_dq,
@@ -1117,6 +1628,7 @@ class BasePolicy:
         """Handle start policy action."""
         self.use_policy_action = True
         self.get_ready_state = False
+        self._sync_policy_pd_with_training()
         self.logger.info(colored("Using policy actions", "blue"))
         self.phase = np.array([[0.0, np.pi]])
         if hasattr(self.interface, "no_action"):

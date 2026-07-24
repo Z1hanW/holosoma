@@ -1,6 +1,14 @@
+import os
 import platform
 
-from setuptools import find_packages, setup
+if os.environ.get("HOLOSOMA_ALLOW_UNSAFE_ARCHIVAL_INFERENCE") != "1":
+    raise RuntimeError(
+        "Refusing to install unsupported archival package src/holosoma_inference_track_T over the "
+        "canonical holosoma-inference distribution. Use src/holosoma_inference. Set "
+        "HOLOSOMA_ALLOW_UNSAFE_ARCHIVAL_INFERENCE=1 only for explicit historical forensics."
+    )
+
+from setuptools import find_packages, setup  # noqa: E402
 
 UNITREE_VERSION = "0.1.1"
 UNITREE_REPO = "https://github.com/amazon-far/unitree_sdk2"

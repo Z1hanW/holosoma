@@ -16,8 +16,6 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from multiprocessing import resource_tracker
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -198,41 +196,38 @@ class SimStateSub:
 
 
 class DepthShmReader:
+    """Read the policy perception buffer through the protocol-v1 subscriber."""
+
     def __init__(self, name: str, expected_dim: int) -> None:
         self.name = str(name)
         self.expected_dim = int(expected_dim)
-        self.shm: shared_memory.SharedMemory | None = None
-        self.array: np.ndarray | None = None
+        self.sub = None
 
     def _attach(self) -> bool:
-        if self.shm is not None and self.array is not None:
+        if self.sub is not None:
             return True
         try:
-            self.shm = shared_memory.SharedMemory(name=self.name, create=False)
-        except FileNotFoundError:
-            return False
-        try:
-            resource_tracker.unregister(self.shm._name, "shared_memory")
-        except Exception:
-            pass
-        expected_bytes = self.expected_dim * np.dtype(np.float32).itemsize
-        if len(self.shm.buf) < expected_bytes:
-            self.shm.close()
-            self.shm = None
-            return False
-        self.array = np.ndarray((self.expected_dim,), dtype=np.float32, buffer=self.shm.buf)
+            from holosoma_inference.utils.perception_obs import PerceptionObsShmSub
+        except ImportError as exc:
+            raise RuntimeError(
+                "Live depth recording requires holosoma_inference for the protocol-v1 perception shm reader"
+            ) from exc
+        self.sub = PerceptionObsShmSub(name=self.name)
+        self.sub.start()
         return True
 
     def read(self) -> np.ndarray | None:
-        if not self._attach() or self.array is None:
+        if not self._attach() or self.sub is None:
             return None
-        return self.array.copy()
+        obs = self.sub.get_obs(self.expected_dim)
+        if obs is None:
+            return None
+        return np.asarray(obs, dtype=np.float32).reshape(-1).copy()
 
     def close(self) -> None:
-        if self.shm is not None:
-            self.shm.close()
-        self.shm = None
-        self.array = None
+        if self.sub is not None:
+            self.sub.close()
+        self.sub = None
 
 
 def _blank(width: int, height: int) -> np.ndarray:

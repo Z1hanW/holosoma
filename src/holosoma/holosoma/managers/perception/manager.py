@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from typing import Any
 import hashlib
-import importlib.util
+import json
 import math
+import numbers
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
@@ -18,6 +20,7 @@ from loguru import logger
 
 from holosoma.config_types.perception import PerceptionConfig
 from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_intrinsics
+from holosoma.utils.common import rank_training_seed
 from holosoma.utils import warp_utils
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
@@ -38,7 +41,42 @@ import torch.nn.functional as F
 from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 
+def _validated_rank_local_perlin_seed(env: Any) -> int:
+    """Bind the private hole stream to the declared distributed seed contract."""
+
+    training_config = getattr(env, "training_config", None)
+    base_seed = getattr(training_config, "seed", None)
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        global_rank = int(os.environ.get("RANK", "0"))
+    except ValueError as exc:
+        raise ValueError(
+            "WORLD_SIZE and RANK must be base-10 integers before constructing "
+            "a rank-local Perlin producer."
+        ) from exc
+    expected_seed = rank_training_seed(
+        base_seed,
+        world_size=world_size,
+        global_rank=global_rank,
+    )
+    live_initial_seed = int(torch.initial_seed())
+    if live_initial_seed != expected_seed:
+        raise RuntimeError(
+            "Rank-local Perlin seed contract mismatch before generator construction: "
+            f"torch.initial_seed()={live_initial_seed}, expected training.seed + global_rank="
+            f"{expected_seed}."
+        )
+    return expected_seed
+
+
 class _InfiniteFractalPerlin3D:
+    LEGACY_SEED_SEMANTICS = "legacy_fixed_v1"
+    RANK_LOCAL_SEED_SEMANTICS = "rank_local_v2"
+    LEGACY_GRADIENT_SEED_MIXER = "python_tuple_hash_mod_2147483647_v1"
+    RANK_LOCAL_GRADIENT_SEED_MIXER = "sha256_u63_be_v1"
+    LEGACY_SINGLE_OCTAVE_PROFILE = "legacy_single_octave_v1"
+    CUSTOM_EXPLICIT_OCTAVE_PROFILE = "custom_explicit_v1"
+
     def __init__(
         self,
         shape: tuple[int, int],
@@ -48,13 +86,104 @@ class _InfiniteFractalPerlin3D:
         *,
         batch_size: int,
         device: torch.device | str,
+        seed_semantics: str = LEGACY_SEED_SEMANTICS,
+        effective_seed: int | None = None,
+        octave_profile: str = CUSTOM_EXPLICIT_OCTAVE_PROFILE,
     ) -> None:
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, numbers.Integral)
+            or int(batch_size) < 1
+        ):
+            raise ValueError(f"Perlin batch_size must be a positive integer, got {batch_size!r}.")
+        batch_size = int(batch_size)
+        if (
+            len(shape) != 2
+            or any(isinstance(value, bool) or not isinstance(value, numbers.Integral) or int(value) < 1 for value in shape)
+        ):
+            raise ValueError(f"Perlin shape must contain two positive integers, got {shape!r}.")
+        if not resolutions or len(resolutions) != len(periods):
+            raise ValueError(
+                "Perlin resolutions and periods must be non-empty and have equal lengths."
+            )
+        for index, resolution in enumerate(resolutions):
+            if (
+                len(resolution) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, numbers.Integral)
+                    or int(value) < 1
+                    for value in resolution
+                )
+            ):
+                raise ValueError(
+                    f"Perlin resolutions[{index}] must contain two positive integers."
+                )
+        if any(
+            isinstance(period, bool)
+            or not isinstance(period, numbers.Integral)
+            or int(period) < 1
+            for period in periods
+        ):
+            raise ValueError("Perlin periods must contain only positive integers.")
+        if not factors or any(
+            isinstance(factor, bool)
+            or not isinstance(factor, numbers.Real)
+            or not math.isfinite(float(factor))
+            for factor in factors
+        ):
+            raise ValueError("Perlin factors must contain finite real numbers.")
+
+        octave_profile = str(octave_profile)
+        if octave_profile == self.LEGACY_SINGLE_OCTAVE_PROFILE:
+            if (
+                tuple(tuple(int(value) for value in item) for item in resolutions)
+                != ((2, 2), (4, 4), (8, 8), (16, 16), (32, 32))
+                or tuple(int(value) for value in periods) != (32, 16, 8, 4, 2)
+                or tuple(float(value) for value in factors) != (1.0,)
+            ):
+                raise ValueError(
+                    "legacy_single_octave_v1 requires the authenticated far-tracking "
+                    "5-candidate/1-active octave layout."
+                )
+        elif octave_profile == self.CUSTOM_EXPLICIT_OCTAVE_PROFILE:
+            if not (len(resolutions) == len(periods) == len(factors)):
+                raise ValueError(
+                    "custom_explicit_v1 requires equal resolution, period, and factor lengths; "
+                    "use a versioned production profile for intentional inactive candidates."
+                )
+        else:
+            raise ValueError(f"Unsupported Perlin octave profile: {octave_profile!r}.")
+
+        seed_semantics = str(seed_semantics)
+        if seed_semantics == self.LEGACY_SEED_SEMANTICS:
+            if effective_seed is not None:
+                raise ValueError("legacy_fixed_v1 must not declare an effective Perlin seed.")
+            gradient_seed_mixer = self.LEGACY_GRADIENT_SEED_MIXER
+        elif seed_semantics == self.RANK_LOCAL_SEED_SEMANTICS:
+            if (
+                isinstance(effective_seed, bool)
+                or not isinstance(effective_seed, numbers.Integral)
+                or not 0 <= int(effective_seed) <= 2**64 - 1
+            ):
+                raise ValueError(
+                    "rank_local_v2 requires an effective Perlin seed in [0, 2**64 - 1]."
+                )
+            effective_seed = int(effective_seed)
+            gradient_seed_mixer = self.RANK_LOCAL_GRADIENT_SEED_MIXER
+        else:
+            raise ValueError(f"Unsupported Perlin seed semantics: {seed_semantics!r}.")
+
         self.shape = shape
         self.batch_size = batch_size
         self.resolutions = resolutions
         self.periods = periods
         self.factors = factors
         self.device = torch.device(device)
+        self.seed_semantics = seed_semantics
+        self.effective_seed = effective_seed
+        self.gradient_seed_mixer = gradient_seed_mixer
+        self.octave_profile = octave_profile
         self.grid_shapes = [(shape[0] // res[0], shape[1] // res[1]) for res in resolutions]
         self.linys = [torch.linspace(0, 1, gs[0], device=self.device) for gs in self.grid_shapes]
         self.linxs = [torch.linspace(0, 1, gs[1], device=self.device) for gs in self.grid_shapes]
@@ -85,7 +214,24 @@ class _InfiniteFractalPerlin3D:
             if key < z_idx - 1:
                 del cache[key]
         generator = torch.Generator(device=self.device)
-        generator.manual_seed(hash((octave, z_idx)) % (2**31 - 1))
+        if self.seed_semantics == self.LEGACY_SEED_SEMANTICS:
+            # Preserve HoloSoma's historical far-tracking-compatible stream
+            # exactly for old serialized configs and policies.
+            gradient_seed = hash((octave, z_idx)) % (2**31 - 1)
+        else:
+            # A versioned, process-stable mixer makes the nuisance field a
+            # deterministic function of the configured rank-local seed while
+            # keeping it isolated from every process-global RNG stream.
+            payload = (
+                "holosoma-perlin-gradient|rank_local_v2|"
+                f"{self.effective_seed}|{int(octave)}|{int(z_idx)}"
+            ).encode("ascii")
+            gradient_seed = int.from_bytes(
+                hashlib.sha256(payload).digest()[:8],
+                byteorder="big",
+                signed=False,
+            ) & (2**63 - 1)
+        generator.manual_seed(gradient_seed)
         res_h, res_w = self.resolutions[octave]
         gradients = torch.randn(
             (self.batch_size, res_h + 2, res_w + 2, 3),
@@ -96,17 +242,39 @@ class _InfiniteFractalPerlin3D:
         cache[z_idx] = gradients
         return gradients
 
-    def generate_frame(self) -> torch.Tensor:
-        frame_idx = self.frame_idx
-        self.frame_idx += 1
-        noise = torch.zeros((self.batch_size, self.shape[0], self.shape[1]), device=self.device)
+    def generate_frame(
+        self,
+        *,
+        frame_index: int | None = None,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if frame_index is None:
+            frame_index = self.frame_idx
+            self.frame_idx += 1
+        elif isinstance(frame_index, bool) or not isinstance(frame_index, numbers.Integral):
+            raise ValueError(f"Perlin frame_index must be a non-negative integer, got {frame_index!r}.")
+        else:
+            frame_index = int(frame_index)
+            if frame_index < 0:
+                raise ValueError(f"Perlin frame_index must be a non-negative integer, got {frame_index!r}.")
+
+        if env_ids is None:
+            selected_env_ids: torch.Tensor | slice = slice(None)
+            selected_batch_size = self.batch_size
+        else:
+            selected_env_ids = env_ids.to(device=self.device, dtype=torch.long).view(-1)
+            selected_batch_size = int(selected_env_ids.numel())
+        noise = torch.zeros(
+            (selected_batch_size, self.shape[0], self.shape[1]),
+            device=self.device,
+        )
         for octave, factor in enumerate(self.factors):
             period = self.periods[octave]
-            z_val = frame_idx / period
+            z_val = frame_index / period
             z_idx = int(math.floor(z_val))
             z_frac = z_val - z_idx
-            grad0 = self._get_gradients(octave, z_idx)
-            grad1 = self._get_gradients(octave, z_idx + 1)
+            grad0 = self._get_gradients(octave, z_idx)[selected_env_ids]
+            grad1 = self._get_gradients(octave, z_idx + 1)[selected_env_ids]
             lin_y = self.linys[octave]
             lin_x = self.linxs[octave]
             weight_z1 = self._fade(torch.tensor(z_frac, device=self.device))
@@ -141,7 +309,7 @@ class _InfiniteFractalPerlin3D:
             res_h, res_w = self.resolutions[octave]
             grid_h, grid_w = self.grid_shapes[octave]
             octave_noise = octave_noise.permute(0, 1, 3, 2, 4).reshape(
-                self.batch_size,
+                selected_batch_size,
                 (res_h + 1) * grid_h,
                 (res_w + 1) * grid_w,
             )
@@ -188,7 +356,50 @@ class PerceptionManager:
         self.env = env
         self.device = device
         self.enabled = bool(cfg.enabled)
-        self._is_mujoco_perception = get_simulator_type() == SimulatorType.MUJOCO
+        self._reset_refresh_semantics = str(
+            getattr(cfg, "reset_refresh_semantics", "legacy_full_v1")
+        )
+        if self._reset_refresh_semantics not in {"legacy_full_v1", "targeted_v2"}:
+            raise ValueError(
+                "perception.reset_refresh_semantics must be one of "
+                "{'legacy_full_v1', 'targeted_v2'}, got "
+                f"{self._reset_refresh_semantics!r}."
+            )
+        self._camera_warp_hole_seed_semantics = str(
+            getattr(
+                cfg,
+                "camera_warp_hole_seed_semantics",
+                _InfiniteFractalPerlin3D.LEGACY_SEED_SEMANTICS,
+            )
+        )
+        if self._camera_warp_hole_seed_semantics not in {
+            _InfiniteFractalPerlin3D.LEGACY_SEED_SEMANTICS,
+            _InfiniteFractalPerlin3D.RANK_LOCAL_SEED_SEMANTICS,
+        }:
+            raise ValueError(
+                "perception.camera_warp_hole_seed_semantics must be one of "
+                "{'legacy_fixed_v1', 'rank_local_v2'}, got "
+                f"{self._camera_warp_hole_seed_semantics!r}."
+            )
+        self._camera_warp_hole_octave_profile = str(
+            getattr(
+                cfg,
+                "camera_warp_hole_octave_profile",
+                _InfiniteFractalPerlin3D.LEGACY_SINGLE_OCTAVE_PROFILE,
+            )
+        )
+        if (
+            self._camera_warp_hole_octave_profile
+            != _InfiniteFractalPerlin3D.LEGACY_SINGLE_OCTAVE_PROFILE
+        ):
+            raise ValueError(
+                "perception.camera_warp_hole_octave_profile currently supports only "
+                "'legacy_single_octave_v1'; a new distribution requires a separately "
+                "versioned and calibrated profile."
+            )
+        simulator_type = get_simulator_type()
+        self._simulator_backend = str(simulator_type)
+        self._is_mujoco_perception = simulator_type == SimulatorType.MUJOCO
         self.num_envs = env.num_envs
         self.logger = getattr(env, "logger", None)
 
@@ -260,12 +471,20 @@ class PerceptionManager:
         self._far_tracking_quat_mul = None
         self._far_tracking_robot_slot_indices: torch.Tensor | None = None
         self._far_tracking_robot_body_indices: torch.Tensor | None = None
+        self._far_tracking_robot_body_names: list[str] = []
+        self._far_tracking_robot_body_offset_pos: torch.Tensor | None = None
+        self._far_tracking_robot_body_offset_quat: torch.Tensor | None = None
         self._far_tracking_object_slot_indices: torch.Tensor | None = None
         self._far_tracking_object_source_indices: torch.Tensor | None = None
+        # Static object topology is mirrored as host integers so normal camera
+        # capture never calls ``.item()`` on CUDA scalar tensors.
+        self._far_tracking_object_slot_pairs: tuple[tuple[int, int], ...] = ()
         self._far_tracking_primitive_source_indices: torch.Tensor | None = None
         self._far_tracking_object_names: list[str] = []
         self._far_tracking_object_active_env_ids: list[torch.Tensor | None] = []
         self._far_tracking_base_link_indices: torch.Tensor | None = None
+        self._far_tracking_geometry_fingerprint: tuple[tuple[str, str, int, str], ...] | None = None
+        self._authenticated_observation_contract: dict[str, Any] | None = None
         self._shared_camera_sensor_local_position: torch.Tensor | None = None
         self._shared_camera_sensor_local_orientation: torch.Tensor | None = None
         self._shared_camera_sensor_data_frame_quat: torch.Tensor | None = None
@@ -274,6 +493,11 @@ class PerceptionManager:
         self._use_camera_mount_quat = False
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_frame_quat = False
+        self._strict_camera_mount_rotation_deg = torch.tensor(
+            [1.0, 27.0, 1.0],
+            device=self.device,
+            dtype=torch.float32,
+        )
         cfg_strict_warp = getattr(cfg, "camera_strict_warp", None)
         if cfg_strict_warp is None:
             strict_warp_raw = os.environ.get("HOLOSOMA_CAMERA_STRICT_WARP", "0").strip().lower()
@@ -403,8 +627,28 @@ class PerceptionManager:
 
         self._camera_warp_min_valid_depth = float(getattr(self.cfg, "camera_warp_min_valid_depth", 0.15) or 0.15)
         self._camera_warp_normalize = bool(getattr(self.cfg, "camera_warp_normalize", False))
-        allow_mujoco_perception_noise_raw = os.environ.get("HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE", "0").strip().lower()
-        allow_mujoco_perception_noise = allow_mujoco_perception_noise_raw not in {"0", "false", "no", "off", ""}
+        structured_mujoco_noise = getattr(env, "_allow_mujoco_perception_noise", None)
+        if structured_mujoco_noise is None:
+            allow_mujoco_perception_noise_raw = os.environ.get(
+                "HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE",
+                "0",
+            ).strip().lower()
+            allow_mujoco_perception_noise = allow_mujoco_perception_noise_raw not in {
+                "0",
+                "false",
+                "no",
+                "off",
+                "",
+            }
+        elif not isinstance(structured_mujoco_noise, (bool, np.bool_)):
+            raise ValueError(
+                "_allow_mujoco_perception_noise must be boolean when supplied by a direct producer."
+            )
+        else:
+            # A structured direct-simulation setting takes precedence over the
+            # ambient process environment, making copied launch commands and
+            # authenticated producer reconstruction deterministic.
+            allow_mujoco_perception_noise = bool(structured_mujoco_noise)
         force_mujoco_noise_off = self._is_mujoco_perception and not allow_mujoco_perception_noise
 
         requested_camera_warp_edge_noise = bool(getattr(self.cfg, "camera_warp_edge_noise", False))
@@ -469,14 +713,41 @@ class PerceptionManager:
         self._camera_obs_fill_value = self._camera_obs_default_fill_value()
         self._camera_obs_step_counter = 0
         self._camera_warp_hole_generator: _InfiniteFractalPerlin3D | None = None
+        self._camera_warp_hole_frame_stats: tuple[int, torch.Tensor, torch.Tensor] | None = None
+        hole_reference_batch_size = getattr(
+            self.cfg,
+            "camera_warp_hole_reference_batch_size",
+            None,
+        )
+        if hole_reference_batch_size is None:
+            hole_reference_batch_size = self.num_envs
+        if (
+            isinstance(hole_reference_batch_size, (bool, np.bool_))
+            or not isinstance(hole_reference_batch_size, numbers.Integral)
+            or int(hole_reference_batch_size) < self.num_envs
+        ):
+            raise ValueError(
+                "camera_warp_hole_reference_batch_size must be an integer no smaller than "
+                f"the live environment count ({self.num_envs}), got {hole_reference_batch_size!r}."
+            )
+        self._camera_warp_hole_reference_batch_size = int(hole_reference_batch_size)
         if self._camera_warp_enable_holes and self._camera_warp_hole_prob > 0.0:
+            effective_hole_seed = (
+                _validated_rank_local_perlin_seed(self.env)
+                if self._camera_warp_hole_seed_semantics
+                == _InfiniteFractalPerlin3D.RANK_LOCAL_SEED_SEMANTICS
+                else None
+            )
             self._camera_warp_hole_generator = _InfiniteFractalPerlin3D(
                 (64, 96),
                 [(2, 2), (4, 4), (8, 8), (16, 16), (32, 32)],
                 [32, 16, 8, 4, 2],
                 [0.3**i for i in range(1)],
-                batch_size=self.num_envs,
+                batch_size=self._camera_warp_hole_reference_batch_size,
                 device=self.device,
+                seed_semantics=self._camera_warp_hole_seed_semantics,
+                effective_seed=effective_hole_seed,
+                octave_profile=self._camera_warp_hole_octave_profile,
             )
         if self._camera_warp_depth_offset_std > 0.0:
             self._camera_warp_depth_offset = torch.randn(
@@ -548,10 +819,18 @@ class PerceptionManager:
 
         self._ray_hits_world = torch.zeros(self.num_envs, self._num_points, 3, device=self.device)
         self._far_tracking_debug_last: dict[str, torch.Tensor] = {}
+        self._camera_randomization_log_done = False
 
     def setup(self) -> None:
         if not self.enabled:
             return
+        # Rendered strict-warp backends otherwise create this sampled mount
+        # lazily on the first successful camera update.  If update_hz makes
+        # the constructor's warm-up step return early, a fresh resume has no
+        # mount while a trained checkpoint does, so exact-load semantics
+        # spuriously differ.  Establish it eagerly for every strict camera.
+        if self.cfg.output_mode == "camera_depth" and self._camera_strict_warp:
+            self._ensure_shared_strict_warp_camera_mount()
         if (
             self._uses_raycast()
             or self._uses_camera_raycast()
@@ -587,6 +866,7 @@ class PerceptionManager:
             self._camera_ray_dirs_base = self._build_camera_rays()
 
         if self._uses_camera_far_tracking():
+            self._resolve_camera_body_index()
             self._setup_far_tracking_camera_sensor()
 
         if self._wants_camera_scandots():
@@ -602,6 +882,7 @@ class PerceptionManager:
             self._setup_pytorch3d_renderer()
 
         if self._uses_rendered_camera():
+            self._resolve_camera_body_index()
             self._setup_rendered_camera()
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
@@ -614,6 +895,7 @@ class PerceptionManager:
             self._camera_depth_buffer.fill_(self._camera_obs_fill_value)
             self._camera_depth_buffer_ready.zero_()
             self._camera_obs_step_counter = 0
+            self._camera_warp_hole_frame_stats = None
             self._ray_hits_world.zero_()
             return
         self._heightmap[env_ids] = 0.0
@@ -622,6 +904,1424 @@ class PerceptionManager:
         self._camera_depth_buffer[env_ids] = self._camera_obs_fill_value
         self._camera_depth_buffer_ready[env_ids] = False
         self._ray_hits_world[env_ids] = 0.0
+
+    def reset_canonical_rollout_state(self) -> None:
+        """Reset temporal perception state at a checkpoint rollout boundary.
+
+        Physical episodes and camera latency buffers are intentionally
+        discarded by the canonical all-environment reset.  Perception clocks
+        are checkpointed and continue across the boundary; only the Perlin
+        generator's derived cache is discarded so it is rebuilt from the
+        authenticated frame index without introducing checkpoint-periodic
+        hole patterns.
+        """
+
+        if not self.enabled:
+            return
+        if self._camera_warp_hole_generator is not None:
+            self._camera_warp_hole_generator.gradient_cache = [
+                {} for _ in self._camera_warp_hole_generator.resolutions
+            ]
+            self._camera_warp_hole_frame_stats = None
+
+    def persistent_checkpoint_state_required(self) -> bool:
+        """Whether a legacy env checkpoint cannot reproduce this manager."""
+
+        # Heightmap managers also retain ``_time_since_update`` across the
+        # canonical reset.  Omitting their state can shift the sensor cadence
+        # after resume even though they have no camera calibration tensors.
+        return bool(self.enabled)
+
+    def validate_exact_resume_supported(self) -> None:
+        """Reject camera backends with temporal state outside this manager."""
+
+        if self._uses_rendered_camera() and not self._is_mujoco_perception:
+            raise RuntimeError(
+                "Exact training resume is unsupported for Isaac rendered camera backends: "
+                "the external annotator/render-frame queue and sampling phase are not captured "
+                "by the environment checkpoint. Use far_tracking_warp for resumable training "
+                "or initialize only policy weights."
+            )
+
+    @staticmethod
+    def _semantic_tensor_tuple(value: Any) -> tuple[float, ...] | None:
+        if not isinstance(value, torch.Tensor):
+            return None
+        return tuple(float(item) for item in value.detach().to("cpu").reshape(-1).tolist())
+
+    @staticmethod
+    def _compose_fixed_body_pose(
+        parent_position: torch.Tensor,
+        parent_orientation: torch.Tensor,
+        local_position: torch.Tensor,
+        local_orientation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            parent_position
+            + quat_apply(parent_orientation, local_position, w_last=True),
+            quat_mul(parent_orientation, local_orientation, w_last=True),
+        )
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _fingerprint_far_tracking_geometry(
+        cls,
+        ray_cast_bodies: dict[str, str],
+        *,
+        asset_meshes_root: str | os.PathLike[str],
+    ) -> tuple[tuple[str, str, int, str], ...]:
+        """Content-address the exact meshes loaded into far-tracking slots."""
+
+        records: list[tuple[str, str, int, str]] = []
+        root = Path(asset_meshes_root).expanduser()
+        digest_cache: dict[Path, tuple[int, str]] = {}
+        for slot_name, mesh_reference in ray_cast_bodies.items():
+            path = Path(str(mesh_reference)).expanduser()
+            if not path.is_absolute():
+                path = root / path
+            path = path.resolve()
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"far_tracking_warp geometry for slot {slot_name!r} is not a file: {path}"
+                )
+            cached = digest_cache.get(path)
+            if cached is None:
+                stat_before = path.stat()
+                digest = cls._file_sha256(path)
+                stat_after = path.stat()
+                before_identity = (
+                    int(stat_before.st_dev),
+                    int(stat_before.st_ino),
+                    int(stat_before.st_size),
+                    int(stat_before.st_mtime_ns),
+                )
+                after_identity = (
+                    int(stat_after.st_dev),
+                    int(stat_after.st_ino),
+                    int(stat_after.st_size),
+                    int(stat_after.st_mtime_ns),
+                )
+                if before_identity != after_identity:
+                    raise RuntimeError(
+                        "far_tracking_warp geometry changed while its checkpoint identity was computed: "
+                        f"{path}"
+                    )
+                cached = (int(stat_after.st_size), digest)
+                digest_cache[path] = cached
+            size, digest = cached
+            # The parser is selected by the file suffix, so retain it while
+            # deliberately omitting the path/basename.  Identical copied or
+            # generated-cache assets then compare equal, while same-name
+            # files with different bytes cannot silently resume.
+            records.append(
+                (
+                    str(slot_name),
+                    path.suffix.lower(),
+                    size,
+                    digest,
+                )
+            )
+        return tuple(records)
+
+    def _persistent_checkpoint_semantics(self) -> dict[str, Any]:
+        shared_mount_values = (
+            self._shared_camera_sensor_local_position,
+            self._shared_camera_sensor_local_orientation,
+            self._shared_camera_sensor_data_frame_quat,
+        )
+        shared_mount_presence = [value is not None for value in shared_mount_values]
+        if any(shared_mount_presence) and not all(shared_mount_presence):
+            raise RuntimeError("Perception strict camera mount state is only partially initialized.")
+        shared_mount_present = all(shared_mount_presence)
+        hole_generator_schema = None
+        if self._camera_warp_hole_generator is not None:
+            hole_generator_schema = {
+                "shape": tuple(int(value) for value in self._camera_warp_hole_generator.shape),
+                "resolutions": tuple(
+                    tuple(int(value) for value in resolution)
+                    for resolution in self._camera_warp_hole_generator.resolutions
+                ),
+                "periods": tuple(int(value) for value in self._camera_warp_hole_generator.periods),
+                "factors": tuple(float(value) for value in self._camera_warp_hole_generator.factors),
+                # The historical far-tracking producer normalizes a raw
+                # Perlin field over its full vectorized training batch.  The
+                # extrema materially change an individual environment's hole
+                # mask, so deployment must reproduce the saved reference
+                # batch rather than silently using its live (usually one-env)
+                # batch size.
+                "normalization_scope": "reference_batch",
+                "reference_batch_size": int(
+                    getattr(
+                        self,
+                        "_camera_warp_hole_reference_batch_size",
+                        getattr(self._camera_warp_hole_generator, "batch_size", self.num_envs),
+                    )
+                ),
+            }
+            hole_seed_semantics = str(
+                getattr(
+                    self._camera_warp_hole_generator,
+                    "seed_semantics",
+                    _InfiniteFractalPerlin3D.LEGACY_SEED_SEMANTICS,
+                )
+            )
+            if hole_seed_semantics == _InfiniteFractalPerlin3D.RANK_LOCAL_SEED_SEMANTICS:
+                # These fields intentionally exist only for v2.  Their absence
+                # in an older contract/state continues to mean the byte-exact
+                # legacy fixed stream rather than being guessed as v2.
+                hole_generator_schema.update(
+                    {
+                        "seed_semantics": hole_seed_semantics,
+                        "effective_seed": int(
+                            self._camera_warp_hole_generator.effective_seed
+                        ),
+                        "gradient_seed_mixer": str(
+                            self._camera_warp_hole_generator.gradient_seed_mixer
+                        ),
+                        "octave_profile": str(
+                            self._camera_warp_hole_generator.octave_profile
+                        ),
+                    }
+                )
+            elif hole_seed_semantics != _InfiniteFractalPerlin3D.LEGACY_SEED_SEMANTICS:
+                raise RuntimeError(
+                    f"Unsupported live Perlin seed semantics: {hole_seed_semantics!r}."
+                )
+        sensor_offset_tuple = self._semantic_tensor_tuple(getattr(self, "_sensor_offset", None))
+        ray_start_offset_tuple = self._semantic_tensor_tuple(
+            getattr(self, "_ray_start_offset", None)
+        )
+        far_tracking_geometry = getattr(self, "_far_tracking_geometry_fingerprint", None)
+        rendered_camera = getattr(self, "_rendered_camera", None)
+        rendered_backend = None
+        if rendered_camera is not None:
+            rendered_backend = {
+                "implementation": (
+                    f"{type(rendered_camera).__module__}.{type(rendered_camera).__qualname__}"
+                ),
+                "annotator_name": getattr(rendered_camera, "_annotator_name", None),
+                "flip_render_array_vertical": getattr(
+                    rendered_camera,
+                    "_flip_render_array_vertical",
+                    None,
+                ),
+                "depth_prefers_visual_meshes": getattr(
+                    rendered_camera,
+                    "_depth_prefers_visual_meshes",
+                    None,
+                ),
+                "depth_prefers_robot_visual_meshes": getattr(
+                    rendered_camera,
+                    "_depth_prefers_robot_visual_meshes",
+                    None,
+                ),
+                "depth_prefers_object_visual_meshes": getattr(
+                    rendered_camera,
+                    "_depth_prefers_object_visual_meshes",
+                    None,
+                ),
+            }
+        return {
+            "num_envs": int(self.num_envs),
+            "output_mode": str(getattr(self.cfg, "output_mode", "")),
+            "camera_source": str(self._camera_source),
+            "simulator_backend": str(self._simulator_backend),
+            "camera_shape": (int(self._camera_height), int(self._camera_width)),
+            "camera_obs_shape": (int(self._camera_obs_height), int(self._camera_obs_width)),
+            "camera_geometry": {
+                "intrinsics_fx_fy_cx_cy": tuple(
+                    float(getattr(self, attr_name).detach().to("cpu").item())
+                    for attr_name in ("_camera_fx", "_camera_fy", "_camera_cx", "_camera_cy")
+                )
+                if all(
+                    isinstance(getattr(self, attr_name, None), torch.Tensor)
+                    for attr_name in ("_camera_fx", "_camera_fy", "_camera_cx", "_camera_cy")
+                )
+                else None,
+                "vfov_deg": (
+                    None
+                    if getattr(self, "_camera_vfov_deg", None) is None
+                    else float(self._camera_vfov_deg)
+                ),
+                "hfov_deg": (
+                    None
+                    if getattr(self, "_camera_hfov_deg", None) is None
+                    else float(self._camera_hfov_deg)
+                ),
+                "fps": float(getattr(self.cfg, "camera_fps", 0.0) or 0.0),
+                "near": float(getattr(self.cfg, "camera_near", 0.0) or 0.0),
+                "far": float(getattr(self.cfg, "camera_far", 0.0) or 0.0),
+                "max_distance": float(getattr(self.cfg, "max_distance", 0.0) or 0.0),
+                "pitch_deg": float(getattr(self.cfg, "camera_pitch_deg", 0.0) or 0.0),
+                "target_pitch_deg": (
+                    None
+                    if getattr(self.cfg, "camera_target_pitch_deg", None) is None
+                    else float(self.cfg.camera_target_pitch_deg)
+                ),
+                "distortion": tuple(
+                    float(value) for value in (getattr(self.cfg, "camera_distortion", None) or ())
+                ),
+                "body_name": getattr(self, "_camera_body_name", None),
+                "body_index": (
+                    None
+                    if getattr(self, "_camera_body_index", None) is None
+                    else int(self._camera_body_index)
+                ),
+                "body_offset_position": self._semantic_tensor_tuple(
+                    getattr(self, "_camera_body_offset_pos", None)
+                ),
+                "body_offset_quaternion": self._semantic_tensor_tuple(
+                    getattr(self, "_camera_body_offset_quat", None)
+                ),
+                "rendered_env_id": int(getattr(self, "_rendered_camera_env_id", 0)),
+                "mount_quaternion": self._semantic_tensor_tuple(
+                    getattr(self, "_camera_mount_quat", None)
+                ),
+                "use_mount_quaternion": bool(
+                    getattr(self, "_use_camera_mount_quat", False)
+                ),
+                "frame_quaternion": self._semantic_tensor_tuple(
+                    getattr(self, "_camera_frame_quat", None)
+                ),
+                "use_frame_quaternion": bool(
+                    getattr(self, "_use_camera_frame_quat", False)
+                ),
+                "auto_fix_backward": bool(
+                    getattr(self, "_camera_auto_fix_backward", False)
+                ),
+                "backward_ratio_threshold": float(
+                    getattr(self, "_camera_backward_ratio_threshold", 0.0)
+                ),
+                "far_tracking_base_link_indices": (
+                    None
+                    if not isinstance(
+                        getattr(self, "_far_tracking_base_link_indices", None),
+                        torch.Tensor,
+                    )
+                    else tuple(
+                        int(value)
+                        for value in self._far_tracking_base_link_indices.detach()
+                        .to("cpu")
+                        .reshape(-1)
+                        .tolist()
+                    )
+                ),
+            },
+            "heightmap_geometry": {
+                "grid_shape": (
+                    int(getattr(self, "_heightmap_grid_x", 0)),
+                    int(getattr(self, "_heightmap_grid_y", 0)),
+                ),
+                "grid_interval": (
+                    float(getattr(self, "_heightmap_interval_x", 0.0)),
+                    float(getattr(self, "_heightmap_interval_y", 0.0)),
+                ),
+                "body_name": getattr(self, "_heightmap_body_name", None),
+                "body_index": (
+                    None
+                    if getattr(self, "_heightmap_body_index", None) is None
+                    else int(self._heightmap_body_index)
+                ),
+                "body_offset_position": self._semantic_tensor_tuple(
+                    getattr(self, "_heightmap_body_offset_pos", None)
+                ),
+                "body_offset_quaternion": self._semantic_tensor_tuple(
+                    getattr(self, "_heightmap_body_offset_quat", None)
+                ),
+                "ray_start_offset": ray_start_offset_tuple,
+                "use_heading_only": bool(getattr(self.cfg, "use_heading_only", False)),
+                "observation_offset": float(
+                    getattr(self.cfg, "heightmap_obs_offset", 0.0) or 0.0
+                ),
+            },
+            "camera_strict_warp": bool(self._camera_strict_warp),
+            "camera_disable_offsets": bool(self._camera_disable_offsets),
+            "update_interval": float(self._update_interval),
+            "camera_warp_preprocess": bool(self._camera_warp_preprocess),
+            "camera_warp_freq_ratio": int(self._camera_warp_freq_ratio),
+            "camera_warp_buffer_len": int(self._camera_warp_buffer_len),
+            "camera_warp_latency_frame": int(self._camera_warp_latency_frame),
+            "camera_warp_latency_frame_range": (
+                None
+                if self._camera_warp_latency_frame_range is None
+                else tuple(int(value) for value in self._camera_warp_latency_frame_range)
+            ),
+            "camera_reset_randomization": self._camera_reset_randomization_semantics(),
+            "camera_setup_randomization": self._camera_setup_randomization_semantics(),
+            "reset_refresh_semantics": getattr(
+                self,
+                "_reset_refresh_semantics",
+                "legacy_full_v1",
+            ),
+            "effective_observation_schema": {
+                "sensor_offset": sensor_offset_tuple,
+                "camera_include_robot_mesh": bool(
+                    getattr(self, "_camera_include_robot_mesh", False)
+                ),
+                "object_geometry_mode": str(
+                    getattr(self, "_object_geometry_mode", "")
+                ),
+                "crop": (
+                    int(getattr(self, "_camera_warp_crop_top", 0)),
+                    int(getattr(self, "_camera_warp_crop_bottom", 0)),
+                    int(getattr(self, "_camera_warp_crop_left", 0)),
+                    int(getattr(self, "_camera_warp_crop_right", 0)),
+                ),
+                "resize": (
+                    None
+                    if getattr(self, "_camera_warp_resize", None) is None
+                    else tuple(int(value) for value in self._camera_warp_resize)
+                ),
+                "normalize": bool(getattr(self, "_camera_warp_normalize", False)),
+                "min_valid_depth": float(
+                    getattr(self, "_camera_warp_min_valid_depth", 0.0)
+                ),
+                "edge_noise": bool(getattr(self, "_camera_warp_edge_noise", False)),
+                "edge_border": int(getattr(self, "_camera_warp_edge_border", 0)),
+                "edge_shuffle_prob": float(
+                    getattr(self, "_camera_warp_edge_shuffle_prob", 0.0)
+                ),
+                "edge_empty_prob": float(
+                    getattr(self, "_camera_warp_edge_empty_prob", 0.0)
+                ),
+                "edge_thresh_primary": float(
+                    getattr(self, "_camera_warp_edge_thresh_primary", 0.0)
+                ),
+                "edge_thresh_secondary": float(
+                    getattr(self, "_camera_warp_edge_thresh_secondary", 0.0)
+                ),
+                "edge_far_depth_thresh": float(
+                    getattr(self, "_camera_warp_edge_far_depth_thresh", 0.0)
+                ),
+                "enable_holes": bool(
+                    getattr(self, "_camera_warp_enable_holes", False)
+                ),
+                "hole_prob": float(getattr(self, "_camera_warp_hole_prob", 0.0)),
+                "additive_noise_std": float(
+                    getattr(self, "_camera_warp_additive_noise_std", 0.0)
+                ),
+                "depth_offset_std": float(
+                    getattr(self, "_camera_warp_depth_offset_std", 0.0)
+                ),
+                "apply_sensor_noise": bool(
+                    getattr(self, "_camera_apply_sensor_noise", False)
+                ),
+                "obs_fill_value": float(getattr(self, "_camera_obs_fill_value", 0.0)),
+            },
+            "far_tracking_geometry": far_tracking_geometry,
+            "far_tracking_topology": {
+                "robot_slot_indices": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_robot_slot_indices", None)
+                ),
+                "robot_body_indices": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_robot_body_indices", None)
+                ),
+                "robot_body_names": tuple(
+                    str(value)
+                    for value in getattr(self, "_far_tracking_robot_body_names", ())
+                ),
+                "robot_body_offset_positions": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_robot_body_offset_pos", None)
+                ),
+                "robot_body_offset_quaternions": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_robot_body_offset_quat", None)
+                ),
+                "object_slot_indices": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_object_slot_indices", None)
+                ),
+                "object_source_indices": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_object_source_indices", None)
+                ),
+                "primitive_source_indices": self._semantic_tensor_tuple(
+                    getattr(self, "_far_tracking_primitive_source_indices", None)
+                ),
+                "object_names": tuple(
+                    str(value)
+                    for value in getattr(self, "_far_tracking_object_names", ())
+                ),
+                "object_active_env_ids": tuple(
+                    None
+                    if value is None
+                    else tuple(
+                        int(item)
+                        for item in value.detach().to("cpu").reshape(-1).tolist()
+                    )
+                    for value in getattr(
+                        self,
+                        "_far_tracking_object_active_env_ids",
+                        (),
+                    )
+                ),
+            },
+            "rendered_backend": rendered_backend,
+            "shared_mount_present": shared_mount_present,
+            "hole_generator_schema": hole_generator_schema,
+        }
+
+    @staticmethod
+    def _canonical_geometry_sort_key(value: Any) -> str:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+
+    @classmethod
+    def _normalize_training_geometry_support(
+        cls,
+        value: Any,
+        *,
+        path: str = "training_geometry_support",
+    ) -> dict[str, Any]:
+        """Validate the portable all-rank geometry support authenticated by a policy."""
+
+        if not isinstance(value, Mapping) or set(value) != {
+            "version",
+            "camera_source",
+            "training_rank_count",
+            "robot_mesh_bindings",
+            "object_mesh_support",
+        }:
+            raise ValueError(f"{path} has missing or unsupported fields.")
+        if type(value.get("version")) is not int or value["version"] != 1:
+            raise ValueError(f"{path}.version must equal integer 1.")
+        camera_source = value.get("camera_source")
+        if not isinstance(camera_source, str) or not camera_source:
+            raise ValueError(f"{path}.camera_source must be a non-empty string.")
+        training_rank_count = value.get("training_rank_count")
+        if type(training_rank_count) is not int or training_rank_count <= 0:
+            raise ValueError(f"{path}.training_rank_count must be a positive integer.")
+
+        def mesh_identity(raw: Any, *, mesh_path: str) -> dict[str, Any]:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "suffix",
+                "size_bytes",
+                "sha256",
+            }:
+                raise ValueError(f"{mesh_path} has missing or unsupported fields.")
+            suffix = raw.get("suffix")
+            if (
+                not isinstance(suffix, str)
+                or not suffix.startswith(".")
+                or len(suffix) <= 1
+                or suffix != suffix.lower()
+            ):
+                raise ValueError(f"{mesh_path}.suffix must be a lowercase file suffix.")
+            size_bytes = raw.get("size_bytes")
+            if type(size_bytes) is not int or size_bytes <= 0:
+                raise ValueError(f"{mesh_path}.size_bytes must be a positive integer.")
+            digest = raw.get("sha256")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or digest != digest.lower()
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ValueError(f"{mesh_path}.sha256 must be 64 lowercase hexadecimal characters.")
+            return {
+                "suffix": suffix,
+                "size_bytes": size_bytes,
+                "sha256": digest,
+            }
+
+        def finite_vector(raw: Any, *, vector_path: str, length: int) -> list[float]:
+            if not isinstance(raw, (list, tuple)) or len(raw) != length:
+                raise ValueError(f"{vector_path} must contain {length} finite numbers.")
+            result: list[float] = []
+            for index, item in enumerate(raw):
+                if isinstance(item, bool) or not isinstance(item, numbers.Real):
+                    raise ValueError(f"{vector_path}[{index}] must be a finite number.")
+                item_float = float(item)
+                if not math.isfinite(item_float):
+                    raise ValueError(f"{vector_path}[{index}] must be finite.")
+                result.append(item_float)
+            return result
+
+        raw_robot = value.get("robot_mesh_bindings")
+        if not isinstance(raw_robot, (list, tuple)):
+            raise ValueError(f"{path}.robot_mesh_bindings must be a list.")
+        robot: list[dict[str, Any]] = []
+        robot_slot_names: set[str] = set()
+        for index, raw in enumerate(raw_robot):
+            item_path = f"{path}.robot_mesh_bindings[{index}]"
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "slot_name",
+                "mesh",
+                "tracking_body_name",
+                "fixed_position_xyz",
+                "fixed_quaternion_xyzw",
+            }:
+                raise ValueError(f"{item_path} has missing or unsupported fields.")
+            slot_name = raw.get("slot_name")
+            tracking_body_name = raw.get("tracking_body_name")
+            if not isinstance(slot_name, str) or not slot_name:
+                raise ValueError(f"{item_path}.slot_name must be a non-empty string.")
+            if slot_name in robot_slot_names:
+                raise ValueError(f"{path}.robot_mesh_bindings contains duplicate slot {slot_name!r}.")
+            robot_slot_names.add(slot_name)
+            if not isinstance(tracking_body_name, str) or not tracking_body_name:
+                raise ValueError(f"{item_path}.tracking_body_name must be a non-empty string.")
+            position = finite_vector(
+                raw.get("fixed_position_xyz"),
+                vector_path=f"{item_path}.fixed_position_xyz",
+                length=3,
+            )
+            quaternion = finite_vector(
+                raw.get("fixed_quaternion_xyzw"),
+                vector_path=f"{item_path}.fixed_quaternion_xyzw",
+                length=4,
+            )
+            norm = math.sqrt(sum(component * component for component in quaternion))
+            if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1.0e-4):
+                raise ValueError(f"{item_path}.fixed_quaternion_xyzw must be a unit quaternion.")
+            robot.append(
+                {
+                    "slot_name": slot_name,
+                    "mesh": mesh_identity(raw.get("mesh"), mesh_path=f"{item_path}.mesh"),
+                    "tracking_body_name": tracking_body_name,
+                    "fixed_position_xyz": position,
+                    "fixed_quaternion_xyzw": quaternion,
+                }
+            )
+
+        raw_objects = value.get("object_mesh_support")
+        if not isinstance(raw_objects, (list, tuple)):
+            raise ValueError(f"{path}.object_mesh_support must be a list.")
+        objects: list[dict[str, Any]] = []
+        object_keys: set[str] = set()
+        for index, raw in enumerate(raw_objects):
+            item_path = f"{path}.object_mesh_support[{index}]"
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "source_name",
+                "mesh",
+                "training_active_env_count",
+            }:
+                raise ValueError(f"{item_path} has missing or unsupported fields.")
+            source_name = raw.get("source_name")
+            if not isinstance(source_name, str) or not source_name:
+                raise ValueError(f"{item_path}.source_name must be a non-empty string.")
+            active_count = raw.get("training_active_env_count")
+            if type(active_count) is not int or active_count <= 0:
+                raise ValueError(f"{item_path}.training_active_env_count must be a positive integer.")
+            normalized_item = {
+                "source_name": source_name,
+                "mesh": mesh_identity(raw.get("mesh"), mesh_path=f"{item_path}.mesh"),
+                "training_active_env_count": active_count,
+            }
+            identity_key = cls._canonical_geometry_sort_key(
+                {key: normalized_item[key] for key in ("source_name", "mesh")}
+            )
+            if identity_key in object_keys:
+                raise ValueError(f"{path}.object_mesh_support contains duplicate geometry support.")
+            object_keys.add(identity_key)
+            objects.append(normalized_item)
+
+        expected_robot_order = sorted(robot, key=cls._canonical_geometry_sort_key)
+        expected_object_order = sorted(objects, key=cls._canonical_geometry_sort_key)
+        if robot != expected_robot_order:
+            raise ValueError(f"{path}.robot_mesh_bindings must be in canonical sorted order.")
+        if objects != expected_object_order:
+            raise ValueError(f"{path}.object_mesh_support must be in canonical sorted order.")
+        if camera_source != "far_tracking_warp" and (robot or objects):
+            raise ValueError(
+                f"{path} may contain mesh bindings only for camera_source='far_tracking_warp'."
+            )
+        return {
+            "version": 1,
+            "camera_source": camera_source,
+            "training_rank_count": training_rank_count,
+            "robot_mesh_bindings": robot,
+            "object_mesh_support": objects,
+        }
+
+    @classmethod
+    def geometry_support_from_checkpoint_semantics(
+        cls,
+        semantics: Any,
+        *,
+        path: str = "perception.semantics",
+    ) -> dict[str, Any]:
+        """Project one rank's backend-local far-tracking state into portable semantics."""
+
+        if not isinstance(semantics, Mapping):
+            raise ValueError(f"{path} must be a mapping.")
+        camera_source = semantics.get("camera_source")
+        if not isinstance(camera_source, str) or not camera_source:
+            raise ValueError(f"{path}.camera_source must be a non-empty string.")
+        num_envs = semantics.get("num_envs")
+        if type(num_envs) is not int or num_envs <= 0:
+            raise ValueError(f"{path}.num_envs must be a positive integer.")
+        geometry = semantics.get("far_tracking_geometry")
+        topology = semantics.get("far_tracking_topology")
+        if camera_source != "far_tracking_warp":
+            if geometry not in (None, (), []):
+                raise ValueError(f"{path}.far_tracking_geometry is unexpected for {camera_source!r}.")
+            return cls._normalize_training_geometry_support(
+                {
+                    "version": 1,
+                    "camera_source": camera_source,
+                    "training_rank_count": 1,
+                    "robot_mesh_bindings": [],
+                    "object_mesh_support": [],
+                },
+                path=f"{path}.deployment_geometry",
+            )
+        if not isinstance(geometry, (list, tuple)):
+            raise ValueError(f"{path}.far_tracking_geometry must be a sequence.")
+        if not isinstance(topology, Mapping) or set(topology) != {
+            "robot_slot_indices",
+            "robot_body_indices",
+            "robot_body_names",
+            "robot_body_offset_positions",
+            "robot_body_offset_quaternions",
+            "object_slot_indices",
+            "object_source_indices",
+            "primitive_source_indices",
+            "object_names",
+            "object_active_env_ids",
+        }:
+            raise ValueError(f"{path}.far_tracking_topology has missing or unsupported fields.")
+
+        mesh_by_slot: list[dict[str, Any]] = []
+        seen_slot_names: set[str] = set()
+        for index, raw in enumerate(geometry):
+            item_path = f"{path}.far_tracking_geometry[{index}]"
+            if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+                raise ValueError(f"{item_path} must contain slot, suffix, size, and SHA-256.")
+            slot_name, suffix, size_bytes, digest = raw
+            candidate = cls._normalize_training_geometry_support(
+                {
+                    "version": 1,
+                    "camera_source": "far_tracking_warp",
+                    "training_rank_count": 1,
+                    "robot_mesh_bindings": [],
+                    "object_mesh_support": [
+                        {
+                            "source_name": "placeholder",
+                            "mesh": {
+                                "suffix": suffix,
+                                "size_bytes": size_bytes,
+                                "sha256": digest,
+                            },
+                            "training_active_env_count": 1,
+                        }
+                    ],
+                },
+                path=item_path,
+            )["object_mesh_support"][0]["mesh"]
+            if not isinstance(slot_name, str) or not slot_name or slot_name in seen_slot_names:
+                raise ValueError(f"{item_path} has an empty or duplicate semantic slot name.")
+            seen_slot_names.add(slot_name)
+            mesh_by_slot.append({"slot_name": slot_name, "mesh": candidate})
+
+        def sequence(name: str) -> list[Any]:
+            raw = topology.get(name)
+            if not isinstance(raw, (list, tuple)):
+                raise ValueError(f"{path}.far_tracking_topology.{name} must be a sequence.")
+            return list(raw)
+
+        def integer_indices(name: str, *, upper: int | None = None) -> list[int]:
+            raw_values = sequence(name)
+            values: list[int] = []
+            for index, item in enumerate(raw_values):
+                if (
+                    isinstance(item, bool)
+                    or not isinstance(item, numbers.Real)
+                    or not math.isfinite(float(item))
+                    or not float(item).is_integer()
+                ):
+                    raise ValueError(
+                        f"{path}.far_tracking_topology.{name}[{index}] must be an integer index."
+                    )
+                item_int = int(item)
+                if item_int < 0 or (upper is not None and item_int >= upper):
+                    raise ValueError(
+                        f"{path}.far_tracking_topology.{name}[{index}] is outside its valid range."
+                    )
+                values.append(item_int)
+            if len(values) != len(set(values)) and name.endswith("slot_indices"):
+                raise ValueError(f"{path}.far_tracking_topology.{name} contains duplicate slots.")
+            return values
+
+        robot_slots = integer_indices("robot_slot_indices", upper=len(mesh_by_slot))
+        robot_body_indices = integer_indices("robot_body_indices")
+        robot_body_names = sequence("robot_body_names")
+        robot_positions = sequence("robot_body_offset_positions")
+        robot_quaternions = sequence("robot_body_offset_quaternions")
+        robot_count = len(robot_slots)
+        if not (
+            len(robot_body_indices) == robot_count
+            and len(robot_body_names) == robot_count
+            and len(robot_positions) == robot_count * 3
+            and len(robot_quaternions) == robot_count * 4
+        ):
+            raise ValueError(f"{path}.far_tracking_topology robot bindings have inconsistent lengths.")
+
+        object_slots = integer_indices("object_slot_indices", upper=len(mesh_by_slot))
+        object_source_indices = integer_indices("object_source_indices")
+        object_names = sequence("object_names")
+        active_env_ids = sequence("object_active_env_ids")
+        if not (
+            len(object_slots) == len(object_source_indices) == len(active_env_ids)
+        ):
+            raise ValueError(f"{path}.far_tracking_topology object bindings have inconsistent lengths.")
+        primitive_sources = integer_indices("primitive_source_indices")
+        if primitive_sources:
+            raise ValueError(
+                f"{path}.far_tracking_topology contains primitive geometry whose shape is not checkpointed."
+            )
+        if set(robot_slots) & set(object_slots):
+            raise ValueError(f"{path}.far_tracking_topology assigns a geometry slot more than once.")
+        if set(robot_slots) | set(object_slots) != set(range(len(mesh_by_slot))):
+            raise ValueError(f"{path}.far_tracking_topology does not bind every geometry slot exactly once.")
+
+        robot_bindings: list[dict[str, Any]] = []
+        for index, slot_index in enumerate(robot_slots):
+            body_name = robot_body_names[index]
+            if not isinstance(body_name, str) or not body_name:
+                raise ValueError(f"{path}.far_tracking_topology.robot_body_names[{index}] is invalid.")
+            binding = {
+                "slot_name": mesh_by_slot[slot_index]["slot_name"],
+                "mesh": mesh_by_slot[slot_index]["mesh"],
+                "tracking_body_name": body_name,
+                "fixed_position_xyz": robot_positions[index * 3 : (index + 1) * 3],
+                "fixed_quaternion_xyzw": robot_quaternions[index * 4 : (index + 1) * 4],
+            }
+            robot_bindings.append(binding)
+
+        active_slot_count = [0] * num_envs
+        object_counts: dict[str, dict[str, Any]] = {}
+        used_source_indices: set[int] = set()
+        for index, slot_index in enumerate(object_slots):
+            source_index = object_source_indices[index]
+            if source_index >= len(object_names):
+                raise ValueError(
+                    f"{path}.far_tracking_topology.object_source_indices[{index}] is out of range."
+                )
+            source_name = object_names[source_index]
+            if not isinstance(source_name, str) or not source_name:
+                raise ValueError(f"{path}.far_tracking_topology.object_names[{source_index}] is invalid.")
+            used_source_indices.add(source_index)
+            raw_active = active_env_ids[index]
+            if raw_active is None:
+                active = list(range(num_envs))
+            else:
+                if not isinstance(raw_active, (list, tuple)):
+                    raise ValueError(
+                        f"{path}.far_tracking_topology.object_active_env_ids[{index}] must be null or a sequence."
+                    )
+                active = list(raw_active)
+                if any(type(env_id) is not int or env_id < 0 or env_id >= num_envs for env_id in active):
+                    raise ValueError(
+                        f"{path}.far_tracking_topology.object_active_env_ids[{index}] is out of range."
+                    )
+                if len(active) != len(set(active)):
+                    raise ValueError(
+                        f"{path}.far_tracking_topology.object_active_env_ids[{index}] contains duplicates."
+                    )
+            if not active:
+                raise ValueError(f"{path} contains a geometry variant unused by every environment.")
+            for env_id in active:
+                active_slot_count[env_id] += 1
+            support_identity = {
+                "source_name": source_name,
+                "mesh": mesh_by_slot[slot_index]["mesh"],
+            }
+            support_key = cls._canonical_geometry_sort_key(support_identity)
+            existing = object_counts.get(support_key)
+            if existing is None:
+                existing = {**support_identity, "training_active_env_count": 0}
+                object_counts[support_key] = existing
+            existing["training_active_env_count"] += len(active)
+        if object_slots and any(count != 1 for count in active_slot_count):
+            raise ValueError(
+                f"{path} cannot authenticate one-object direct deployment because some training "
+                "environments did not have exactly one active object geometry."
+            )
+        if used_source_indices != set(range(len(object_names))):
+            raise ValueError(f"{path}.far_tracking_topology contains unused object source names.")
+
+        return cls._normalize_training_geometry_support(
+            {
+                "version": 1,
+                "camera_source": camera_source,
+                "training_rank_count": 1,
+                "robot_mesh_bindings": sorted(
+                    robot_bindings,
+                    key=cls._canonical_geometry_sort_key,
+                ),
+                "object_mesh_support": sorted(
+                    object_counts.values(),
+                    key=cls._canonical_geometry_sort_key,
+                ),
+            },
+            path=f"{path}.deployment_geometry",
+        )
+
+    @classmethod
+    def aggregate_training_geometry_support(
+        cls,
+        rank_supports: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Union rank-sharded object support while requiring identical robot geometry."""
+
+        if not rank_supports:
+            raise ValueError("Perception training geometry aggregation requires at least one rank.")
+        normalized = [
+            cls._normalize_training_geometry_support(
+                support,
+                path=f"rank_geometry_support[{index}]",
+            )
+            for index, support in enumerate(rank_supports)
+        ]
+        if any(support["training_rank_count"] != 1 for support in normalized):
+            raise ValueError("Rank-local perception geometry support must declare training_rank_count=1.")
+        camera_source = normalized[0]["camera_source"]
+        robot_bindings = normalized[0]["robot_mesh_bindings"]
+        object_counts: dict[str, dict[str, Any]] = {}
+        for rank, support in enumerate(normalized):
+            if support["camera_source"] != camera_source:
+                raise ValueError(f"Perception camera_source differs on training rank {rank}.")
+            if support["robot_mesh_bindings"] != robot_bindings:
+                raise ValueError(f"Perception robot mesh bindings differ on training rank {rank}.")
+            for item in support["object_mesh_support"]:
+                identity = {key: item[key] for key in ("source_name", "mesh")}
+                identity_key = cls._canonical_geometry_sort_key(identity)
+                aggregate = object_counts.get(identity_key)
+                if aggregate is None:
+                    aggregate = {**identity, "training_active_env_count": 0}
+                    object_counts[identity_key] = aggregate
+                aggregate["training_active_env_count"] += item["training_active_env_count"]
+        return cls._normalize_training_geometry_support(
+            {
+                "version": 1,
+                "camera_source": camera_source,
+                "training_rank_count": len(normalized),
+                "robot_mesh_bindings": robot_bindings,
+                "object_mesh_support": sorted(
+                    object_counts.values(),
+                    key=cls._canonical_geometry_sort_key,
+                ),
+            }
+        )
+
+    def get_local_geometry_support(self) -> dict[str, Any]:
+        return self.geometry_support_from_checkpoint_semantics(
+            self._persistent_checkpoint_semantics(),
+            path="live_perception.semantics",
+        )
+
+    def validate_deployment_geometry_support(self, expected: Any) -> dict[str, Any]:
+        """Require live static geometry equality and selected-object membership."""
+
+        normalized = self._normalize_training_geometry_support(expected)
+        live = self.get_local_geometry_support()
+        if live["camera_source"] != normalized["camera_source"]:
+            raise ValueError(
+                "Live perception camera source does not match training geometry support: "
+                f"live={live['camera_source']!r}, training={normalized['camera_source']!r}."
+            )
+        if live["robot_mesh_bindings"] != normalized["robot_mesh_bindings"]:
+            raise ValueError(
+                "Live perception robot meshes/fixed-link bindings differ from the training checkpoint."
+            )
+        expected_objects = {
+            self._canonical_geometry_sort_key(
+                {key: item[key] for key in ("source_name", "mesh")}
+            )
+            for item in normalized["object_mesh_support"]
+        }
+        live_objects = {
+            self._canonical_geometry_sort_key(
+                {key: item[key] for key in ("source_name", "mesh")}
+            )
+            for item in live["object_mesh_support"]
+        }
+        if bool(expected_objects) != bool(live_objects):
+            raise ValueError(
+                "Live perception object-geometry presence differs from the training checkpoint."
+            )
+        unknown = sorted(live_objects - expected_objects)
+        if unknown:
+            raise ValueError(
+                "Live perception selected object geometry is not a member of the authenticated "
+                f"training support: {unknown}."
+            )
+        return normalized
+
+    def authenticate_observation_contract(
+        self,
+        contract: Any,
+        *,
+        declared_sha256: str,
+    ) -> str:
+        """Bind a direct producer to an ONNX contract after live-geometry validation."""
+
+        if not isinstance(contract, Mapping) or contract.get("version") != 2:
+            raise ValueError("Direct perception requires a version-2 observation contract mapping.")
+        lifecycle = contract.get("producer_lifecycle")
+        if (
+            not isinstance(lifecycle, Mapping)
+            or lifecycle.get("reset_refresh_semantics") != "targeted_v2"
+            or self.uses_legacy_full_reset_refresh()
+        ):
+            raise ValueError(
+                "Direct one-environment perception requires targeted_v2 reset-refresh semantics; "
+                "legacy vectorized reset producers cannot be represented by RunSim."
+            )
+        expected_support = self.validate_deployment_geometry_support(
+            contract.get("training_geometry_support")
+        )
+        rebuilt = self._build_observation_contract(
+            training_geometry_support=expected_support,
+        )
+        expected_payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        rebuilt_payload = json.dumps(
+            rebuilt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if rebuilt_payload != expected_payload:
+            raise ValueError(
+                "Live direct perception transform/noise/cadence differs from the authenticated ONNX contract."
+            )
+        computed = hashlib.sha256(expected_payload).hexdigest()
+        if (
+            not isinstance(declared_sha256, str)
+            or declared_sha256 != declared_sha256.lower()
+            or len(declared_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in declared_sha256)
+            or computed != declared_sha256
+        ):
+            raise ValueError("Direct perception observation-contract SHA-256 is invalid or mismatched.")
+        self._authenticated_observation_contract = json.loads(expected_payload)
+        return computed
+
+    def _build_observation_contract(
+        self,
+        *,
+        training_geometry_support: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the effective, transportable perception-observation contract.
+
+        The training checkpoint state above also records resume-only details
+        such as environment count, sampled calibration tensors, simulator
+        indices, and active geometry slots.  A deployed student instead needs
+        the deterministic transform/distribution that produced its flattened
+        perception tensor.  This projection intentionally omits backend
+        allocator indices and raw paths while retaining content-addressed
+        semantic geometry bindings, resolved image geometry, preprocessing,
+        timing, noise/randomization distributions, and renderer conventions.
+        """
+
+        semantics = self._persistent_checkpoint_semantics()
+        camera_geometry = dict(semantics["camera_geometry"])
+        camera_geometry.pop("body_index", None)
+        camera_geometry.pop("far_tracking_base_link_indices", None)
+        heightmap_geometry = dict(semantics["heightmap_geometry"])
+        heightmap_geometry.pop("body_index", None)
+        latency_range = semantics["camera_warp_latency_frame_range"]
+        reset_semantics = semantics["reset_refresh_semantics"]
+        camera_reset_randomization = semantics["camera_reset_randomization"]
+
+        # Targeting only the reset subset prevents a second camera-frequency
+        # tick and a second Perlin-hole frame, but it does not make the current
+        # implementation's stochastic sample path environment-local.  Camera
+        # reset sampling and several pixel-noise stages still use PyTorch's
+        # process-global RNG.  Record that limitation explicitly so a
+        # one-environment RunSim can authenticate the trained distributions
+        # without claiming bitwise replay of a vectorized rollout.
+        reset_randomization_consumes_rng = bool(
+            camera_reset_randomization is not None
+            and any(
+                camera_reset_randomization.get(name) is not None
+                for name in (
+                    "translation_xyz",
+                    "rotation_rpy_deg",
+                    "noise_std_mult",
+                    "noise_drop_prob",
+                )
+            )
+        )
+        sensor_noise_on_reset = bool(
+            getattr(self, "_camera_apply_sensor_noise", False)
+            and camera_reset_randomization is not None
+            and (
+                camera_reset_randomization.get("noise_std_mult") is not None
+                or camera_reset_randomization.get("noise_drop_prob") is not None
+            )
+        )
+        reset_refresh_pixel_rng = bool(
+            semantics["output_mode"] == "camera_depth"
+            and (
+                bool(getattr(self, "_camera_warp_edge_noise", False))
+                or float(getattr(self, "_camera_warp_additive_noise_std", 0.0) or 0.0) > 0.0
+                or latency_range is not None
+                or sensor_noise_on_reset
+            )
+        )
+        reset_refresh_consumes_global_rng = bool(
+            reset_randomization_consumes_rng or reset_refresh_pixel_rng
+        )
+
+        return {
+            "version": 2,
+            "output_mode": semantics["output_mode"],
+            "camera_source": semantics["camera_source"],
+            "camera_shape": semantics["camera_shape"],
+            "camera_obs_shape": semantics["camera_obs_shape"],
+            "camera_geometry": camera_geometry,
+            "heightmap_geometry": heightmap_geometry,
+            "camera_strict_warp": semantics["camera_strict_warp"],
+            "camera_disable_offsets": semantics["camera_disable_offsets"],
+            "update_interval": semantics["update_interval"],
+            "camera_warp_preprocess": semantics["camera_warp_preprocess"],
+            "camera_warp_freq_ratio": semantics["camera_warp_freq_ratio"],
+            "camera_warp_buffer_len": semantics["camera_warp_buffer_len"],
+            "camera_warp_latency_frame": (
+                None if latency_range is not None else semantics["camera_warp_latency_frame"]
+            ),
+            "camera_warp_latency_frame_range": latency_range,
+            "camera_reset_randomization": camera_reset_randomization,
+            "camera_setup_randomization": semantics["camera_setup_randomization"],
+            "training_geometry_support": self._normalize_training_geometry_support(
+                training_geometry_support
+            ),
+            "producer_tick_dt": float(getattr(self.env, "dt", 0.0)),
+            "producer_lifecycle": {
+                "reset_refresh_semantics": reset_semantics,
+                "ordinary_manager_update_calls_per_control_tick": 1,
+                "initialization_control_ticks_before_first_reset_output": 1,
+                "initialization_ordinary_manager_update_calls_before_first_reset_output": 1,
+                "reset_output_republished_until_physics_advances": True,
+                "reset_output_scope": (
+                    "full_vectorized_batch"
+                    if reset_semantics == "legacy_full_v1"
+                    else "reset_env_subset"
+                ),
+                "hole_clock_advances_on_reset_refresh": bool(
+                    reset_semantics == "legacy_full_v1"
+                ),
+                "camera_frequency_phase_advances_on_reset_refresh": bool(
+                    reset_semantics == "legacy_full_v1"
+                ),
+                "camera_producer_reset_refresh_consumes_process_global_rng": (
+                    reset_refresh_consumes_global_rng
+                ),
+                "future_noise_sample_path_peer_reset_coupled": bool(
+                    reset_semantics == "legacy_full_v1"
+                    or reset_refresh_consumes_global_rng
+                ),
+                "batch_size_invariant_sample_path": False,
+                "stochastic_equivalence": (
+                    "not_replayable_one_env"
+                    if reset_semantics == "legacy_full_v1"
+                    else "distribution_only"
+                ),
+                "seed_replay_scope": "same_execution_trace_only",
+            },
+            "camera_ray_correction_quaternion_xyzw": self._semantic_tensor_tuple(
+                getattr(self, "_camera_ray_correction_quat", None)
+            ),
+            "effective_observation_schema": semantics["effective_observation_schema"],
+            "rendered_backend": semantics["rendered_backend"],
+            "hole_generator_schema": semantics["hole_generator_schema"],
+        }
+
+    def get_observation_contract(
+        self,
+        *,
+        training_geometry_support: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the live or explicitly authenticated transport contract."""
+
+        authenticated_contract = getattr(
+            self,
+            "_authenticated_observation_contract",
+            None,
+        )
+        if training_geometry_support is None and authenticated_contract is not None:
+            return copy.deepcopy(authenticated_contract)
+        if training_geometry_support is None:
+            training_geometry_support = self.get_local_geometry_support()
+        return self._build_observation_contract(
+            training_geometry_support=training_geometry_support,
+        )
+
+    def get_observation_contract_sha256(
+        self,
+        *,
+        training_geometry_support: dict[str, Any] | None = None,
+    ) -> str:
+        """Hash :meth:`get_observation_contract` using canonical strict JSON."""
+
+        payload = json.dumps(
+            self.get_observation_contract(
+                training_geometry_support=training_geometry_support,
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def uses_legacy_full_reset_refresh(self) -> bool:
+        """Whether any peer reset advances the complete vectorized sensor stream."""
+
+        return getattr(self, "_reset_refresh_semantics", "legacy_full_v1") == "legacy_full_v1"
+
+    @staticmethod
+    def _checkpoint_tensor_like(
+        value: Any,
+        *,
+        reference: torch.Tensor,
+        path: str,
+    ) -> torch.Tensor:
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"Perception checkpoint {path} must be a tensor.")
+        if tuple(value.shape) != tuple(reference.shape):
+            raise ValueError(
+                f"Perception checkpoint {path} shape {tuple(value.shape)} does not match "
+                f"runtime {tuple(reference.shape)}."
+            )
+        if value.dtype != reference.dtype:
+            raise ValueError(
+                f"Perception checkpoint {path} dtype {value.dtype} does not match runtime {reference.dtype}."
+            )
+        if not value.is_floating_point() or not bool(torch.isfinite(value).all().item()):
+            raise ValueError(f"Perception checkpoint {path} must contain only finite floating values.")
+        return value.detach().to(device=reference.device, dtype=reference.dtype).clone()
+
+    @staticmethod
+    def _validate_checkpoint_unit_quaternion(value: torch.Tensor, *, path: str) -> None:
+        norms = torch.linalg.vector_norm(value, dim=-1)
+        if bool((torch.abs(norms - 1.0) > 1.0e-4).any().item()):
+            raise ValueError(f"Perception checkpoint {path} must contain unit quaternions.")
+
+    def get_persistent_checkpoint_state(self) -> dict[str, Any]:
+        """Serialize sampled calibration that survives ordinary episode resets."""
+
+        shared_mount = None
+        semantics = self._persistent_checkpoint_semantics()
+        if semantics["shared_mount_present"]:
+            shared_mount = {
+                "local_position": self._shared_camera_sensor_local_position.detach().to("cpu").clone(),
+                "local_orientation": self._shared_camera_sensor_local_orientation.detach().to("cpu").clone(),
+                "data_frame_quat": self._shared_camera_sensor_data_frame_quat.detach().to("cpu").clone(),
+            }
+        return {
+            "version": 1,
+            "semantics": semantics,
+            "camera_warp_depth_offset": self._camera_warp_depth_offset.detach().to("cpu").clone(),
+            "camera_ray_correction_quat": self._camera_ray_correction_quat.detach().to("cpu").clone(),
+            "camera_obs_step_counter": int(self._camera_obs_step_counter),
+            "time_since_update": float(self._time_since_update),
+            "hole_frame_idx": (
+                None
+                if self._camera_warp_hole_generator is None
+                else int(self._camera_warp_hole_generator.frame_idx)
+            ),
+            "shared_mount": shared_mount,
+        }
+
+    def _prepare_persistent_checkpoint_state(self, state: Any) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            raise ValueError("Perception persistent checkpoint state must be a dictionary.")
+        if set(state) != {
+            "version",
+            "semantics",
+            "camera_warp_depth_offset",
+            "camera_ray_correction_quat",
+            "camera_obs_step_counter",
+            "time_since_update",
+            "hole_frame_idx",
+            "shared_mount",
+        }:
+            raise ValueError(
+                "Perception persistent checkpoint state has missing or unsupported fields."
+            )
+        version = state.get("version")
+        if isinstance(version, bool) or not isinstance(version, numbers.Integral) or int(version) != 1:
+            raise ValueError(f"Unsupported perception checkpoint version: {version!r}.")
+        if state.get("semantics") != self._persistent_checkpoint_semantics():
+            raise ValueError("Perception checkpoint semantics differ from the active runtime.")
+        prepared = {
+            "camera_warp_depth_offset": self._checkpoint_tensor_like(
+                state.get("camera_warp_depth_offset"),
+                reference=self._camera_warp_depth_offset,
+                path="camera_warp_depth_offset",
+            ),
+            "camera_ray_correction_quat": self._checkpoint_tensor_like(
+                state.get("camera_ray_correction_quat"),
+                reference=self._camera_ray_correction_quat,
+                path="camera_ray_correction_quat",
+            ),
+            "shared_mount": None,
+        }
+        self._validate_checkpoint_unit_quaternion(
+            prepared["camera_ray_correction_quat"],
+            path="camera_ray_correction_quat",
+        )
+        camera_obs_step_counter = state.get("camera_obs_step_counter")
+        if (
+            isinstance(camera_obs_step_counter, bool)
+            or not isinstance(camera_obs_step_counter, numbers.Integral)
+            or int(camera_obs_step_counter) < 0
+        ):
+            raise ValueError("Perception checkpoint camera_obs_step_counter must be a non-negative integer.")
+        time_since_update = state.get("time_since_update")
+        if (
+            isinstance(time_since_update, bool)
+            or not isinstance(time_since_update, numbers.Real)
+            or not math.isfinite(float(time_since_update))
+            or float(time_since_update) < 0.0
+        ):
+            raise ValueError("Perception checkpoint time_since_update must be finite and non-negative.")
+        hole_frame_idx = state.get("hole_frame_idx")
+        if self._camera_warp_hole_generator is None:
+            if hole_frame_idx is not None:
+                raise ValueError("Perception checkpoint unexpectedly contains a hole frame index.")
+        elif (
+            isinstance(hole_frame_idx, bool)
+            or not isinstance(hole_frame_idx, numbers.Integral)
+            or int(hole_frame_idx) < 0
+        ):
+            raise ValueError("Perception checkpoint hole_frame_idx must be a non-negative integer.")
+        prepared["camera_obs_step_counter"] = int(camera_obs_step_counter)
+        prepared["time_since_update"] = float(time_since_update)
+        prepared["hole_frame_idx"] = None if hole_frame_idx is None else int(hole_frame_idx)
+        shared_mount = state.get("shared_mount")
+        if self._persistent_checkpoint_semantics()["shared_mount_present"]:
+            if not isinstance(shared_mount, dict) or set(shared_mount) != {
+                "local_position",
+                "local_orientation",
+                "data_frame_quat",
+            }:
+                raise ValueError("Perception checkpoint shared_mount is incomplete.")
+            prepared_shared = {
+                "local_position": self._checkpoint_tensor_like(
+                    shared_mount.get("local_position"),
+                    reference=self._shared_camera_sensor_local_position,
+                    path="shared_mount.local_position",
+                ),
+                "local_orientation": self._checkpoint_tensor_like(
+                    shared_mount.get("local_orientation"),
+                    reference=self._shared_camera_sensor_local_orientation,
+                    path="shared_mount.local_orientation",
+                ),
+                "data_frame_quat": self._checkpoint_tensor_like(
+                    shared_mount.get("data_frame_quat"),
+                    reference=self._shared_camera_sensor_data_frame_quat,
+                    path="shared_mount.data_frame_quat",
+                ),
+            }
+            for name in ("local_orientation", "data_frame_quat"):
+                self._validate_checkpoint_unit_quaternion(
+                    prepared_shared[name],
+                    path=f"shared_mount.{name}",
+                )
+            sensor = self._far_tracking_camera_sensor
+            if sensor is not None:
+                for state_name, sensor_name in (
+                    ("local_position", "camera_sensor_local_position"),
+                    ("local_orientation", "camera_sensor_local_orientation"),
+                    ("data_frame_quat", "camera_sensor_data_frame_quat"),
+                ):
+                    sensor_value = getattr(sensor, sensor_name, None)
+                    prepared_value = prepared_shared[state_name]
+                    if (
+                        not isinstance(sensor_value, torch.Tensor)
+                        or tuple(sensor_value.shape) != tuple(prepared_value.shape)
+                        or sensor_value.dtype != prepared_value.dtype
+                    ):
+                        raise ValueError(
+                            f"Runtime far-tracking sensor {sensor_name} is incompatible with checkpoint mount state."
+                        )
+            prepared["shared_mount"] = prepared_shared
+        elif shared_mount is not None:
+            raise ValueError("Perception checkpoint unexpectedly contains shared_mount state.")
+        return prepared
+
+    def validate_persistent_checkpoint_state(self, state: Any) -> None:
+        self._prepare_persistent_checkpoint_state(state)
+
+    def load_persistent_checkpoint_state(self, state: Any) -> None:
+        """Restore sampled calibration after complete validation."""
+
+        prepared = self._prepare_persistent_checkpoint_state(state)
+        # Ray directions are derived from the correction quaternion during
+        # setup.  Rebuild them from the authenticated checkpoint value before
+        # committing live state; otherwise an auto-fixed camera can expose the
+        # restored quaternion while raycasting with stale fresh-process rays.
+        restored_correction = prepared["camera_ray_correction_quat"]
+        rebuilt_camera_rays = (
+            self._build_camera_rays(correction_quat=restored_correction)
+            if self._camera_ray_dirs_base is not None
+            else None
+        )
+        rebuilt_scandots_rays = (
+            self._build_camera_scandots_rays(correction_quat=restored_correction)
+            if self._camera_scandots_ray_dirs_base is not None
+            else None
+        )
+        self._camera_warp_depth_offset.copy_(prepared["camera_warp_depth_offset"])
+        self._camera_ray_correction_quat.copy_(restored_correction)
+        if rebuilt_camera_rays is not None:
+            self._camera_ray_dirs_base = rebuilt_camera_rays
+        if rebuilt_scandots_rays is not None:
+            self._camera_scandots_ray_dirs_base = rebuilt_scandots_rays
+        self._camera_obs_step_counter = prepared["camera_obs_step_counter"]
+        self._time_since_update = prepared["time_since_update"]
+        if self._camera_warp_hole_generator is not None:
+            self._camera_warp_hole_generator.frame_idx = prepared["hole_frame_idx"]
+            self._camera_warp_hole_generator.gradient_cache = [
+                {} for _ in self._camera_warp_hole_generator.resolutions
+            ]
+            self._camera_warp_hole_frame_stats = None
+        shared_mount = prepared["shared_mount"]
+        if shared_mount is None:
+            return
+        self._shared_camera_sensor_local_position = shared_mount["local_position"]
+        self._shared_camera_sensor_local_orientation = shared_mount["local_orientation"]
+        self._shared_camera_sensor_data_frame_quat = shared_mount["data_frame_quat"]
+        sensor = self._far_tracking_camera_sensor
+        if sensor is not None:
+            sensor.camera_sensor_local_position.copy_(
+                self._shared_camera_sensor_local_position.to(
+                    device=sensor.camera_sensor_local_position.device,
+                    dtype=sensor.camera_sensor_local_position.dtype,
+                )
+            )
+            sensor.camera_sensor_local_orientation.copy_(
+                self._shared_camera_sensor_local_orientation.to(
+                    device=sensor.camera_sensor_local_orientation.device,
+                    dtype=sensor.camera_sensor_local_orientation.dtype,
+                )
+            )
+            sensor.camera_sensor_data_frame_quat.copy_(
+                self._shared_camera_sensor_data_frame_quat.to(
+                    device=sensor.camera_sensor_data_frame_quat.device,
+                    dtype=sensor.camera_sensor_data_frame_quat.dtype,
+                )
+            )
 
     def update(self, env_ids: torch.Tensor | None = None) -> None:
         if not self.enabled:
@@ -632,6 +2332,8 @@ class PerceptionManager:
             if self._time_since_update + 1.0e-8 < self._update_interval:
                 return
             self._time_since_update -= self._update_interval
+
+        self._log_camera_randomization_state_once()
 
         if self._uses_rendered_camera():
             if self._rendered_camera is None:
@@ -656,13 +2358,14 @@ class PerceptionManager:
                 )
             elif camera_depth.ndim == 2:
                 camera_depth = camera_depth.unsqueeze(0)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             env_id = torch.tensor([self._rendered_camera_env_id], device=self.device, dtype=torch.long)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_id)
             self._camera_depth[env_id] = camera_depth
             self._update_camera_depth_observation(
                 env_id,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="rendered", env_ids=env_id)
             self._maybe_log_runtime_camera_alignment()
@@ -671,12 +2374,13 @@ class PerceptionManager:
         if self._uses_pytorch3d():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_pytorch3d_depth(env_ids)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_ids)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="pytorch3d", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
@@ -685,12 +2389,13 @@ class PerceptionManager:
         if self._uses_camera_far_tracking():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_far_tracking_camera_depth(env_ids)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_ids)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="far_tracking_warp", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
@@ -699,12 +2404,13 @@ class PerceptionManager:
         if self._uses_camera_scandots():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_scandots_depth(env_ids)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_ids)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="scandots", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
@@ -713,12 +2419,13 @@ class PerceptionManager:
         if self._uses_camera_raycast():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_raycast_depth(env_ids)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_ids)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="raycast", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
@@ -734,13 +2441,13 @@ class PerceptionManager:
 
         if self.cfg.output_mode == "camera_depth":
             camera_depth = self._project_to_camera(ray_hits_world, root_pos, base_quat, offset_world)
-            camera_depth = self._apply_camera_depth_noise(camera_depth)
-            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            camera_depth = self._prepare_camera_depth_for_observation(camera_depth, env_ids=env_ids)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
-                refresh=self._consume_camera_obs_refresh_flag(),
+                refresh=self._camera_obs_refresh_flag_for_update(env_ids),
+                advance_temporal_noise=env_ids is None,
             )
             self._maybe_dump_camera_debug(source_label="projected", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
@@ -1060,8 +2767,31 @@ class PerceptionManager:
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             raise RuntimeError("Camera pose requested but camera_depth output is disabled.")
 
+        if apply_sensor_offset and apply_pitch and self._camera_strict_warp:
+            return self._get_strict_warp_camera_pose(env_ids)
+
         idx = env_ids if env_ids is not None else slice(None)
         body_pos, body_quat = self._get_camera_body_pose(idx)
+
+        if apply_sensor_offset and apply_pitch:
+            num_envs = body_pos.shape[0]
+            local_position = self._sensor_offset.to(
+                device=body_pos.device,
+                dtype=body_pos.dtype,
+            ).unsqueeze(0).expand(num_envs, -1)
+            combo = self._camera_ray_rotation_quat(
+                device=body_quat.device,
+                dtype=body_quat.dtype,
+            ).unsqueeze(0).expand(num_envs, -1)
+            local_position, combo = self._apply_runtime_camera_mount_offsets(
+                local_position,
+                combo,
+                idx=idx,
+            )
+            return (
+                body_pos + quat_apply(body_quat, local_position, w_last=True),
+                quat_mul(body_quat, combo, w_last=True),
+            )
 
         if apply_sensor_offset:
             offset_world = quat_apply(body_quat, self._sensor_offset.expand(body_pos.shape[0], -1), w_last=True)
@@ -1088,7 +2818,10 @@ class PerceptionManager:
         sensor_offset = self._sensor_offset.to(device=self.device, dtype=torch.float32).view(1, 1, 3)
         sensor_offset = sensor_offset.expand(num_envs, 1, 3).clone()
 
-        mount_rot_deg = torch.tensor([1.0, 27.0, 1.0], device=self.device, dtype=torch.float32).view(1, 1, 3)
+        mount_rot_deg = self._strict_camera_mount_rotation_deg.to(
+            device=self.device,
+            dtype=torch.float32,
+        ).view(1, 1, 3)
         mount_rot_deg = mount_rot_deg.expand(num_envs, 1, 3).clone()
         data_frame_rot_rad = torch.deg2rad(
             torch.tensor([-90.0, 0.0, -90.0], device=self.device, dtype=torch.float32)
@@ -1105,7 +2838,31 @@ class PerceptionManager:
         rotation_jitter_min = torch.tensor([-2.5, -3.0, -2.5], device=self.device, dtype=torch.float32)
         rotation_jitter_max = torch.tensor([2.5, 3.0, 2.5], device=self.device, dtype=torch.float32)
         randomize_mount_raw = os.environ.get("HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT", "1").strip().lower()
-        randomize_mount = randomize_mount_raw not in {"0", "false", "no", "off", ""}
+        # An enabled reset term supplies fresh camera offsets every episode.
+        # Keep the one-shot fallback when the manager does not configure that
+        # specific term; otherwise setup jitter and reset jitter would stack.
+        has_reset_randomization = self._has_camera_reset_randomization()
+        randomize_mount = (
+            randomize_mount_raw not in {"0", "false", "no", "off", ""}
+            and not has_reset_randomization
+        )
+        self._camera_setup_randomization_enabled = bool(randomize_mount)
+        self._camera_setup_translation_range = tuple(
+            (float(low), float(high))
+            for low, high in zip(
+                translation_jitter_min.detach().to("cpu").tolist(),
+                translation_jitter_max.detach().to("cpu").tolist(),
+                strict=True,
+            )
+        )
+        self._camera_setup_rotation_range_deg = tuple(
+            (float(low), float(high))
+            for low, high in zip(
+                rotation_jitter_min.detach().to("cpu").tolist(),
+                rotation_jitter_max.detach().to("cpu").tolist(),
+                strict=True,
+            )
+        )
         if randomize_mount:
             jitter_translation = translation_jitter_min.view(1, 1, 3) + (
                 translation_jitter_max - translation_jitter_min
@@ -1143,6 +2900,310 @@ class PerceptionManager:
         self._shared_camera_sensor_local_position = local_position
         self._shared_camera_sensor_local_orientation = local_orientation
         self._shared_camera_sensor_data_frame_quat = data_frame_quat
+
+    def _camera_reset_randomization_params(self) -> dict[str, Any] | None:
+        randomization_manager = getattr(getattr(self, "env", None), "randomization_manager", None)
+        reset_terms = getattr(getattr(randomization_manager, "cfg", None), "reset_terms", {})
+        if not isinstance(reset_terms, dict):
+            raise ValueError("Camera randomization reset_terms must be a mapping.")
+        canonical_func = "holosoma.managers.randomization.terms.locomotion.randomize_camera_raycast"
+        matches: list[dict[str, Any]] = []
+        for term_cfg in reset_terms.values():
+            func_path = str(getattr(term_cfg, "func", ""))
+            normalized_func = func_path.replace(":", ".")
+            if normalized_func.rsplit(".", maxsplit=1)[-1] != "randomize_camera_raycast":
+                continue
+            if normalized_func != canonical_func:
+                raise ValueError(
+                    "Camera reset randomization must use the canonical randomize_camera_raycast implementation, "
+                    f"got {func_path!r}."
+                )
+            params = getattr(term_cfg, "params", {}) or {}
+            if not isinstance(params, dict):
+                raise ValueError("Camera reset randomization params must be a mapping.")
+            enabled = params.get("enabled", True)
+            if not isinstance(enabled, (bool, np.bool_)):
+                raise ValueError(f"Camera reset randomization enabled must be boolean, got {enabled!r}.")
+            if not bool(enabled):
+                continue
+            allowed_params = {
+                "enabled",
+                "translation_range",
+                "rotation_range_deg",
+                "noise_std_mult_range",
+                "noise_drop_prob_range",
+            }
+            unexpected = sorted(set(params) - allowed_params)
+            if unexpected:
+                raise ValueError(
+                    "Camera reset randomization contains unauthenticated parameters: "
+                    f"{unexpected}."
+                )
+            matches.append(dict(params))
+        if len(matches) > 1:
+            raise ValueError(
+                "At most one enabled randomize_camera_raycast reset term is supported; "
+                f"found {len(matches)}."
+            )
+        return matches[0] if matches else None
+
+    def _camera_setup_randomization_semantics(self) -> dict[str, Any] | None:
+        if not self._camera_strict_warp:
+            return None
+        return {
+            "enabled": bool(getattr(self, "_camera_setup_randomization_enabled", False)),
+            "translation_xyz": getattr(self, "_camera_setup_translation_range", None),
+            "rotation_rpy_deg": getattr(self, "_camera_setup_rotation_range_deg", None),
+        }
+
+    def _camera_reset_randomization_semantics(self) -> dict[str, Any] | None:
+        """Return the effective, representation-independent reset ranges."""
+
+        params = self._camera_reset_randomization_params()
+        if params is None:
+            return None
+
+        def checked(value: Any, *, path: str) -> float:
+            if isinstance(value, (bool, np.bool_)):
+                raise ValueError(f"Camera randomization {path} must be numeric, got boolean {value!r}.")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError(f"Camera randomization {path} must be finite.")
+            return result
+
+        def scalar_range(spec: Any, *, path: str) -> tuple[float, float] | None:
+            if spec is None:
+                return None
+            if isinstance(spec, (list, tuple)):
+                if len(spec) != 2:
+                    raise ValueError(
+                        f"Camera randomization {path} must contain exactly [low, high]."
+                    )
+                result = (
+                    checked(spec[0], path=f"{path}[0]"),
+                    checked(spec[1], path=f"{path}[1]"),
+                )
+            else:
+                value = checked(spec, path=path)
+                result = (value, value)
+            if result[0] > result[1]:
+                raise ValueError(
+                    f"Camera randomization {path} lower bound {result[0]} exceeds upper bound {result[1]}."
+                )
+            return result
+
+        def vector_ranges(
+            spec: Any,
+            *,
+            keys: tuple[str, str, str],
+            path: str,
+        ) -> tuple[tuple[float, float], ...] | None:
+            if spec is None:
+                return None
+            if isinstance(spec, dict):
+                if set(spec) != set(keys):
+                    raise ValueError(
+                        f"Camera randomization {path} must declare exactly {list(keys)}, "
+                        f"got {sorted(str(key) for key in spec)}."
+                    )
+                return tuple(
+                    scalar_range(spec[key], path=f"{path}.{key}")
+                    for key in keys
+                )
+            shared = scalar_range(spec, path=path)
+            if shared is None:  # pragma: no cover - guarded above.
+                return None
+            return (shared, shared, shared)
+
+        noise_std_mult = scalar_range(
+            params.get("noise_std_mult_range"),
+            path="noise_std_mult_range",
+        )
+        if noise_std_mult is not None and noise_std_mult[0] < 0.0:
+            raise ValueError("Camera randomization noise_std_mult_range must be non-negative.")
+        noise_drop_prob = scalar_range(
+            params.get("noise_drop_prob_range"),
+            path="noise_drop_prob_range",
+        )
+        if noise_drop_prob is not None and (
+            noise_drop_prob[0] < 0.0 or noise_drop_prob[1] > 1.0
+        ):
+            raise ValueError("Camera randomization noise_drop_prob_range must lie within [0, 1].")
+
+        return {
+            "enabled": True,
+            "translation_xyz": vector_ranges(
+                params.get("translation_range"),
+                keys=("x", "y", "z"),
+                path="translation_range",
+            ),
+            "rotation_rpy_deg": vector_ranges(
+                params.get("rotation_range_deg"),
+                keys=("roll", "pitch", "yaw"),
+                path="rotation_range_deg",
+            ),
+            "noise_std_mult": noise_std_mult,
+            "noise_drop_prob": noise_drop_prob,
+        }
+
+    def _has_camera_reset_randomization(self) -> bool:
+        return self._camera_reset_randomization_params() is not None
+
+    def _apply_runtime_camera_mount_offsets(
+        self,
+        local_position: torch.Tensor,
+        local_orientation: torch.Tensor,
+        *,
+        idx: torch.Tensor | slice,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply reset samples in the camera mount frame.
+
+        This matches the bundled far-tracking placement contract: translation
+        perturbs the local sensor position, while RPY noise is added to the
+        configured mount Euler angles.  In particular, rotation jitter must
+        not rotate the sensor's 0.44 m lever arm around the robot body.
+        """
+
+        if self._camera_disable_offsets:
+            return local_position, local_orientation
+
+        def select(name: str, reference: torch.Tensor) -> torch.Tensor | None:
+            value = getattr(self.env, name, None)
+            if not isinstance(value, torch.Tensor):
+                return None
+            selected = value if isinstance(idx, slice) else value[idx]
+            return selected.to(device=reference.device, dtype=reference.dtype)
+
+        translation = select("_perception_camera_offset_pos", local_position)
+        if translation is not None:
+            local_position = local_position + translation
+
+        rotation_rpy = select("_perception_camera_offset_rpy", local_orientation)
+        if self._camera_strict_warp and rotation_rpy is not None:
+            base_rotation = torch.deg2rad(
+                self._strict_camera_mount_rotation_deg.to(
+                    device=local_orientation.device,
+                    dtype=local_orientation.dtype,
+                )
+            ).unsqueeze(0)
+            mount_rpy = base_rotation + rotation_rpy
+            local_orientation = quat_from_euler_xyz(
+                mount_rpy[:, 0],
+                mount_rpy[:, 1],
+                mount_rpy[:, 2],
+            )
+            pitch_deg = float(getattr(self.cfg, "camera_pitch_deg", 0.0) or 0.0)
+            if abs(pitch_deg) > 1.0e-6:
+                pitch_rad = torch.deg2rad(
+                    torch.tensor(
+                        pitch_deg,
+                        device=local_orientation.device,
+                        dtype=local_orientation.dtype,
+                    )
+                )
+                pitch_quat = quat_from_euler_xyz(
+                    torch.tensor(0.0, device=local_orientation.device, dtype=local_orientation.dtype),
+                    pitch_rad,
+                    torch.tensor(0.0, device=local_orientation.device, dtype=local_orientation.dtype),
+                ).unsqueeze(0).expand_as(local_orientation)
+                local_orientation = quat_mul(
+                    pitch_quat,
+                    local_orientation,
+                    w_last=True,
+                )
+        elif rotation_rpy is not None:
+            jitter = quat_from_euler_xyz(
+                rotation_rpy[:, 0],
+                rotation_rpy[:, 1],
+                rotation_rpy[:, 2],
+            )
+            local_orientation = quat_mul(local_orientation, jitter, w_last=True)
+        else:
+            # Compatibility with environments that provide only the older
+            # quaternion state.  New sampling always records RPY as well.
+            jitter = select("_perception_camera_offset_quat", local_orientation)
+            if jitter is not None:
+                local_orientation = quat_mul(local_orientation, jitter, w_last=True)
+        return local_position, local_orientation
+
+    def _log_camera_randomization_state_once(self) -> None:
+        """Validate and record the effective first-reset camera randomization state."""
+
+        if getattr(self, "_camera_randomization_log_done", False) or self.cfg.output_mode != "camera_depth":
+            return
+
+        params = self._camera_reset_randomization_params()
+        std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
+        drop_prob = getattr(self.env, "_perception_camera_noise_drop_prob", None)
+        offset_pos = getattr(self.env, "_perception_camera_offset_pos", None)
+        offset_quat = getattr(self.env, "_perception_camera_offset_quat", None)
+
+        if params is not None:
+            required = {
+                "noise_std_mult_range": std_mult,
+                "noise_drop_prob_range": drop_prob,
+                "translation_range": offset_pos,
+                "rotation_range_deg": offset_quat,
+            }
+            missing = [name for name, value in required.items() if params.get(name) is not None and value is None]
+            if missing:
+                raise RuntimeError(
+                    "Camera reset randomization is enabled but its sampled runtime state is missing: "
+                    + ", ".join(missing)
+                )
+
+        if self._camera_apply_sensor_noise and std_mult is None and drop_prob is None:
+            if os.environ.get("HOLOSOMA_EVAL_ALLOW_MISSING_CAMERA_SENSOR_NOISE_STATE", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.warning(
+                    "perception.camera_apply_sensor_noise=True but runtime sensor-noise state is missing; "
+                    "continuing because HOLOSOMA_EVAL_ALLOW_MISSING_CAMERA_SENSOR_NOISE_STATE is enabled."
+                )
+            else:
+                raise RuntimeError(
+                    "perception.camera_apply_sensor_noise=True, but the runtime produced neither "
+                    "_perception_camera_noise_std_mult nor _perception_camera_noise_drop_prob. "
+                    "Refusing to advertise sensor noise while applying none."
+                )
+
+        def scalar_stats(value: Any) -> str:
+            if not isinstance(value, torch.Tensor) or value.numel() == 0:
+                return "none"
+            sample = value.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
+            return f"{float(sample.min()):.6g}/{float(sample.max()):.6g}/{float(sample.mean()):.6g}"
+
+        offset_pos_range = "none"
+        if isinstance(offset_pos, torch.Tensor) and offset_pos.numel() > 0:
+            sample_pos = offset_pos.detach().to(device="cpu", dtype=torch.float32).reshape(-1, 3)
+            axis_min = [float(value) for value in sample_pos.min(dim=0).values.tolist()]
+            axis_max = [float(value) for value in sample_pos.max(dim=0).values.tolist()]
+            offset_pos_range = f"min={axis_min} max={axis_max}"
+
+        offset_angle_stats = "none"
+        if isinstance(offset_quat, torch.Tensor) and offset_quat.numel() > 0:
+            sample_quat = offset_quat.detach().to(device="cpu", dtype=torch.float32).reshape(-1, 4)
+            quat_norm = torch.linalg.vector_norm(sample_quat, dim=-1).clamp(min=1.0e-12)
+            quat_w = (sample_quat[:, 3] / quat_norm).abs().clamp(max=1.0)
+            angle_deg = torch.rad2deg(2.0 * torch.acos(quat_w))
+            offset_angle_stats = scalar_stats(angle_deg)
+
+        (getattr(self, "logger", None) or logger).info(
+            "Perception camera stochastic semantics: source={} sensor_noise={} "
+            "reset_pose_randomization={} std_mult_min/max/mean={} drop_prob_min/max/mean={} "
+            "offset_pos_range={} offset_angle_deg_min/max/mean={}",
+            getattr(self, "_camera_source", "unknown"),
+            bool(getattr(self, "_camera_apply_sensor_noise", False)),
+            params is not None,
+            scalar_stats(std_mult),
+            scalar_stats(drop_prob),
+            offset_pos_range,
+            offset_angle_stats,
+        )
+        self._camera_randomization_log_done = True
 
     def _get_strict_warp_camera_pose(
         self,
@@ -1206,6 +3267,11 @@ class PerceptionManager:
         local_position = local_position.to(device=body_pos.device, dtype=body_pos.dtype)
         local_orientation = local_orientation.to(device=body_quat.device, dtype=body_quat.dtype)
         data_frame_quat = data_frame_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+        local_position, local_orientation = self._apply_runtime_camera_mount_offsets(
+            local_position,
+            local_orientation,
+            idx=idx,
+        )
 
         camera_pos = body_pos + quat_apply(body_quat, local_position, w_last=True)
         camera_quat = quat_mul(body_quat, quat_mul(local_orientation, data_frame_quat, w_last=True), w_last=True)
@@ -1375,83 +3441,22 @@ class PerceptionManager:
         if self._terrain_mesh is None:
             raise RuntimeError("far_tracking_warp camera source requires terrain mesh.")
 
-        # Resolve far-tracking package from common locations; allow override via env.
-        module_repo_root = Path(__file__).resolve().parents[5]
-        holosoma_root = Path(get_holosoma_root()).resolve()
-        far_tracking_override = os.environ.get("HOLOSOMA_FAR_TRACKING_PKG_ROOT", "").strip()
-        candidate_roots: list[Path] = []
-        if far_tracking_override:
-            override_path = Path(far_tracking_override).expanduser().resolve()
-            if override_path.name == "whole_body_tracking":
-                candidate_roots.append(override_path)
-            else:
-                candidate_roots.append(override_path / "whole_body_tracking")
-        candidate_roots.extend(
-            [
-                module_repo_root / "far-tracking" / "source" / "whole_body_tracking",
-                module_repo_root.parent / "far-tracking" / "source" / "whole_body_tracking",
-                holosoma_root / "far-tracking" / "source" / "whole_body_tracking",
-                holosoma_root.parent / "far-tracking" / "source" / "whole_body_tracking",
-            ]
+        # Scientific provenance hashes this exact bundled implementation.  Do
+        # not search sys.path or adjacent repositories: that made identical
+        # provenance execute different camera code on different machines.
+        from holosoma.third_party.ft_warp_sensors.camera_sensor import (  # noqa: PLC0415
+            CameraSensor as FarTrackingCameraSensor,
+        )
+        from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
+            quat_mul_xyzw as ft_quat_mul_xyzw,
+        )
+        from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
+            tf_apply_xyzw as ft_tf_apply_xyzw,
         )
 
-        far_tracking_pkg_root = next((root for root in candidate_roots if root.exists()), None)
-        if far_tracking_pkg_root is not None and str(far_tracking_pkg_root) not in sys.path:
-            sys.path.insert(0, str(far_tracking_pkg_root))
-
-        # If external package is unavailable, we will use bundled fallback below.
-        external_far_tracking_available = far_tracking_pkg_root is not None or (
-            importlib.util.find_spec("whole_body_tracking") is not None
+        (self.logger or logger).info(
+            "Using provenance-bound bundled holosoma ft_warp_sensors implementation."
         )
-        if not external_far_tracking_available:
-            searched = ", ".join(str(path) for path in candidate_roots)
-            (self.logger or logger).warning(
-                "External far-tracking package not found. Searched: {}. Falling back to bundled implementation.",
-                searched,
-            )
-
-        FarTrackingCameraSensor = None
-        ft_quat_mul_xyzw = None
-        ft_tf_apply_xyzw = None
-        external_import_error: ModuleNotFoundError | None = None
-        if self._object_geometry_mode != "primitive":
-            try:
-                from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
-                    CameraSensor as FarTrackingCameraSensor,
-                )
-                from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-                    quat_mul_xyzw as ft_quat_mul_xyzw,
-                )
-                from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-                    tf_apply_xyzw as ft_tf_apply_xyzw,
-                )
-            except ModuleNotFoundError as exc:
-                external_import_error = exc
-
-        if FarTrackingCameraSensor is None:
-            # Internal fallback: keep perception runnable even when external far-tracking
-            # package is unavailable on the current node. Primitive object geometry also
-            # uses the fallback because the external package does not include analytic
-            # cuboid raycast support.
-            from holosoma.third_party.ft_warp_sensors.camera_sensor import (  # noqa: PLC0415
-                CameraSensor as FarTrackingCameraSensor,
-            )
-            from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
-                quat_mul_xyzw as ft_quat_mul_xyzw,
-            )
-            from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
-                tf_apply_xyzw as ft_tf_apply_xyzw,
-            )
-            if self._object_geometry_mode == "primitive":
-                (self.logger or logger).info(
-                    "Using bundled holosoma fallback warp_sensors for primitive object geometry."
-                )
-            else:
-                (self.logger or logger).warning(
-                    "External far-tracking python package not importable ({}). "
-                    "Using bundled holosoma fallback warp_sensors.",
-                    external_import_error,
-                )
 
         urdf_path, _asset_root = self._resolve_robot_asset_paths()
         mesh_root = os.path.join(os.path.dirname(urdf_path), "meshes")
@@ -1569,9 +3574,20 @@ class PerceptionManager:
         if not body_names:
             raise RuntimeError("Cannot setup far_tracking_warp camera: body_names unavailable.")
 
-        def _resolve_body_index(name: str) -> int | None:
+        def _resolve_robot_body_spec(
+            name: str,
+        ) -> tuple[str, int, torch.Tensor, torch.Tensor] | None:
             if name in body_names:
-                return int(body_names.index(name))
+                return (
+                    str(name),
+                    int(body_names.index(name)),
+                    torch.zeros(3, device=self.device, dtype=torch.float32),
+                    torch.tensor(
+                        [0.0, 0.0, 0.0, 1.0],
+                        device=self.device,
+                        dtype=torch.float32,
+                    ),
+                )
             resolved = resolve_fixed_link_offset(
                 self.env.robot_config,
                 name,
@@ -1580,15 +3596,22 @@ class PerceptionManager:
             )
             if resolved is None:
                 return None
-            parent_name, _offset_pos, _offset_quat = resolved
-            return int(body_names.index(parent_name))
+            parent_name, offset_pos, offset_quat = resolved
+            return str(parent_name), int(body_names.index(parent_name)), offset_pos, offset_quat
 
-        base_link_indices = [_resolve_body_index(camera_body_name)]
-        if base_link_indices[0] is None:
+        if self._camera_body_name is not None and self._camera_body_index is None:
             raise RuntimeError(f"Body '{camera_body_name}' not found in robot body_names for far_tracking_warp source.")
+        # -1 denotes the simulator root pose.  The effective fixed-link
+        # transform is carried by _get_camera_body_pose rather than discarded.
+        base_link_indices = [
+            -1 if self._camera_body_index is None else int(self._camera_body_index)
+        ]
 
         robot_slot_indices: list[int] = []
         robot_body_indices: list[int] = []
+        robot_body_names: list[str] = []
+        robot_body_offset_positions: list[torch.Tensor] = []
+        robot_body_offset_quaternions: list[torch.Tensor] = []
         object_slot_indices: list[int] = []
         object_names: list[str] = []
         object_source_indices: list[int] = []
@@ -1608,10 +3631,14 @@ class PerceptionManager:
             return source_index
 
         for slot_idx, name in enumerate(ray_cast_bodies.keys()):
-            body_idx = _resolve_body_index(name)
-            if body_idx is not None:
+            body_spec = _resolve_robot_body_spec(name)
+            if body_spec is not None:
+                body_name, body_idx, body_offset_pos, body_offset_quat = body_spec
                 robot_slot_indices.append(slot_idx)
                 robot_body_indices.append(body_idx)
+                robot_body_names.append(body_name)
+                robot_body_offset_positions.append(body_offset_pos)
+                robot_body_offset_quaternions.append(body_offset_quat)
                 continue
             slot_spec = registered_object_meshes.get(name)
             if slot_spec is not None:
@@ -1636,6 +3663,13 @@ class PerceptionManager:
             sensor_cfg,
             self._terrain_mesh,
             device=self.device,
+        )
+        # Cache the effective loaded-geometry identity once at setup.  State
+        # save/load then remains O(1) and path-independent while direct PPO
+        # loads that bypass launcher provenance still reject changed meshes.
+        self._far_tracking_geometry_fingerprint = self._fingerprint_far_tracking_geometry(
+            ray_cast_bodies,
+            asset_meshes_root=mesh_root,
         )
         if (
             self._shared_camera_sensor_local_position is not None
@@ -1680,11 +3714,31 @@ class PerceptionManager:
         self._far_tracking_robot_body_indices = torch.tensor(
             robot_body_indices, dtype=torch.long, device=self.device
         )
+        self._far_tracking_robot_body_names = robot_body_names
+        self._far_tracking_robot_body_offset_pos = (
+            torch.stack(robot_body_offset_positions, dim=0).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            if robot_body_offset_positions
+            else torch.empty((0, 3), device=self.device, dtype=torch.float32)
+        )
+        self._far_tracking_robot_body_offset_quat = (
+            torch.stack(robot_body_offset_quaternions, dim=0).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            if robot_body_offset_quaternions
+            else torch.empty((0, 4), device=self.device, dtype=torch.float32)
+        )
         self._far_tracking_object_slot_indices = torch.tensor(
             object_slot_indices, dtype=torch.long, device=self.device
         )
         self._far_tracking_object_source_indices = torch.tensor(
             object_source_indices, dtype=torch.long, device=self.device
+        )
+        self._far_tracking_object_slot_pairs = tuple(
+            zip(object_slot_indices, object_source_indices, strict=True)
         )
         self._far_tracking_primitive_source_indices = torch.tensor(
             primitive_source_indices, dtype=torch.long, device=self.device
@@ -1692,6 +3746,56 @@ class PerceptionManager:
         self._far_tracking_object_names = object_names
         self._far_tracking_object_active_env_ids = object_active_env_ids
         self._initialize_far_tracking_object_slots()
+
+    def _shared_wbt_active_object_states(self) -> torch.Tensor | None:
+        """Reuse WBT's active-object snapshot when far tracking has the exact same source.
+
+        Multi-object banks need every registered (including parked) actor for
+        geometry slots, so they intentionally retain the general backend read.
+        """
+
+        if len(self._far_tracking_object_names) != 1:
+            return None
+        command_manager = getattr(self.env, "command_manager", None)
+        get_state = getattr(command_manager, "get_state", None)
+        motion_command = get_state("motion_command") if callable(get_state) else None
+        motion = getattr(motion_command, "motion", None)
+        if motion_command is None or not bool(getattr(motion, "has_object", False)):
+            return None
+        if bool(getattr(motion_command, "_multi_object_enabled", False)):
+            return None
+        expected_names = list(getattr(motion_command, "_sim_object_names", ()))
+        if expected_names != self._far_tracking_object_names:
+            return None
+        if getattr(motion_command, "object_name", None) != self._far_tracking_object_names[0]:
+            return None
+        states = getattr(motion_command, "simulator_object_state_snapshot", None)
+        if not isinstance(states, torch.Tensor) or states.shape != (self.num_envs, 13):
+            return None
+        return states
+
+    def _far_tracking_object_slot_pairs_host(self) -> tuple[tuple[int, int], ...]:
+        """Return static object slot/source indices without per-frame CUDA reads."""
+
+        slot_indices = self._far_tracking_object_slot_indices
+        source_indices = self._far_tracking_object_source_indices
+        if slot_indices is None or source_indices is None:
+            return ()
+        pairs = getattr(self, "_far_tracking_object_slot_pairs", ())
+        if len(pairs) == int(slot_indices.numel()):
+            return pairs
+        # Compatibility for lightweight/custom managers that populate the
+        # historical tensor fields directly.  Cache the conversion after this
+        # one-time fallback; production setup starts from Python lists above.
+        pairs = tuple(
+            zip(
+                slot_indices.detach().cpu().tolist(),
+                source_indices.detach().cpu().tolist(),
+                strict=True,
+            )
+        )
+        self._far_tracking_object_slot_pairs = pairs
+        return pairs
 
     def _compute_far_tracking_camera_depth(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self._far_tracking_camera_sensor is None:
@@ -1702,111 +3806,170 @@ class PerceptionManager:
             self._far_tracking_base_link_indices is None
             or self._far_tracking_robot_slot_indices is None
             or self._far_tracking_robot_body_indices is None
+            or self._far_tracking_robot_body_offset_pos is None
+            or self._far_tracking_robot_body_offset_quat is None
             or self._far_tracking_object_slot_indices is None
             or self._far_tracking_object_source_indices is None
             or self._far_tracking_primitive_source_indices is None
         ):
             raise RuntimeError("far_tracking_warp camera indices are not initialized.")
 
-        body_pos = self.env.simulator._rigid_body_pos
-        body_quat = self.env.simulator._rigid_body_rot
+        selected_env_ids = env_ids
+        selected_rows = slice(None) if selected_env_ids is None else selected_env_ids
+        num_selected_envs = self.num_envs if selected_env_ids is None else int(selected_env_ids.numel())
+
+        body_pos = self.env.simulator._rigid_body_pos[selected_rows]
+        body_quat = self.env.simulator._rigid_body_rot[selected_rows]
 
         # Fill robot-body-backed slots.
         if self._far_tracking_robot_slot_indices.numel() > 0:
             ray_cast_body_poses = body_pos[:, self._far_tracking_robot_body_indices]
             ray_cast_body_quats = body_quat[:, self._far_tracking_robot_body_indices]
-            self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, self._far_tracking_robot_slot_indices] = (
-                ray_cast_body_poses
+            body_offset_pos = self._far_tracking_robot_body_offset_pos.to(
+                device=ray_cast_body_poses.device,
+                dtype=ray_cast_body_poses.dtype,
+            ).unsqueeze(0).expand(num_selected_envs, -1, -1)
+            body_offset_quat = self._far_tracking_robot_body_offset_quat.to(
+                device=ray_cast_body_quats.device,
+                dtype=ray_cast_body_quats.dtype,
+            ).unsqueeze(0).expand(num_selected_envs, -1, -1)
+            ray_cast_body_poses, ray_cast_body_quats = self._compose_fixed_body_pose(
+                ray_cast_body_poses,
+                ray_cast_body_quats,
+                body_offset_pos,
+                body_offset_quat,
             )
-            self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, self._far_tracking_robot_slot_indices] = (
-                ray_cast_body_quats
-            )
+            if selected_env_ids is None:
+                self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[
+                    :, self._far_tracking_robot_slot_indices
+                ] = ray_cast_body_poses
+                self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[
+                    :, self._far_tracking_robot_slot_indices
+                ] = ray_cast_body_quats
+            else:
+                # Two advanced indices are pairwise by default.  Broadcast them
+                # explicitly so every selected environment updates every robot
+                # mesh slot while survivor rows remain byte-for-byte untouched.
+                selected_grid = selected_env_ids.unsqueeze(1)
+                robot_slot_grid = self._far_tracking_robot_slot_indices.unsqueeze(0)
+                self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[
+                    selected_grid, robot_slot_grid
+                ] = ray_cast_body_poses
+                self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[
+                    selected_grid, robot_slot_grid
+                ] = ray_cast_body_quats
 
         # Fill registered object slots from simulator actor states.
-        if self._far_tracking_object_names:
-            env_ids_all = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-            object_states = self.env.simulator.get_actor_states(self._far_tracking_object_names, env_ids_all)
-            object_states = object_states.view(len(self._far_tracking_object_names), self.num_envs, -1).permute(1, 0, 2)
+        if self._far_tracking_object_names and num_selected_envs > 0:
+            shared_object_states = self._shared_wbt_active_object_states()
+            if shared_object_states is not None:
+                object_states = shared_object_states[selected_rows].unsqueeze(1)
+            else:
+                actor_env_ids = (
+                    torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+                    if selected_env_ids is None
+                    else selected_env_ids
+                )
+                object_states = self.env.simulator.get_actor_states(
+                    self._far_tracking_object_names,
+                    actor_env_ids,
+                )
+                object_states = object_states.view(
+                    len(self._far_tracking_object_names),
+                    num_selected_envs,
+                    -1,
+                ).permute(1, 0, 2)
             if self._far_tracking_primitive_source_indices.numel() > 0:
-                self._far_tracking_camera_sensor.primitive_body_poses_tensor[:] = object_states[
-                    :, self._far_tracking_primitive_source_indices, :3
-                ]
-                self._far_tracking_camera_sensor.primitive_body_quats_tensor[:] = object_states[
-                    :, self._far_tracking_primitive_source_indices, 3:7
-                ]
+                primitive_poses = object_states[:, self._far_tracking_primitive_source_indices, :3]
+                primitive_quats = object_states[:, self._far_tracking_primitive_source_indices, 3:7]
+                self._far_tracking_camera_sensor.primitive_body_poses_tensor[selected_rows] = primitive_poses
+                self._far_tracking_camera_sensor.primitive_body_quats_tensor[selected_rows] = primitive_quats
             if self._far_tracking_object_slot_indices.numel() == 0:
                 object_states = None
         else:
             object_states = None
 
         if object_states is not None and self._far_tracking_object_slot_indices.numel() > 0:
-            for local_slot_idx in range(int(self._far_tracking_object_slot_indices.numel())):
-                slot_tensor_idx = int(self._far_tracking_object_slot_indices[local_slot_idx].item())
-                source_idx = int(self._far_tracking_object_source_indices[local_slot_idx].item())
+            for local_slot_idx, (slot_tensor_idx, source_idx) in enumerate(
+                self._far_tracking_object_slot_pairs_host()
+            ):
                 active_env_ids = self._far_tracking_object_active_env_ids[local_slot_idx]
                 if active_env_ids is None:
-                    self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, slot_tensor_idx] = (
+                    self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[selected_rows, slot_tensor_idx] = (
                         object_states[:, source_idx, :3]
                     )
-                    self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, slot_tensor_idx] = (
+                    self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[selected_rows, slot_tensor_idx] = (
                         object_states[:, source_idx, 3:7]
                     )
                     continue
                 if active_env_ids.numel() == 0:
                     continue
-                self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[active_env_ids, slot_tensor_idx] = (
-                    object_states[active_env_ids, source_idx, :3]
+                if selected_env_ids is None:
+                    target_env_ids = active_env_ids
+                    source_rows = active_env_ids
+                else:
+                    # Topology env IDs are static and may be non-contiguous.
+                    # Select membership in compact-row space, then write using
+                    # the corresponding global simulator rows.  Inactive slots
+                    # stay parked exactly as initialized.
+                    active_selected_rows = torch.isin(selected_env_ids, active_env_ids)
+                    target_env_ids = selected_env_ids[active_selected_rows]
+                    source_rows = active_selected_rows
+                self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[target_env_ids, slot_tensor_idx] = (
+                    object_states[source_rows, source_idx, :3]
                 )
-                self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[active_env_ids, slot_tensor_idx] = (
-                    object_states[active_env_ids, source_idx, 3:7]
+                self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[target_env_ids, slot_tensor_idx] = (
+                    object_states[source_rows, source_idx, 3:7]
                 )
 
-        camera_base_link_pos = body_pos[:, self._far_tracking_base_link_indices]
-        camera_base_link_quat = body_quat[:, self._far_tracking_base_link_indices]
-        updated_camera_pos = self._far_tracking_tf_apply(
-            camera_base_link_quat,
-            camera_base_link_pos,
-            self._far_tracking_camera_sensor.camera_sensor_local_position,
-        )
-        updated_camera_quat = self._far_tracking_quat_mul(
-            camera_base_link_quat,
-            self._far_tracking_quat_mul(
-                self._far_tracking_camera_sensor.camera_sensor_local_orientation,
-                self._far_tracking_camera_sensor.camera_sensor_data_frame_quat,
-            ),
-        )
-        self._far_tracking_camera_sensor.camera_sensor_position[:] = updated_camera_pos
-        self._far_tracking_camera_sensor.camera_sensor_orientation[:] = updated_camera_quat
-        self._far_tracking_debug_last = {
-            "base_link_indices": self._far_tracking_base_link_indices.detach().to(torch.float32).view(1, -1).expand(self.num_envs, -1),
-            "base_link_pos": camera_base_link_pos.detach().clone().view(self.num_envs, -1),
-            "base_link_quat_xyzw": camera_base_link_quat.detach().clone().view(self.num_envs, -1),
-            "updated_camera_pos": updated_camera_pos.detach().clone().view(self.num_envs, -1),
-            "updated_camera_quat_xyzw": updated_camera_quat.detach().clone().view(self.num_envs, -1),
-            "sensor_camera_pos_before_capture": self._far_tracking_camera_sensor.camera_sensor_position.detach()
-            .clone()
-            .view(self.num_envs, -1),
-            "sensor_camera_quat_before_capture": self._far_tracking_camera_sensor.camera_sensor_orientation.detach()
-            .clone()
-            .view(self.num_envs, -1),
-        }
+        updated_camera_pos, updated_camera_quat = self._get_strict_warp_camera_pose(selected_env_ids)
+        updated_camera_pos = updated_camera_pos.unsqueeze(1)
+        updated_camera_quat = updated_camera_quat.unsqueeze(1)
+        self._far_tracking_camera_sensor.camera_sensor_position[selected_rows] = updated_camera_pos
+        self._far_tracking_camera_sensor.camera_sensor_orientation[selected_rows] = updated_camera_quat
+        collect_debug_state = bool(self._debug_dump_dir) and not self._debug_dump_done
+        if collect_debug_state:
+            # Base-link poses are diagnostic-only.  Keep this full snapshot out
+            # of the normal hot path; debug consumers index it by global env ID.
+            camera_base_link_pos, camera_base_link_quat = self._get_camera_body_pose(slice(None))
+            camera_base_link_pos = camera_base_link_pos.unsqueeze(1)
+            camera_base_link_quat = camera_base_link_quat.unsqueeze(1)
+            self._far_tracking_debug_last = {
+                "base_link_indices": self._far_tracking_base_link_indices.detach()
+                .to(torch.float32)
+                .view(1, -1)
+                .expand(self.num_envs, -1),
+                "base_link_pos": camera_base_link_pos.detach().clone().view(self.num_envs, -1),
+                "base_link_quat_xyzw": camera_base_link_quat.detach().clone().view(self.num_envs, -1),
+                "updated_camera_pos": self._far_tracking_camera_sensor.camera_sensor_position.detach()
+                .clone()
+                .view(self.num_envs, -1),
+                "updated_camera_quat_xyzw": self._far_tracking_camera_sensor.camera_sensor_orientation.detach()
+                .clone()
+                .view(self.num_envs, -1),
+                "sensor_camera_pos_before_capture": self._far_tracking_camera_sensor.camera_sensor_position.detach()
+                .clone()
+                .view(self.num_envs, -1),
+                "sensor_camera_quat_before_capture": self._far_tracking_camera_sensor.camera_sensor_orientation.detach()
+                .clone()
+                .view(self.num_envs, -1),
+            }
 
-        depth = self._far_tracking_camera_sensor.capture()
-        self._far_tracking_debug_last["sensor_camera_pos_after_capture"] = (
-            self._far_tracking_camera_sensor.camera_sensor_position.detach().clone().view(self.num_envs, -1)
-        )
-        self._far_tracking_debug_last["sensor_camera_quat_after_capture"] = (
-            self._far_tracking_camera_sensor.camera_sensor_orientation.detach().clone().view(self.num_envs, -1)
-        )
+        depth = self._far_tracking_camera_sensor.capture(active_env_ids=env_ids)
+        if collect_debug_state:
+            self._far_tracking_debug_last["sensor_camera_pos_after_capture"] = (
+                self._far_tracking_camera_sensor.camera_sensor_position.detach().clone().view(self.num_envs, -1)
+            )
+            self._far_tracking_debug_last["sensor_camera_quat_after_capture"] = (
+                self._far_tracking_camera_sensor.camera_sensor_orientation.detach().clone().view(self.num_envs, -1)
+            )
         if depth.ndim == 4:
             depth = depth[:, 0]
         if depth.ndim != 3:
             raise RuntimeError(f"Unexpected far_tracking_warp depth shape: {tuple(depth.shape)}")
-        depth = self._clamp_camera_depth_to_sensor_range(depth)
-
-        if env_ids is None:
-            return depth
-        return depth[env_ids]
+        if env_ids is not None:
+            depth = depth[env_ids]
+        return self._clamp_camera_depth_to_sensor_range(depth)
 
     def _initialize_far_tracking_object_slots(self) -> None:
         """Park inactive heterogeneous-object slots far away so each env still raycasts a single object mesh."""
@@ -1823,11 +3986,12 @@ class PerceptionManager:
             device=self.device,
             dtype=self._far_tracking_camera_sensor.ray_cast_body_quats_tensor.dtype,
         )
-        for local_slot_idx in range(int(self._far_tracking_object_slot_indices.numel())):
+        for local_slot_idx, (slot_tensor_idx, _) in enumerate(
+            self._far_tracking_object_slot_pairs_host()
+        ):
             active_env_ids = self._far_tracking_object_active_env_ids[local_slot_idx]
             if active_env_ids is None:
                 continue
-            slot_tensor_idx = int(self._far_tracking_object_slot_indices[local_slot_idx].item())
             self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, slot_tensor_idx] = inactive_pos
             self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, slot_tensor_idx] = inactive_quat
 
@@ -2311,7 +4475,13 @@ class PerceptionManager:
         ray_dirs[:, 2] = -1.0
         return grid_points, ray_dirs
 
-    def _camera_ray_rotation_quat(self, *, device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
+    def _camera_ray_rotation_quat(
+        self,
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype,
+        correction_quat: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         pitch_deg = float(self.cfg.camera_pitch_deg)
         pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=device, dtype=dtype))
         pitch_quat = quat_from_euler_xyz(
@@ -2319,7 +4489,9 @@ class PerceptionManager:
             pitch_rad,
             torch.tensor(0.0, device=device, dtype=dtype),
         )
-        correction_quat = self._camera_ray_correction_quat.to(device=device, dtype=dtype)
+        if correction_quat is None:
+            correction_quat = self._camera_ray_correction_quat
+        correction_quat = correction_quat.to(device=device, dtype=dtype)
         identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=dtype)
 
         if self._camera_strict_warp:
@@ -2350,22 +4522,44 @@ class PerceptionManager:
             dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
         return dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
 
-    def _build_camera_rays_from_coords(self, u_coords: torch.Tensor, v_coords: torch.Tensor) -> torch.Tensor:
+    def _build_camera_rays_from_coords(
+        self,
+        u_coords: torch.Tensor,
+        v_coords: torch.Tensor,
+        *,
+        correction_quat: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
         x = (u_grid - self._camera_cx) / self._camera_fx
         y = (v_grid - self._camera_cy) / self._camera_fy
         dirs_cam = self._camera_dirs_cam_from_xy(x, y).view(-1, 3)
-        combo = self._camera_ray_rotation_quat(device=self.device, dtype=torch.float32)
+        combo = self._camera_ray_rotation_quat(
+            device=self.device,
+            dtype=torch.float32,
+            correction_quat=correction_quat,
+        )
         combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
         dirs_base = quat_apply(combo, dirs_cam, w_last=True)
         return dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
 
-    def _build_camera_rays(self) -> torch.Tensor:
+    def _build_camera_rays(
+        self,
+        *,
+        correction_quat: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         u_coords = torch.arange(self._camera_width, device=self.device, dtype=torch.float32)
         v_coords = torch.arange(self._camera_height, device=self.device, dtype=torch.float32)
-        return self._build_camera_rays_from_coords(u_coords, v_coords)
+        return self._build_camera_rays_from_coords(
+            u_coords,
+            v_coords,
+            correction_quat=correction_quat,
+        )
 
-    def _build_camera_scandots_rays(self) -> torch.Tensor:
+    def _build_camera_scandots_rays(
+        self,
+        *,
+        correction_quat: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         target_w = self.cfg.camera_scandots_width
         target_h = self.cfg.camera_scandots_height
         if target_w is not None or target_h is not None:
@@ -2408,7 +4602,11 @@ class PerceptionManager:
         self._camera_scandots_width = int(u_coords.numel())
         self._camera_scandots_height = int(v_coords.numel())
 
-        return self._build_camera_rays_from_coords(u_coords, v_coords)
+        return self._build_camera_rays_from_coords(
+            u_coords,
+            v_coords,
+            correction_quat=correction_quat,
+        )
 
     def _resolve_heightmap_grid(self) -> tuple[int, int, float, float]:
         size = getattr(self.cfg, "heightmap_size", None)
@@ -2565,7 +4763,11 @@ class PerceptionManager:
         )
         return torch.clamp(depth, min=min_depth, max=max_depth)
 
-    def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
+    def _apply_camera_depth_noise(
+        self,
+        depth: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if not self._camera_apply_sensor_noise:
             return self._clamp_camera_depth_to_sensor_range(depth)
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
@@ -2577,6 +4779,8 @@ class PerceptionManager:
         if std_mult is not None:
             if isinstance(std_mult, torch.Tensor):
                 std = std_mult.to(depth.device)
+                if env_ids is not None and std.ndim > 0:
+                    std = std[env_ids.to(device=std.device, dtype=torch.long)]
                 if std.ndim == 1:
                     std = std.view(-1, 1, 1)
             else:
@@ -2586,6 +4790,8 @@ class PerceptionManager:
         if drop_prob is not None:
             if isinstance(drop_prob, torch.Tensor):
                 prob = drop_prob.to(depth.device)
+                if env_ids is not None and prob.ndim > 0:
+                    prob = prob[env_ids.to(device=prob.device, dtype=torch.long)]
                 if prob.ndim == 1:
                     prob = prob.view(-1, 1, 1)
             else:
@@ -2594,6 +4800,16 @@ class PerceptionManager:
             depth_out = torch.where(mask, torch.full_like(depth_out, self.cfg.max_distance), depth_out)
 
         return self._clamp_camera_depth_to_sensor_range(depth_out)
+
+    def _prepare_camera_depth_for_observation(
+        self,
+        depth: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply sensor noise exactly once before observation preprocessing."""
+
+        depth = self._apply_camera_depth_noise(depth, env_ids=env_ids)
+        return self._clamp_camera_depth_to_sensor_range(depth)
 
     def _resolve_camera_obs_resolution(self) -> tuple[int, int]:
         if not self._camera_warp_preprocess:
@@ -2617,6 +4833,17 @@ class PerceptionManager:
         self._camera_obs_step_counter += 1
         return refresh
 
+    def _camera_obs_refresh_flag_for_update(
+        self,
+        env_ids: torch.Tensor | None,
+    ) -> bool:
+        if env_ids is not None:
+            # A targeted refresh initializes only reset environments.  It is not
+            # a second control-frame tick and must not shift the global camera
+            # frequency phase used by every non-reset environment.
+            return True
+        return self._consume_camera_obs_refresh_flag()
+
     def _normalize_env_ids(self, idx: torch.Tensor | slice | int | list[int] | tuple[int, ...]) -> torch.Tensor:
         if isinstance(idx, slice):
             return torch.arange(self.num_envs, device=self.device, dtype=torch.long)[idx]
@@ -2634,6 +4861,7 @@ class PerceptionManager:
         depth: torch.Tensor,
         *,
         refresh: bool,
+        advance_temporal_noise: bool = True,
     ) -> None:
         depth_obs = depth.unsqueeze(0) if depth.ndim == 2 else depth
         env_ids = self._normalize_env_ids(idx)
@@ -2649,7 +4877,11 @@ class PerceptionManager:
         ready = self._camera_depth_buffer_ready[env_ids]
         should_process = bool(refresh or (~ready).any().item())
         if should_process:
-            processed = self._process_camera_depth_for_obs(depth_obs, env_ids=env_ids)
+            processed = self._process_camera_depth_for_obs(
+                depth_obs,
+                env_ids=env_ids,
+                advance_temporal_noise=advance_temporal_noise,
+            )
             if self._camera_warp_buffer_len > 1:
                 self._camera_depth_buffer[env_ids, :-1] = self._camera_depth_buffer[env_ids, 1:].clone()
             self._camera_depth_buffer[env_ids, -1] = processed
@@ -2674,7 +4906,13 @@ class PerceptionManager:
         else:
             self._camera_depth_obs[env_ids] = self._camera_depth_buffer[env_ids, -1 - self._camera_warp_latency_frame]
 
-    def _process_camera_depth_for_obs(self, depth: torch.Tensor, *, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    def _process_camera_depth_for_obs(
+        self,
+        depth: torch.Tensor,
+        *,
+        env_ids: torch.Tensor | None = None,
+        advance_temporal_noise: bool = True,
+    ) -> torch.Tensor:
         if not self._camera_warp_preprocess:
             return depth
 
@@ -2701,7 +4939,12 @@ class PerceptionManager:
             depth_obs = self._apply_warp_edge_noise(depth_obs, max_depth=max_depth)
 
         if self._camera_warp_enable_holes and self._camera_warp_hole_prob > 0.0:
-            depth_obs = self._apply_warp_hole_noise(depth_obs, max_depth=max_depth, env_ids=env_ids)
+            depth_obs = self._apply_warp_hole_noise(
+                depth_obs,
+                max_depth=max_depth,
+                env_ids=env_ids,
+                advance_frame=advance_temporal_noise,
+            )
 
         if self._camera_warp_additive_noise_std > 0.0:
             depth_obs = depth_obs + torch.randn_like(depth_obs) * self._camera_warp_additive_noise_std
@@ -2788,19 +5031,85 @@ class PerceptionManager:
         *,
         max_depth: float,
         env_ids: torch.Tensor | None = None,
+        advance_frame: bool = True,
     ) -> torch.Tensor:
         if self._camera_warp_hole_generator is None:
             return depth
         num_envs, height, width = depth.shape
-        frame = self._camera_warp_hole_generator.generate_frame()
-        if env_ids is not None:
-            frame = frame[env_ids]
+
+        def preprocess(raw_frame: torch.Tensor) -> torch.Tensor:
+            processed = raw_frame.to(device=depth.device, dtype=depth.dtype)
+            processed = F.interpolate(
+                processed.unsqueeze(1),
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            return F.max_pool2d(processed, kernel_size=3, stride=1, padding=1)
+
+        if advance_frame:
+            frame_index = int(self._camera_warp_hole_generator.frame_idx)
+            # Generate and preprocess the complete authenticated reference
+            # batch before selecting live environments.  Interpolation and
+            # pooling are batch-independent, while the subsequent extrema are
+            # deliberately not; slicing earlier changes the trained mask.
+            full_frame = preprocess(self._camera_warp_hole_generator.generate_frame())
+            if env_ids is None:
+                frame = full_frame[:num_envs]
+            else:
+                frame = full_frame[env_ids]
         else:
-            frame = frame[:num_envs]
-        frame = frame.to(device=depth.device, dtype=depth.dtype)
-        frame = F.interpolate(frame.unsqueeze(1), size=(height, width), mode="bilinear", align_corners=False)
-        frame = F.max_pool2d(frame, kernel_size=3, stride=1, padding=1)
-        frame = (frame - frame.min()) / (frame.max() - frame.min()).clamp(min=1.0e-6)
+            # Reset refreshes occur after the normal full sensor refresh in the
+            # same control step.  Reuse that temporal hole field for the reset
+            # subset; advancing the shared Perlin clock here would accelerate
+            # every surviving environment's sensor process whenever any peer
+            # terminates.
+            latest_full_frame_index = max(
+                0,
+                int(self._camera_warp_hole_generator.frame_idx) - 1,
+            )
+            frame_index = latest_full_frame_index
+            frame = preprocess(
+                self._camera_warp_hole_generator.generate_frame(
+                    frame_index=latest_full_frame_index,
+                    env_ids=env_ids,
+                )
+            )
+            if env_ids is None:
+                frame = frame[:num_envs]
+        if advance_frame:
+            # Preserve the reference far-tracking preprocessing contract: its
+            # Perlin field is normalized over the complete vectorized batch.
+            frame_min = full_frame.min()
+            frame_max = full_frame.max()
+            self._camera_warp_hole_frame_stats = (
+                frame_index,
+                frame_min.detach().clone(),
+                frame_max.detach().clone(),
+            )
+        else:
+            # A targeted post-reset refresh must reinterpret the selected raw
+            # frame with the *same* batch extrema used by the preceding full
+            # sensor tick.  Using subset extrema changes the mask, while
+            # generating a new full tick advances the temporal process.  The
+            # normal path hits this tiny derived cache; the fallback rebuilds
+            # its deterministic statistics without advancing ``frame_idx``.
+            cached_stats = getattr(self, "_camera_warp_hole_frame_stats", None)
+            if cached_stats is None or int(cached_stats[0]) != frame_index:
+                full_frame = preprocess(
+                    self._camera_warp_hole_generator.generate_frame(
+                        frame_index=frame_index,
+                    )
+                )
+                cached_stats = (
+                    frame_index,
+                    full_frame.min().detach().clone(),
+                    full_frame.max().detach().clone(),
+                )
+                self._camera_warp_hole_frame_stats = cached_stats
+            frame_min = cached_stats[1].to(device=frame.device, dtype=frame.dtype)
+            frame_max = cached_stats[2].to(device=frame.device, dtype=frame.dtype)
+        frame = (frame - frame_min) / (frame_max - frame_min).clamp(min=1.0e-6)
         holes = (frame.squeeze(1) < self._camera_warp_hole_prob) & (depth < 2.0) & (depth > 0.2)
         if holes.any():
             depth = torch.where(holes, torch.full_like(depth, max_depth), depth)
@@ -2840,7 +5149,26 @@ class PerceptionManager:
             vfov_deg=self._camera_vfov_deg,
             device=getattr(self.env.simulator, "device", self.device),
         )
-        if simulator_type == SimulatorType.MUJOCO:
+        if simulator_type == SimulatorType.ISAACSIM and self._camera_strict_warp:
+            if self._camera_source == "rendered_depth_sensor":
+                raise RuntimeError(
+                    "Strict far-warp camera parity is unsupported for rendered_depth_sensor: "
+                    "the selected depth camera can be a transformed child of the sensor asset, "
+                    "so applying the manager optical pose to the asset root is not well-defined."
+                )
+            # Use the manager's exact mount chain so rendered validation sees
+            # the same strict D435 pose and reset-sampled offsets as the
+            # far_tracking_warp policy input.
+            camera_kwargs["pose_provider"] = self._get_strict_warp_camera_pose
+        elif (
+            simulator_type == SimulatorType.ISAACSIM
+            and self._has_camera_reset_randomization()
+        ):
+            raise RuntimeError(
+                "Non-strict Isaac rendered cameras do not consume the manager's reset-sampled "
+                "camera pose offsets. Disable that randomization or use strict rendered/far_tracking_warp."
+            )
+        elif simulator_type == SimulatorType.MUJOCO:
             intrinsics = (
                 float(self._camera_fx.item()),
                 float(self._camera_fy.item()),
@@ -3274,8 +5602,24 @@ class PerceptionManager:
         body_pos, body_quat = self._get_camera_body_pose(idx)
         num_envs = body_quat.shape[0]
 
-        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        local_position = self._sensor_offset.to(
+            device=body_pos.device,
+            dtype=body_pos.dtype,
+        ).unsqueeze(0).expand(num_envs, -1)
+        local_orientation = torch.zeros(
+            (num_envs, 4),
+            device=body_quat.device,
+            dtype=body_quat.dtype,
+        )
+        local_orientation[:, 3] = 1.0
+        local_position, local_orientation = self._apply_runtime_camera_mount_offsets(
+            local_position,
+            local_orientation,
+            idx=idx,
+        )
+        offset_world = quat_apply(body_quat, local_position, w_last=True)
         camera_pos = body_pos + offset_world
+        body_quat = quat_mul(body_quat, local_orientation, w_last=True)
 
         center_u = float(int(self._camera_width / 2))
         center_v = float(int(self._camera_height / 2))
@@ -3413,17 +5757,6 @@ class PerceptionManager:
             offset_quat = self._camera_body_offset_quat.expand(body_pos.shape[0], -1)
             body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
             body_quat = quat_mul(body_quat, offset_quat, w_last=True)
-        extra_pos = None if self._camera_disable_offsets else getattr(self.env, "_perception_camera_offset_pos", None)
-        extra_quat = None if self._camera_disable_offsets else getattr(self.env, "_perception_camera_offset_quat", None)
-        if extra_pos is not None and extra_quat is not None:
-            if isinstance(idx, slice):
-                offset_pos = extra_pos
-                offset_quat = extra_quat
-            else:
-                offset_pos = extra_pos[idx]
-                offset_quat = extra_quat[idx]
-            body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
-            body_quat = quat_mul(body_quat, offset_quat, w_last=True)
         return body_pos, body_quat
 
     def _compute_rays(
@@ -3488,7 +5821,7 @@ class PerceptionManager:
         hit_mask = self._filter_camera_hit_mask_by_depth(ranges, ray_dirs_world, body_quat, hit_mask)
         depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
         depth = depth.view(num_envs, self._camera_height, self._camera_width)
-        return self._apply_camera_depth_noise(depth)
+        return depth
 
     def _compute_camera_scandots_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
@@ -3515,7 +5848,7 @@ class PerceptionManager:
         else:
             depth = F.interpolate(depth, size=(self._camera_height, self._camera_width), mode=upsample_mode)
         depth = depth.squeeze(1)
-        return self._apply_camera_depth_noise(depth)
+        return depth
 
     def _cast_camera_scandots_rays(
         self, env_ids: torch.Tensor | None

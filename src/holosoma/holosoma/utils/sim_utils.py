@@ -7,6 +7,11 @@ shared between eval_agent.py and run_sim.py.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
+import json
+import math
 import os
 import sys
 import threading
@@ -14,7 +19,7 @@ import time
 import traceback
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from loguru import logger
@@ -24,15 +29,20 @@ from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
-from holosoma.managers.perception import PerceptionManager
-from holosoma.managers.terrain.manager import TerrainManager
-from holosoma.utils.common import seeding
+from holosoma.utils.common import (
+    rank_training_seed,
+    seeding,
+    validate_deterministic_runtime,
+)
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
 from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
+
+if TYPE_CHECKING:
+    from holosoma.managers.perception import PerceptionManager
 
 
 def _parse_debug_float_list_env(name: str, *, expected_len: int) -> list[float] | None:
@@ -242,6 +252,23 @@ def setup_simulation_environment(
     """
     logger.info("🚀 Setting up simulation environment...")
 
+    # Reject an invalid NumPy seed before AppLauncher can create a simulator or
+    # CUDA context.  The later seeding() call remains immediately before
+    # environment construction.
+    training_cfg = getattr(config, "training", None)
+    seed = getattr(training_cfg, "seed", None)
+    if seed is not None:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        global_rank = int(os.environ.get("RANK", "0"))
+        seed = rank_training_seed(
+            seed,
+            world_size=world_size,
+            global_rank=global_rank,
+        )
+        validate_deterministic_runtime(
+            bool(getattr(training_cfg, "torch_deterministic", False))
+        )
+
     # Setup simulator imports
     setup_simulator_imports(config)
 
@@ -259,8 +286,6 @@ def setup_simulation_environment(
 
     # Set random seed if specified. Direct RunSimConfig also carries a TrainingConfig,
     # and sim2sim rollouts need deterministic terrain/contact initialization.
-    training_cfg = getattr(config, "training", None)
-    seed = getattr(training_cfg, "seed", None)
     if seed is not None:
         seeding(seed, torch_deterministic=getattr(training_cfg, "torch_deterministic", False))
         logger.info(f"Seed: {seed}")
@@ -302,6 +327,11 @@ def setup_simulation_environment(
                     self.sim.close()
 
         # Use terrain configuration from RunSimConfig
+        # Terrain/perception managers transitively initialize Warp. Keep those
+        # imports behind the seed/deterministic-runtime preflight above so a
+        # rejected direct API call cannot create a CUDA/Warp context first.
+        from holosoma.managers.terrain.manager import TerrainManager  # noqa: PLC0415
+
         terrain_manager = TerrainManager(config.terrain, env=EnvProxy(device), device=device)
 
         # Create simulator using get_class() to avoid circular imports
@@ -403,6 +433,10 @@ class DirectSimulation:
         self.simulator = env.sim
         self._perception_env_proxy: _DirectPerceptionEnvProxy | None = None
         self._perception_manager: PerceptionManager | None = None
+        self._perception_randomization_manager: Any | None = None
+        self._perception_producer_steps: int | None = None
+        self._perception_last_update_completed_steps: int | None = None
+        self._perception_publish_pending = False
 
     def __enter__(self) -> Self:
         """Context manager entry - initialize the simulation.
@@ -549,7 +583,11 @@ class DirectSimulation:
             except Exception as e:
                 logger.error(f"Error during simulation step {step_count}: {e}")
                 traceback.print_exc()
-                break
+                # Scientific/contract failures must propagate to run_sim's
+                # process status.  Treating them like a normal end of the
+                # interactive loop makes launchers report a broken producer as
+                # successful and can leave the policy waiting on stale input.
+                raise
 
         # Final statistics
         total_elapsed = time.time() - start_time
@@ -561,6 +599,10 @@ class DirectSimulation:
         """Handle simulation cleanup."""
         if hasattr(self.simulator, "_split_sim_perception_provider"):
             self.simulator._split_sim_perception_provider = None
+        if hasattr(self.simulator, "_split_sim_perception_contract_provider"):
+            self.simulator._split_sim_perception_contract_provider = None
+        if hasattr(self.simulator, "_reset_split_sim_perception_provider"):
+            self.simulator._reset_split_sim_perception_provider = None
 
         # Cleanup environment
         if hasattr(self.env, "close"):
@@ -582,6 +624,66 @@ class DirectSimulation:
             else:
                 decoded.append(str(item))
         return decoded
+
+    @staticmethod
+    def _decode_perception_contract_envelope(encoded: str) -> tuple[dict[str, Any], str]:
+        """Decode one bounded, duplicate-key-free ONNX contract handoff."""
+
+        if not isinstance(encoded, str) or not encoded or len(encoded) > 2_000_000:
+            raise ValueError(
+                "perception_contract_envelope_b64 must be a non-empty bounded base64 string."
+            )
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("perception_contract_envelope_b64 is not canonical base64.") from exc
+        if base64.b64encode(payload).decode("ascii") != encoded:
+            raise ValueError("perception_contract_envelope_b64 is not canonical base64.")
+        if not payload or len(payload) > 1_500_000:
+            raise ValueError("Decoded perception contract envelope is empty or too large.")
+
+        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"Perception contract envelope contains duplicate key {key!r}.")
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"Perception contract envelope contains non-finite JSON value {value}.")
+
+        try:
+            envelope = json.loads(
+                payload.decode("utf-8"),
+                object_pairs_hook=reject_duplicates,
+                parse_constant=reject_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("Perception contract envelope is not strict unique-key JSON.") from exc
+        if not isinstance(envelope, dict) or set(envelope) != {"contract", "sha256"}:
+            raise ValueError("Perception contract envelope must contain exactly contract and sha256.")
+        contract = envelope.get("contract")
+        digest = envelope.get("sha256")
+        if not isinstance(contract, dict):
+            raise ValueError("Perception contract envelope contract must be a mapping.")
+        canonical = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        computed = hashlib.sha256(canonical).hexdigest()
+        if (
+            not isinstance(digest, str)
+            or digest != digest.lower()
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or digest != computed
+        ):
+            raise ValueError("Perception contract envelope SHA-256 is invalid or mismatched.")
+        return contract, digest
 
     @staticmethod
     def _resolve_root_body_index(body_names: list[str]) -> int:
@@ -629,45 +731,284 @@ class DirectSimulation:
             )
             perception_cfg = replace(perception_cfg, camera_source="rendered")
 
+        producer_tick_dt = self.config.perception_producer_tick_dt
+        if producer_tick_dt is None:
+            if wants_publish:
+                raise ValueError(
+                    "Authenticated split perception publishing requires "
+                    "--perception-producer-tick-dt from the training control-step contract."
+                )
+            producer_tick_dt = float(self.simulator.sim_dt)
+        if (
+            isinstance(producer_tick_dt, bool)
+            or not isinstance(producer_tick_dt, (int, float))
+            or not math.isfinite(float(producer_tick_dt))
+            or float(producer_tick_dt) <= 0.0
+        ):
+            raise ValueError(
+                f"perception_producer_tick_dt must be a finite positive number, got {producer_tick_dt!r}."
+            )
+        sim_dt = float(self.simulator.sim_dt)
+        producer_ratio = float(producer_tick_dt) / sim_dt
+        producer_steps = int(round(producer_ratio))
+        if producer_steps < 1 or not math.isclose(
+            producer_ratio,
+            float(producer_steps),
+            rel_tol=1.0e-9,
+            abs_tol=1.0e-9,
+        ):
+            raise ValueError(
+                "perception_producer_tick_dt must be an integer multiple of the direct physics dt: "
+                f"tick_dt={producer_tick_dt}, sim_dt={sim_dt}, ratio={producer_ratio}."
+            )
+        if wants_publish and not hasattr(self.simulator, "completed_physics_steps"):
+            raise RuntimeError(
+                "Authenticated split perception cadence requires a simulator completed_physics_steps counter."
+            )
+        bridge = getattr(self.simulator, "bridge", None)
+        if bool(getattr(bridge, "_reset_perception_on_first_lowcmd", False)):
+            raise ValueError(
+                "HOLOSOMA_RESET_PERCEPTION_ON_FIRST_LOWCMD is incompatible with episode-authenticated "
+                "direct perception; physical simulator reset is the only valid episode boundary."
+            )
+
+        self._perception_producer_steps = producer_steps
         self._perception_env_proxy = _DirectPerceptionEnvProxy(
             simulator=self.simulator,
             terrain_manager=self.simulator.terrain_manager,
             robot_config=self.config.robot,
-            dt=float(self.simulator.sim_dt),
+            training_config=self.config.training,
+            dt=float(producer_tick_dt),
             device=self.device,
+            allow_mujoco_perception_noise=bool(self.config.perception_allow_mujoco_noise),
         )
+        from holosoma.managers.perception import PerceptionManager  # noqa: PLC0415
+        from holosoma.config_types.randomization import (  # noqa: PLC0415
+            RandomizationManagerCfg,
+            RandomizationTermCfg,
+        )
+        from holosoma.managers.randomization import RandomizationManager  # noqa: PLC0415
+
         self._perception_manager = PerceptionManager(perception_cfg, self._perception_env_proxy, self.device)
+        self._perception_env_proxy.perception_manager = self._perception_manager
+        direct_randomization = self.config.perception_randomization
+        if not direct_randomization.enabled and any(
+            value is not None
+            for value in (
+                direct_randomization.translation_range,
+                direct_randomization.rotation_range_deg,
+                direct_randomization.noise_std_mult_range,
+                direct_randomization.noise_drop_prob_range,
+            )
+        ):
+            raise ValueError(
+                "Direct perception randomization ranges were supplied while "
+                "--perception-randomization.enabled is false."
+            )
+        reset_terms = {}
+        if direct_randomization.enabled:
+            reset_terms["direct_camera_raycast"] = RandomizationTermCfg(
+                func=(
+                    "holosoma.managers.randomization.terms.locomotion:"
+                    "randomize_camera_raycast"
+                ),
+                params={
+                    "enabled": True,
+                    "translation_range": direct_randomization.translation_range,
+                    "rotation_range_deg": direct_randomization.rotation_range_deg,
+                    "noise_std_mult_range": direct_randomization.noise_std_mult_range,
+                    "noise_drop_prob_range": direct_randomization.noise_drop_prob_range,
+                },
+            )
+        self._perception_randomization_manager = RandomizationManager(
+            RandomizationManagerCfg(reset_terms=reset_terms),
+            self._perception_env_proxy,
+            self.device,
+        )
+        self._perception_env_proxy.randomization_manager = self._perception_randomization_manager
+        self._perception_randomization_manager.setup()
         self._perception_manager.setup()
-        self._perception_manager.reset()
-        self.simulator.refresh_sim_tensors()
-        self._perception_manager.update()
+        contract_envelope = self.config.perception_contract_envelope_b64
+        if wants_publish and not contract_envelope:
+            raise ValueError(
+                "Authenticated split perception publishing requires "
+                "--perception-contract-envelope-b64 from the selected ONNX artifact."
+            )
+        if contract_envelope:
+            contract, declared_digest = self._decode_perception_contract_envelope(
+                contract_envelope
+            )
+            authenticated_digest = self._perception_manager.authenticate_observation_contract(
+                contract,
+                declared_sha256=declared_digest,
+            )
+            logger.info(
+                "Authenticated direct perception contract against live geometry: sha256={}",
+                authenticated_digest,
+            )
+        # BaseTask.reset_all() advances one zero-action control tick, performs
+        # one ordinary all-environment producer update, then installs the
+        # targeted reset output seen by the first policy observation.  Replay
+        # that authenticated initialization sequence before publication.
+        self._reset_split_sim_perception(initialization_warmup=True)
         logger.info(
-            "Split sim perception initialized: mode={} camera_source={}",
+            "Split sim perception initialized: mode={} camera_source={} producer_tick_dt={} "
+            "physics_steps_per_tick={} camera_reset_randomization={} mujoco_noise={}",
             perception_cfg.output_mode,
             perception_cfg.camera_source,
+            float(producer_tick_dt),
+            producer_steps,
+            bool(direct_randomization.enabled),
+            bool(self.config.perception_allow_mujoco_noise),
         )
 
+        self.simulator._reset_split_sim_perception_provider = self._reset_split_sim_perception
         if wants_publish:
             self.simulator._split_sim_perception_provider = self._get_split_sim_perception_obs
-            self.simulator._reset_split_sim_perception_provider = self._reset_split_sim_perception
+            contract_provider = getattr(self._perception_manager, "get_observation_contract_sha256", None)
+            if not callable(contract_provider):
+                raise RuntimeError(
+                    "split sim2sim perception publishing requires an effective observation-contract digest"
+                )
+            self.simulator._split_sim_perception_contract_provider = contract_provider
 
     def _get_split_sim_perception_obs(self) -> list[float] | None:
         if self._perception_manager is None:
             return None
-
-        self.simulator.refresh_sim_tensors()
-        self._perception_manager.update()
+        producer_steps = self._perception_producer_steps
+        if producer_steps is None:
+            raise RuntimeError("Split perception producer cadence was not initialized.")
+        completed_steps = int(getattr(self.simulator, "completed_physics_steps"))
+        last_update = self._perception_last_update_completed_steps
+        if last_update is None:
+            raise RuntimeError("Split perception producer update state was not initialized.")
+        if completed_steps < last_update:
+            raise RuntimeError(
+                "Simulator physics-step counter moved backwards without an authenticated perception reset: "
+                f"completed={completed_steps}, last_update={last_update}."
+            )
+        if self._perception_publish_pending and completed_steps == last_update:
+            # Re-publish the already-computed reset frame without another
+            # manager update or RNG draw until physics advances.  This makes a
+            # late ZMQ subscriber compatible with freeze-until-first-command
+            # and keeps shared-memory publication equally well defined.
+            pass
+        else:
+            self._perception_publish_pending = False
+            if completed_steps == last_update or completed_steps % producer_steps != 0:
+                return None
+            if completed_steps - last_update != producer_steps:
+                raise RuntimeError(
+                    "Split perception provider skipped an authenticated producer tick: "
+                    f"completed={completed_steps}, last_update={last_update}, "
+                    f"physics_steps_per_tick={producer_steps}."
+                )
+            self.simulator.refresh_sim_tensors()
+            self._perception_manager.update()
+            self._perception_last_update_completed_steps = completed_steps
         perception_obs = self._perception_manager.get_obs()
         if perception_obs.ndim != 2 or perception_obs.shape[0] < 1:
             raise RuntimeError(f"Unexpected perception observation shape: {tuple(perception_obs.shape)}")
         return perception_obs[0].detach().cpu().to(torch.float32).tolist()
 
-    def _reset_split_sim_perception(self) -> None:
+    def _advance_initialization_perception_warmup(self) -> None:
+        """Advance the one zero-action control tick used by training reset_all()."""
+
+        producer_steps = self._perception_producer_steps
+        if producer_steps is None or producer_steps < 1:
+            raise RuntimeError("Perception initialization warm-up cadence is unavailable.")
+        completed_before = int(getattr(self.simulator, "completed_physics_steps", 0))
+        if completed_before != 0:
+            raise RuntimeError(
+                "Perception initialization warm-up must start at physical step zero, "
+                f"got {completed_before}."
+            )
+
+        bridge = getattr(self.simulator, "bridge", None)
+        reset_control_phase = getattr(bridge, "reset_control_phase", None)
+        apply_initialization_hold = getattr(
+            bridge,
+            "apply_initialization_default_pose_hold",
+            None,
+        )
+        if bridge is not None and (
+            not callable(reset_control_phase)
+            or not callable(apply_initialization_hold)
+        ):
+            raise RuntimeError(
+                "Authenticated perception warm-up requires an isolatable simulator bridge."
+            )
+
+        # Do not let an already-connected DDS/ZMQ sender replace training's
+        # zero-action initialization tick.  The detached bridge applies only
+        # the nominal default-pose PD hold and cannot drain control/reset input,
+        # publish a premature state, or advance its runtime decimation phase.
+        if callable(reset_control_phase):
+            reset_control_phase()
+        if bridge is not None:
+            self.simulator.bridge = None
+        try:
+            for expected_step in range(1, producer_steps + 1):
+                self.simulator.refresh_sim_tensors()
+                if callable(apply_initialization_hold):
+                    apply_initialization_hold()
+                self.simulator.simulate_at_each_physics_step()
+                completed = int(getattr(self.simulator, "completed_physics_steps", 0))
+                if completed != expected_step:
+                    raise RuntimeError(
+                        "Direct initialization failed to advance exactly one authenticated "
+                        "physics step during its training-equivalent warm-up: "
+                        f"expected={expected_step}, completed={completed}."
+                    )
+        finally:
+            if bridge is not None:
+                self.simulator.bridge = bridge
+            if callable(reset_control_phase):
+                reset_control_phase()
+
+    def _reset_split_sim_perception(
+        self,
+        *,
+        initialization_warmup: bool = False,
+    ) -> None:
         if self._perception_manager is None:
             return
-        self._perception_manager.reset()
+        env_ids = torch.arange(
+            self._perception_env_proxy.num_envs,
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._perception_manager.reset(env_ids)
+        if self._perception_randomization_manager is not None:
+            self._perception_randomization_manager.reset(env_ids)
+        if initialization_warmup:
+            self._advance_initialization_perception_warmup()
         self.simulator.refresh_sim_tensors()
-        self._perception_manager.update()
+        if initialization_warmup:
+            self._perception_manager.update()
+            # Training restores/refreshes the reset state after its warm-up
+            # control tick and before the targeted producer refresh.
+            self.simulator.refresh_sim_tensors()
+        update_env_ids = (
+            None
+            if self._perception_manager.uses_legacy_full_reset_refresh()
+            else env_ids
+        )
+        self._perception_manager.update(update_env_ids)
+        completed_steps = int(getattr(self.simulator, "completed_physics_steps", 0))
+        expected_completed_steps = (
+            int(self._perception_producer_steps or 0)
+            if initialization_warmup
+            else 0
+        )
+        if completed_steps != expected_completed_steps:
+            raise RuntimeError(
+                "Perception reset completed-physics-step boundary is inconsistent: "
+                f"initialization_warmup={initialization_warmup}, "
+                f"expected={expected_completed_steps}, got={completed_steps}."
+            )
+        self._perception_last_update_completed_steps = completed_steps
+        self._perception_publish_pending = True
 
     def _maybe_apply_motion_initial_state(self) -> None:
         motion_init_cfg = self.config.motion_init
@@ -1014,14 +1355,26 @@ class DirectSimulation:
 class _DirectPerceptionEnvProxy:
     """Minimal env facade required by PerceptionManager during direct sim runs."""
 
-    def __init__(self, simulator: Any, terrain_manager: Any, robot_config: Any, dt: float, device: str):
+    def __init__(
+        self,
+        simulator: Any,
+        terrain_manager: Any,
+        robot_config: Any,
+        training_config: Any,
+        dt: float,
+        device: str,
+        *,
+        allow_mujoco_perception_noise: bool,
+    ):
         self.simulator = simulator
         self.terrain_manager = terrain_manager
         self.robot_config = robot_config
+        self.training_config = training_config
         self.dt = dt
         self.device = device
         self.num_envs = int(getattr(simulator, "num_envs", 1))
         self.logger = logger
+        self._allow_mujoco_perception_noise = allow_mujoco_perception_noise
         self._perception_camera_offset_pos = None
         self._perception_camera_offset_quat = None
 

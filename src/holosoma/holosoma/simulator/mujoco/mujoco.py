@@ -161,6 +161,10 @@ class MuJoCo(BaseSimulator):
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
         self._pending_reset: bool = False
+        # Episode-local count of physics steps that actually completed.  Split
+        # perception uses this instead of bridge callbacks so frozen/held
+        # physics cannot accidentally advance the training-rate sensor clock.
+        self.completed_physics_steps: int = 0
         self.show_object_collision_geoms: bool = bool(
             getattr(self.simulator_config, "mujoco_show_object_collision", False)
         )
@@ -1203,6 +1207,18 @@ class MuJoCo(BaseSimulator):
 
     def reset(self) -> None:
         """Reset simulation state and optionally align robot XY with the gantry anchor."""
+        self.completed_physics_steps = 0
+        reset_bridge_episode = getattr(
+            getattr(self, "bridge", None),
+            "reset_episode_state",
+            None,
+        )
+        if callable(reset_bridge_episode):
+            # Reset the lowcmd/control-decimation phase at the same physical
+            # boundary as the perception producer.  A reset request can arrive
+            # between control boundaries, so resetting only when it is queued
+            # leaves the new episode permanently one substep out of phase.
+            reset_bridge_episode()
         if self.root_model is None or self.root_data is None:
             return
 
@@ -1252,6 +1268,12 @@ class MuJoCo(BaseSimulator):
         mujoco.mj_forward(self.root_model, self.root_data)
         if self._has_registered_dynamic_objects():
             self._refresh_all_root_states()
+        reset_perception = getattr(self, "_reset_split_sim_perception_provider", None)
+        if callable(reset_perception):
+            # This is deliberately after all robot/object restoration and
+            # mj_forward: the targeted frame and fresh episode randomization
+            # must describe the new physical episode, never the stale one.
+            reset_perception()
         if snapped_to_gantry:
             logger.info("Simulation reset (robot XY aligned to virtual gantry anchor)")
         else:
@@ -1582,6 +1604,7 @@ class MuJoCo(BaseSimulator):
 
         # Delegate simulation step to backend
         self.backend.step()
+        self.completed_physics_steps += 1
 
         # Call video recorder capture frame if recording is active
         if self.video_recorder and self.video_recorder.is_recording:

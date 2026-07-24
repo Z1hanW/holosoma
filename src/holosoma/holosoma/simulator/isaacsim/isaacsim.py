@@ -38,18 +38,38 @@ from omegaconf import DictConfig, ListConfig
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rank_local_shards import (
+    build_clip_weighted_object_assignment,
     rank_local_sharding_enabled,
     resolve_rank_local_motion_path,
     resolve_rank_local_object_map,
+)
+from holosoma.utils.runtime_asset_manifest import (
+    normalize_object_collider_type,
+    object_urdf_conversion_cache_key,
+    object_loader_semantics_from_env,
+)
+from holosoma.utils.training_provenance import (
+    RUNTIME_ASSET_MANIFEST_KEY,
+    training_provenance_from_env,
 )
 from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.isaacsim.event_cfg import EventCfg
+from holosoma.simulator.isaacsim.eager_contact_sensor import (
+    eager_data,
+    eager_every_step_is_compatible,
+    eager_update_all,
+)
 from holosoma.simulator.isaacsim.events import randomize_body_com, randomize_rigid_body_inertia
 from holosoma.simulator.isaacsim.isaaclab_viewpoint_camera_controller import ViewportCameraController
 from holosoma.simulator.isaacsim.isaacsim_articulation_cfg import ARTICULATION_CFG
+from holosoma.simulator.isaacsim.joint_hotpath import (
+    build_ideal_pd_actuator_groups,
+    cached_dof_selector,
+    select_dof_write_batch,
+)
 from holosoma.simulator.isaacsim.usd_file_loader import USDFileLoader
 from holosoma.simulator.isaacsim.registry_utils import register_objects
 from holosoma.simulator.isaacsim.proxy_utils import AllRootStatesProxy, RootStatesProxy
@@ -78,6 +98,8 @@ _OBJECT_CONTACT_MONITOR_BODY_NAMES = (
     "right_ankle_roll_link",
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
+    "left_rubber_hand",
+    "right_rubber_hand",
     "left_wrist_roll_link",
     "right_wrist_roll_link",
     "left_wrist_pitch_link",
@@ -99,6 +121,38 @@ _OBJECT_CONTACT_REWARD_FUNC_PATHS = frozenset(
         "holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
     }
 )
+
+
+class _EagerEveryPhysicsStepContactSensor(ContactSensor):
+    """ContactSensor fast path for Holosoma's all-env, every-step contract.
+
+    The generic IsaacLab path resolves outdated rows through CUDA ``nonzero``
+    both from ``update()`` and every ``data`` access.  Training contact sensors
+    have history and are due on every physics step, so the dynamic subset is
+    always all environments.  Fall back to the upstream implementation for any
+    configuration that does not satisfy that exact contract.
+    """
+
+    def _initialize_impl(self):
+        super()._initialize_impl()
+        self._eager_all_env_ids = torch.arange(self._num_envs, device=self._device, dtype=torch.long)
+        self._eager_has_sample = False
+        self._eager_every_step = eager_every_step_is_compatible(
+            update_period=self.cfg.update_period,
+            physics_dt=self._sim_physics_dt,
+            history_length=self.cfg.history_length,
+        )
+
+    @property
+    def data(self):
+        if not getattr(self, "_eager_every_step", False):
+            return super().data
+        return eager_data(self)
+
+    def update(self, dt: float, force_recompute: bool = False):
+        if not getattr(self, "_eager_every_step", False) or float(dt) + 1.0e-12 < float(self.cfg.update_period):
+            return super().update(dt, force_recompute=force_recompute)
+        eager_update_all(self, dt)
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -139,7 +193,10 @@ def _resolve_existing_object_urdf_path(path_like: str | pathlib.Path) -> pathlib
     if resolved.is_file():
         return resolved
 
-    if not resolved.exists() and _env_flag("HOLOSOMA_ALLOW_LEGACY_OBJECT_URDF_FALLBACK", default=False):
+    allow_legacy_fallback = object_loader_semantics_from_env()[
+        "allow_legacy_object_urdf_fallback"
+    ]
+    if not resolved.exists() and allow_legacy_fallback:
         for fallback in _object_urdf_compat_fallbacks(resolved):
             if fallback.is_file() and fallback.suffix.lower() == ".urdf":
                 logger.warning("Resolved missing object URDF '{}' to compatibility fallback '{}'", resolved, fallback)
@@ -195,6 +252,7 @@ class IsaacSim(BaseSimulator):
         self._heterogeneous_object_env_assignment = False
         self._heterogeneous_object_single_slot_enabled = False
         self._training_object_use_box_primitives = False
+        self._object_loader_semantics: dict[str, Any] | None = None
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
         self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
@@ -311,6 +369,7 @@ class IsaacSim(BaseSimulator):
         object_cfg = getattr(self.robot_config, "object", None)
         object_path_spec = str(getattr(object_cfg, "object_urdf_path", "") or "").strip()
         if getattr(object_cfg, "enabled", False) and object_path_spec:
+            self._object_loader_semantics = self._verified_object_loader_semantics()
             resolved_object_path_spec = resolve_rank_local_object_map(object_path_spec)
             if resolved_object_path_spec != object_path_spec:
                 object_path_spec = resolved_object_path_spec
@@ -323,9 +382,9 @@ class IsaacSim(BaseSimulator):
                 self._resolved_training_object_specs
             )
             self._heterogeneous_object_env_assignment = len(self._resolved_training_object_specs) > 1
-            disable_single_slot = os.environ.get(
-                "HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", ""
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            disable_single_slot = bool(
+                self._object_loader_semantics["disable_heterogeneous_single_slot"]
+            )
             self._heterogeneous_object_single_slot_enabled = (
                 self._heterogeneous_object_env_assignment
                 and not disable_single_slot
@@ -791,6 +850,9 @@ class IsaacSim(BaseSimulator):
                 continue
             if object_urdf:
                 object_urdfs.append(object_urdf)
+        # Keep the per-clip sequence for env assignment; only the asset-spawn
+        # list below should be deduplicated.
+        self._motion_subset_object_urdf_sequence = list(object_urdfs)
         return self._unique_preserve_order(object_urdfs)
 
     @staticmethod
@@ -898,9 +960,11 @@ class IsaacSim(BaseSimulator):
                 for raw_urdf in object_urdfs_raw
                 if str(raw_urdf).strip()
             ]
+            self._motion_subset_object_urdf_sequence = list(resolved_urdfs)
             return self._unique_preserve_order(resolved_urdfs)
 
     def _resolve_motion_subset_object_urdfs(self) -> list[str] | None:
+        self._motion_subset_object_urdf_sequence = None
         motion_cfg = self._resolve_motion_config()
         if motion_cfg is None:
             return None
@@ -955,8 +1019,8 @@ class IsaacSim(BaseSimulator):
         if rank_local_sharding_enabled():
             return object_specs
 
-        shard_enabled = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
-        if shard_enabled not in {"1", "true", "yes", "on"}:
+        semantics = object_loader_semantics_from_env()
+        if not semantics["legacy_rank_sharding_effective"]:
             return object_specs
         if len(object_specs) <= 1:
             return object_specs
@@ -983,15 +1047,19 @@ class IsaacSim(BaseSimulator):
         )
         return sharded_specs
 
-    @staticmethod
     def _build_env_object_urdf_assignment(
+        self,
         object_specs: list[tuple[str, str]],
         *,
         num_envs: int,
     ) -> list[str]:
         if not object_specs:
             return []
-        return [object_specs[env_id % len(object_specs)][1] for env_id in range(num_envs)]
+        return build_clip_weighted_object_assignment(
+            [spec[1] for spec in object_specs],
+            getattr(self, "_motion_subset_object_urdf_sequence", None),
+            num_envs=num_envs,
+        )
 
     @staticmethod
     def _resolve_object_contact_link_names(object_asset_urdf_path: str) -> tuple[str, ...]:
@@ -1019,43 +1087,41 @@ class IsaacSim(BaseSimulator):
             self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/{link_name}")
 
     @staticmethod
-    def _resolve_object_spawn_mode() -> tuple[str, bool]:
-        raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE")
-        raw_mode_normalized = "" if raw_mode is None else raw_mode.strip().lower()
-        if raw_mode_normalized in {"primitive", "primitives", "box", "cuboid"}:
-            return "primitive", True
-        if raw_mode_normalized == "":
-            return "urdf", False
-        if raw_mode_normalized == "auto":
-            return "auto", True
-        if raw_mode_normalized in {
-            "single_slot_multi_urdf",
-            "single-slot-multi-urdf",
-            "single_slot",
-            "single-slot",
-            "heterogeneous_single_slot",
-            "heterogeneous-single-slot",
-        }:
-            return "auto", True
-        if raw_mode_normalized in {"urdf", "mesh", "off", "disable", "disabled"}:
-            return "urdf", True
-        logger.warning(
-            "Unknown HOLOSOMA_OBJECT_SPAWN_MODE='{}'. Falling back to URDF mesh spawning.",
-            raw_mode,
-        )
-        return "urdf", bool(raw_mode_normalized)
+    def _verified_object_loader_semantics() -> dict[str, Any]:
+        semantics = object_loader_semantics_from_env()
+        provenance = training_provenance_from_env()
+        if provenance is None:
+            return semantics
+        manifest = provenance[RUNTIME_ASSET_MANIFEST_KEY]
+        object_manifest = manifest.get("object_loader")
+        if not isinstance(object_manifest, dict) or not object_manifest.get("active"):
+            raise RuntimeError(
+                "runtime object spawning is active but finalized provenance does not declare an active object loader"
+            )
+        declared = object_manifest.get("semantics")
+        if declared != semantics:
+            raise RuntimeError(
+                "object-loader environment changed after runtime asset provenance finalization: "
+                f"declared={declared!r} effective={semantics!r}"
+            )
+        return semantics
 
-    @staticmethod
-    def _single_slot_multi_urdf_requested() -> bool:
-        raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE", "").strip().lower()
-        return raw_mode in {
-            "single_slot_multi_urdf",
-            "single-slot-multi-urdf",
-            "single_slot",
-            "single-slot",
-            "heterogeneous_single_slot",
-            "heterogeneous-single-slot",
-        }
+    def _effective_object_loader_semantics(self) -> dict[str, Any]:
+        semantics = getattr(self, "_object_loader_semantics", None)
+        if semantics is None:
+            semantics = self._verified_object_loader_semantics()
+            self._object_loader_semantics = semantics
+        return semantics
+
+    def _resolve_object_spawn_mode(self) -> tuple[str, bool]:
+        semantics = self._effective_object_loader_semantics()
+        mode = str(semantics["spawn_mode"])
+        if mode == "single_slot_multi_urdf":
+            return "auto", True
+        return mode, bool(semantics["spawn_mode_explicit"])
+
+    def _single_slot_multi_urdf_requested(self) -> bool:
+        return bool(self._effective_object_loader_semantics()["single_slot_requested"])
 
     def _should_use_box_primitives(self, _object_specs: list[tuple[str, str]]) -> bool:
         spawn_mode, spawn_mode_explicit = self._resolve_object_spawn_mode()
@@ -1074,28 +1140,29 @@ class IsaacSim(BaseSimulator):
         *,
         object_scale: tuple[float, float, float] | None,
     ) -> sim_utils.UrdfFileCfg:
-        collider_type_raw = os.environ.get("HOLOSOMA_OBJECT_COLLIDER_TYPE", "convex_hull").strip().lower()
-        if collider_type_raw in {"convex_decomposition", "convex_decomp", "decomposition", "vhacd"}:
-            collider_type = "convex_decomposition"
-        elif collider_type_raw in {"convex_hull", "hull"}:
-            collider_type = "convex_hull"
-        else:
-            logger.warning(
-                "Unknown HOLOSOMA_OBJECT_COLLIDER_TYPE='{}'; falling back to convex_hull",
-                collider_type_raw,
-            )
-            collider_type = "convex_hull"
+        semantics = self._effective_object_loader_semantics()
+        collider_type = normalize_object_collider_type(str(semantics["collider_type"]))
+
+        usd_dir = self._resolve_object_usd_conversion_dir(
+            object_asset_urdf_path,
+            collider_type=collider_type,
+            object_scale=object_scale,
+        )
 
         return sim_utils.UrdfFileCfg(
+            usd_dir=usd_dir,
             fix_base=False,
             make_instanceable=True,
             merge_fixed_joints=True,
-            force_usd_conversion=False,
+            # The source closure is content-addressed below, but scientific
+            # launches still rebuild so a stale/partial derived USD can never
+            # contradict the hashed URDF and mesh bytes.
+            force_usd_conversion=True,
             replace_cylinders_with_capsules=True,
             collider_type=collider_type,
             asset_path=object_asset_urdf_path,
             scale=object_scale,
-            activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
+            activate_contact_sensors=bool(semantics["activate_contact_sensors"]),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -1116,7 +1183,30 @@ class IsaacSim(BaseSimulator):
         )
 
     @staticmethod
-    def _can_use_single_slot_heterogeneous_objects(object_specs: list[tuple[str, str]]) -> bool:
+    def _resolve_object_usd_conversion_dir(
+        object_asset_urdf_path: str,
+        *,
+        collider_type: str,
+        object_scale: tuple[float, float, float] | None,
+    ) -> str:
+        base_dir_raw = os.environ.get("HOLOSOMA_OBJECT_USD_CACHE_DIR", "").strip()
+        if base_dir_raw:
+            base_dir = pathlib.Path(base_dir_raw).expanduser()
+        else:
+            tmp_dir = pathlib.Path(os.environ.get("TMPDIR", "/tmp")).expanduser()
+            base_dir = tmp_dir / "holosoma_object_usd_cache"
+
+        local_rank = os.environ.get("HOLOSOMA_ORIGINAL_LOCAL_RANK", os.environ.get("LOCAL_RANK", "0"))
+        resolved_urdf = pathlib.Path(object_asset_urdf_path).expanduser().resolve()
+        digest = object_urdf_conversion_cache_key(
+            resolved_urdf,
+            collider_type=collider_type,
+            object_scale=object_scale,
+        )[:20]
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", resolved_urdf.stem).strip("._") or "object"
+        return str(base_dir / f"rank{local_rank}_pid{os.getpid()}" / f"{stem}_{digest}")
+
+    def _can_use_single_slot_heterogeneous_objects(self, object_specs: list[tuple[str, str]]) -> bool:
         """Whether heterogeneous objects can safely share one `RigidObject` slot.
 
         Mixed URDF banks often expand to different rigid-body prim hierarchies after import. IsaacLab's
@@ -1128,13 +1218,12 @@ class IsaacSim(BaseSimulator):
         rigid-body/link hierarchy (for example, a single `baseLink` box URDF). Those banks are safe to spawn
         through a single shared object slot, which is much cheaper than instantiating every object in every env.
         """
-        disable_flag = os.environ.get("HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", "").strip().lower()
-        if disable_flag in {"1", "true", "yes", "on"}:
+        semantics = self._effective_object_loader_semantics()
+        if semantics["disable_heterogeneous_single_slot"]:
             logger.info("Disabled heterogeneous single-slot object spawning via env override.")
             return False
 
-        force_flag = os.environ.get("HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", "").strip().lower()
-        if force_flag in {"1", "true", "yes", "on"} or IsaacSim._single_slot_multi_urdf_requested():
+        if semantics["force_heterogeneous_single_slot"] or self._single_slot_multi_urdf_requested():
             logger.warning("Forcing heterogeneous single-slot object spawning for mixed-URDF object generalist.")
             return True
 
@@ -1293,21 +1382,17 @@ class IsaacSim(BaseSimulator):
                     kd_list.append(damping_dict[key])
                     print(f"key: {key}, kp: {stiffness_dict[key]}, kd: {damping_dict[key]}")
 
-        # ImplicitActuatorCfg IdealPDActuatorCfg
-        actuators = {
-            dof_names_list[i]: IdealPDActuatorCfg(
-                joint_names_expr=[dof_names_list[i]],
-                effort_limit=dof_effort_limit_list[i],
-                velocity_limit=dof_vel_limit_list[i],
-                # effort_limit_sim=dof_effort_limit_list[i],
-                # velocity_limit_sim=dof_vel_limit_list[i],
-                stiffness=0,
-                damping=0,
-                armature=dof_armature_list[i],
-                friction=dof_joint_friction_list[i],
-            )
-            for i in range(len(dof_names_list))
-        }
+        # A single explicit group lets IsaacLab use slice(None) in its actuator
+        # loop. Exact-name dictionaries preserve every heterogeneous property
+        # from the previous one-group-per-joint configuration.
+        actuators = build_ideal_pd_actuator_groups(
+            actuator_cfg_type=IdealPDActuatorCfg,
+            joint_names=dof_names_list,
+            effort_limits=dof_effort_limit_list,
+            velocity_limits=dof_vel_limit_list,
+            armatures=dof_armature_list,
+            frictions=dof_joint_friction_list,
+        )
 
         robot_articulation_config: ArticulationCfg = ARTICULATION_CFG.replace(
             prim_path="/World/envs/env_.*/Robot", spawn=spawn, init_state=init_state, actuators=actuators
@@ -1317,7 +1402,10 @@ class IsaacSim(BaseSimulator):
             prim_path="/World/envs/env_.*/Robot/.*",
             history_length=self.simulator_config.contact_sensor_history_length,
             update_period=0.005,
-            track_air_time=True,
+            # Holosoma consumes only the force and force-history buffers.  Air/contact
+            # timers allocate four extra buffers and run a norm plus several where
+            # kernels every physics step, without any training or evaluation consumer.
+            track_air_time=False,
             force_threshold=10.0,
             debug_vis=bool(self.simulator_config.debug_viz and not self.training_config.headless),
         )
@@ -1414,7 +1502,7 @@ class IsaacSim(BaseSimulator):
 
         self.scene.articulations["robot"] = self._robot
 
-        self.contact_sensor = ContactSensor(contact_sensor_config)
+        self.contact_sensor = _EagerEveryPhysicsStepContactSensor(contact_sensor_config)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
 
         if height_scanner_config:
@@ -1448,7 +1536,10 @@ class IsaacSim(BaseSimulator):
             self._object_urdf_by_name = {}
             self._env_object_urdf_paths = []
             self._object_contact_filter_prim_paths_expr = []
-            require_single_slot_objects = _env_flag("HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS", default=False)
+            object_loader_semantics = self._effective_object_loader_semantics()
+            require_single_slot_objects = bool(
+                object_loader_semantics["require_single_slot_objects"]
+            )
             if (
                 require_single_slot_objects
                 and len(object_specs) > 1
@@ -1469,7 +1560,9 @@ class IsaacSim(BaseSimulator):
                 multi_asset_cfg = sim_utils.MultiAssetSpawnerCfg(
                     assets_cfg=object_assets_cfg,
                     random_choice=False,
-                    activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
+                    activate_contact_sensors=bool(
+                        object_loader_semantics["activate_contact_sensors"]
+                    ),
                 )
                 object_cfg = RigidObjectCfg(
                     prim_path="/World/envs/env_.*/Object",
@@ -1486,9 +1579,10 @@ class IsaacSim(BaseSimulator):
                     num_envs=self.training_config.num_envs,
                 )
                 self._append_object_contact_filter_paths("Object", object_specs[0][1])
-                rank_sharding = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
                 rank_local_sharding = rank_local_sharding_enabled()
-                rank_sharding_enabled = rank_sharding in {"1", "true", "yes", "on"} and not rank_local_sharding
+                rank_sharding_enabled = bool(
+                    object_loader_semantics["legacy_rank_sharding_effective"]
+                )
                 logger.info(
                     "Object generalist spawning topology: object_slots_per_env=1 unique_urdfs_this_rank={} "
                     "object_actors_per_rank={} legacy_object_actors_if_banked={} replicate_physics={} "
@@ -1875,6 +1969,10 @@ class IsaacSim(BaseSimulator):
 
         self.num_dof = len(self.dof_ids)
         self.num_bodies = len(self.body_ids)
+        self._dof_selector = cached_dof_selector(
+            self.dof_ids,
+            total_num_dofs=int(self._robot.num_joints),
+        )
 
         # warning if the dof_ids order does not match the joint_names order in robot_config
         if self.dof_ids != list(range(self.num_dof)):
@@ -1960,11 +2058,21 @@ class IsaacSim(BaseSimulator):
             return
 
         available_body_names = set(getattr(self.robot_config, "body_names", []))
-        target_body_names = [
-            body_name
-            for body_name in self._required_object_contact_sensor_body_names
-            if body_name in available_body_names
-        ]
+        configured_body_names = set(
+            getattr(self.simulator_config, "object_filtered_contact_sensor_body_names", []) or []
+        )
+        if configured_body_names:
+            target_body_names = [
+                body_name
+                for body_name in self._required_object_contact_sensor_body_names
+                if body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES
+            ]
+        else:
+            target_body_names = [
+                body_name
+                for body_name in self._required_object_contact_sensor_body_names
+                if body_name in available_body_names
+            ]
         if not target_body_names:
             logger.info("Skipping object-filtered contact sensors; current config does not request any monitored bodies.")
             return
@@ -1984,7 +2092,7 @@ class IsaacSim(BaseSimulator):
                 filter_prim_paths_expr=filter_prim_paths_expr,
             )
             sensor_name = f"object_contact_sensor_{body_name}"
-            sensor = ContactSensor(sensor_cfg)
+            sensor = _EagerEveryPhysicsStepContactSensor(sensor_cfg)
             self.scene.sensors[sensor_name] = sensor
             self._object_contact_sensors[body_name] = sensor
 
@@ -2100,8 +2208,8 @@ class IsaacSim(BaseSimulator):
         self.robot_root_states.reset(self._robot.data.root_state_w)  # (num_envs, 13)
 
         self.base_quat = self.robot_root_states[:, 3:7]  # (num_envs, 4), xyzw
-        self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
-        self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+        self.dof_pos = self._robot.data.joint_pos[:, self._dof_selector]  # (num_envs, num_dof)
+        self.dof_vel = self._robot.data.joint_vel[:, self._dof_selector]
 
         # The body ordering of contact_sensor is different from the body ordering of the robot.
         self.contact_forces = self.contact_sensor.data.net_forces_w[
@@ -2126,9 +2234,13 @@ class IsaacSim(BaseSimulator):
     def clear_contact_forces_history(self, env_id):
         if len(env_id) > 0:
             self.contact_forces_history[env_id, :, :, :] = 0.0
-            env_reset_ids = env_id.detach().cpu().tolist() if isinstance(env_id, torch.Tensor) else env_id
+            # Reset the source sensor as well as Holosoma's derived history.
+            # Otherwise refresh_sim_tensors() immediately copies the previous
+            # episode's IsaacLab history back into the reset rows.  ContactSensor
+            # accepts device tensors, so keep this path free of D2H synchronization.
+            self.contact_sensor.reset(env_id)
             for sensor in self._object_contact_sensors.values():
-                sensor.reset(env_reset_ids)
+                sensor.reset(env_id)
 
     def _resolve_required_object_contact_sensor_body_names(self, config_root: Any) -> tuple[str, ...]:
         available_body_names = list(getattr(self.robot_config, "body_names", []))
@@ -2140,10 +2252,11 @@ class IsaacSim(BaseSimulator):
             getattr(self.simulator_config, "object_filtered_contact_sensor_body_names", []) or []
         )
         if configured_body_names:
+            configured_set = set(configured_body_names)
             return tuple(
                 body_name
                 for body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES
-                if body_name in monitorable_body_names and body_name in configured_body_names
+                if body_name in configured_set
             )
 
         command_setup_terms = getattr(self.command_config, "setup_terms", {}) if self.command_config is not None else {}
@@ -2204,7 +2317,7 @@ class IsaacSim(BaseSimulator):
         return list(available_body_names)
 
     def apply_torques_at_dof(self, torques):
-        self._robot.set_joint_effort_target(torques, joint_ids=self.dof_ids)
+        self._robot.set_joint_effort_target(torques, joint_ids=self._dof_selector)
 
     def draw_debug_viz(self):
         if self.virtual_gantry:
@@ -2267,12 +2380,12 @@ class IsaacSim(BaseSimulator):
 
         # Need to update these tensors after each step, since they are used in `_apply_force_in_physics_step`
         if timing is None:
-            self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
-            self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+            self.dof_pos = self._robot.data.joint_pos[:, self._dof_selector]  # (num_envs, num_dof)
+            self.dof_vel = self._robot.data.joint_vel[:, self._dof_selector]
         else:
             with timing.record("physics/sim/update_dof_refs"):
-                self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
-                self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+                self.dof_pos = self._robot.data.joint_pos[:, self._dof_selector]  # (num_envs, num_dof)
+                self.dof_vel = self._robot.data.joint_vel[:, self._dof_selector]
 
         # Update accelerations ONLY if bridge is enabled
         if self.simulator_config.bridge.enabled:
@@ -2552,10 +2665,17 @@ class IsaacSim(BaseSimulator):
         if env_ids is None:
             env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
 
-        if dof_states is None:
-            dof_states = self.dof_state
-
-        dof_pos, dof_vel = dof_states[env_ids, :, 0], dof_states[env_ids, :, 1]
+        if dof_states is not None:
+            if not isinstance(dof_states, torch.Tensor):
+                raise ValueError(f"Expected dof_states tensor, got {type(dof_states)}")
+            dof_states = dof_states.to(device=self.sim_device, dtype=torch.float32)
+        dof_pos, dof_vel = select_dof_write_batch(
+            self.dof_pos,
+            self.dof_vel,
+            env_ids,
+            dof_states,
+            num_envs=getattr(self, "num_envs", self.training_config.num_envs),
+        )
         self._robot.write_joint_state_to_sim(dof_pos, dof_vel, self.dof_ids, env_ids)
 
     def get_actor_indices(self, names: str | ActorNames, env_ids: EnvIds | None = None) -> ActorIndices:

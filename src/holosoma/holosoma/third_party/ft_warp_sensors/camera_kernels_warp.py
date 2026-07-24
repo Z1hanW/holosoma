@@ -51,6 +51,7 @@ class DepthCameraWarpKernels:
     @wp.kernel
     def draw_optimized_kernel_pointcloud(
         terrain_mesh_id: wp.uint64,
+        launch_env_ids: wp.array(dtype=wp.int32),
         cam_poss: wp.array(dtype=wp.vec3, ndim=2),
         cam_quats: wp.array(dtype=wp.quat, ndim=2),
         K_inv: wp.mat44,
@@ -61,7 +62,8 @@ class DepthCameraWarpKernels:
         pointcloud_in_world_frame: bool,
     ):
 
-        env_id, cam_id, x, y = wp.tid()
+        launch_row, cam_id, x, y = wp.tid()
+        env_id = launch_env_ids[launch_row]
         mesh = terrain_mesh_id
         cam_pos = cam_poss[env_id, cam_id]
         cam_quat = cam_quats[env_id, cam_id]
@@ -102,6 +104,7 @@ class DepthCameraWarpKernels:
     @wp.kernel
     def draw_optimized_kernel_depth_range(
         terrain_mesh_id: wp.uint64,
+        launch_env_ids: wp.array(dtype=wp.int32),
         cam_poss: wp.array(dtype=wp.vec3, ndim=2),
         cam_quats: wp.array(dtype=wp.quat, ndim=2),
         K_inv: wp.mat44,
@@ -112,7 +115,8 @@ class DepthCameraWarpKernels:
         calculate_depth: bool,
     ):
 
-        env_id, cam_id, x, y = wp.tid()
+        launch_row, cam_id, x, y = wp.tid()
+        env_id = launch_env_ids[launch_row]
         mesh = terrain_mesh_id
         cam_pos = cam_poss[env_id, cam_id]
         cam_quat = cam_quats[env_id, cam_id]
@@ -155,6 +159,7 @@ class DepthCameraWarpKernels:
     def draw_optimized_kernel_depth_range_dynamic(
         # --- static terrain ---
         terrain_id: wp.uint64,
+        launch_env_ids: wp.array(dtype=wp.int32),
         # --- robot bodies: canonical meshes (one per body, shared across envs) ---
         robot_ids: wp.array(dtype=wp.uint64),            # [num_bodies]
         primitive_active: wp.array(dtype=wp.int32, ndim=2),     # [num_envs, num_primitive_bodies]
@@ -176,7 +181,8 @@ class DepthCameraWarpKernels:
         num_bodies: int,
         num_primitive_bodies: int,
     ):
-        env_id, cam_id, x, y = wp.tid()
+        launch_row, cam_id, x, y = wp.tid()
+        env_id = launch_env_ids[launch_row]
 
         # camera ray in world
         cam_pos  = cam_poss[env_id, cam_id]

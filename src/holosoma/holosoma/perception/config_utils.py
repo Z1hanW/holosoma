@@ -20,6 +20,19 @@ def apply_perception_overrides(config: ExperimentConfig) -> ExperimentConfig:
         return config
 
     if student_perception_enabled:
+        _validate_perception_encoder_input_contract(config.perception, context="student perception")
+    if teacher_perception_preset is not None:
+        _validate_perception_encoder_input_contract(
+            holosoma.config_values.perception.DEFAULTS[teacher_perception_preset],
+            context=f"teacher perception preset {teacher_perception_preset!r}",
+        )
+    if critic_perception_cfg is not None:
+        _validate_perception_encoder_input_contract(
+            critic_perception_cfg,
+            context="critic perception",
+        )
+
+    if student_perception_enabled:
         inject_env = os.getenv("HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES")
         if inject_env is not None:
             inject_str = inject_env.strip().lower()
@@ -66,6 +79,43 @@ def apply_perception_overrides(config: ExperimentConfig) -> ExperimentConfig:
         return dataclasses.replace(config, observation=observation)
     algo = _add_perception_modules(config, critic_perception_cfg=critic_perception_cfg, critic_obs_key=critic_perception_obs_key)
     return dataclasses.replace(config, observation=observation, algo=algo)
+
+
+def _validate_perception_encoder_input_contract(perception_cfg, *, context: str) -> None:
+    encoder_type = str(getattr(perception_cfg, "encoder_type", "")).strip().lower()
+    if not encoder_type.startswith("defm_"):
+        return
+    if getattr(perception_cfg, "output_mode", None) != "camera_depth":
+        raise ValueError(f"{context} uses {encoder_type}, which requires output_mode='camera_depth'.")
+    if bool(getattr(perception_cfg, "camera_warp_normalize", False)):
+        raise ValueError(
+            f"{context} uses {encoder_type}, which requires metric depth in meters; "
+            "camera_warp_normalize must be False."
+        )
+    pretrained = getattr(perception_cfg, "encoder_pretrained", None)
+    if not isinstance(pretrained, bool):
+        raise ValueError(f"{context} {encoder_type} encoder_pretrained must be a boolean.")
+    pretrained_path = getattr(perception_cfg, "encoder_pretrained_path", None)
+    pretrained_sha256 = getattr(perception_cfg, "encoder_pretrained_sha256", None)
+    if pretrained:
+        if not isinstance(pretrained_path, str) or not pretrained_path.strip():
+            raise ValueError(
+                f"{context} {encoder_type} requires a local encoder_pretrained_path; "
+                "implicit model downloads are forbidden."
+            )
+        if (
+            not isinstance(pretrained_sha256, str)
+            or len(pretrained_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in pretrained_sha256)
+        ):
+            raise ValueError(
+                f"{context} {encoder_type} requires a 64-character lowercase "
+                "encoder_pretrained_sha256."
+            )
+    elif pretrained_path is not None or pretrained_sha256 is not None:
+        raise ValueError(
+            f"{context} {encoder_type} disables pretrained weights but still declares a path/SHA."
+        )
 
 
 def _add_perception_group(observation: ObservationManagerCfg | None) -> ObservationManagerCfg:
@@ -210,6 +260,7 @@ def _update_module_config(
         perception_input_width=perception_width,
         perception_pretrained=perception_cfg.encoder_pretrained,
         perception_pretrained_path=perception_cfg.encoder_pretrained_path,
+        perception_pretrained_sha256=getattr(perception_cfg, "encoder_pretrained_sha256", None),
         perception_freeze_backbone=perception_cfg.encoder_freeze_backbone,
         perception_target_size=perception_cfg.encoder_target_size,
         perception_patch_size=perception_cfg.encoder_patch_size,

@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -17,9 +18,9 @@ from tqdm import tqdm
 # CONFIG_NAME is "holosoma_config.yaml" - the primary configuration file for Holosoma
 # This file contains all settings for training and evaluation of models
 from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.logging import LoguruLoggingBridge
-from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 
 _WANDB_PREFIX = "wandb://"
@@ -29,6 +30,8 @@ _WANDB_REFERENCE_FORMAT = f"{_WANDB_PREFIX}<entity>/<project>/<run_id>/[<artifac
 def _parse_wandb_reference(reference: str) -> tuple[str, str | None]:
     """Split a wandb:// URI into run path and optional artifact/checkpoint name."""
 
+    if not reference.startswith(_WANDB_PREFIX):
+        raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
     remainder = reference[len(_WANDB_PREFIX) :]
     parts = remainder.split("/")
     if len(parts) < 3:
@@ -39,11 +42,80 @@ def _parse_wandb_reference(reference: str) -> tuple[str, str | None]:
         run_id_index = 3
     if run_id_index >= len(parts):
         raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
+    identity_parts = [parts[0], parts[1], parts[run_id_index]]
+    if any(part in {"", ".", ".."} for part in identity_parts):
+        raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
     run_id = parts[run_id_index]
     artifact_start = run_id_index + 1
     wandb_run_path = f"{entity}/{project}/{run_id}"
-    artifact_path = "/".join(parts[artifact_start:]) or None
+    artifact_parts = parts[artifact_start:]
+    if any(part in {"", ".", ".."} for part in artifact_parts):
+        raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
+    artifact_path = "/".join(artifact_parts) or None
     return wandb_run_path, artifact_path
+
+
+def _validated_relative_wandb_name(file_name: str) -> Path:
+    """Validate that a W&B run-file name is a safe, unambiguous relative path."""
+
+    if not isinstance(file_name, str) or not file_name:
+        raise ValueError(f"Invalid W&B file name: {file_name!r}")
+    parts = file_name.split("/")
+    path = Path(file_name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"Invalid W&B file name: {file_name!r}")
+    return path
+
+
+def _download_wandb_file_exact(run, file_name: str, root: str | Path) -> Path:
+    """Download one exact W&B run file and verify the SDK's returned path.
+
+    W&B's public API returns an open file handle whose ``name`` is the path it
+    actually wrote.  Passing an absolute root and checking both the remote name
+    and returned path prevents a stale or differently named local file from
+    being accepted as the requested checkpoint.
+    """
+
+    relative_name = _validated_relative_wandb_name(file_name)
+    root_path = Path(root).expanduser().resolve()
+    root_path.mkdir(parents=True, exist_ok=True)
+    expected_path = (root_path / relative_name).resolve()
+    try:
+        expected_path.relative_to(root_path)
+    except ValueError as exc:
+        raise ValueError(f"W&B file path escapes download root: {file_name!r}") from exc
+
+    remote_file = run.file(file_name)
+    if remote_file is None:
+        raise FileNotFoundError(f"W&B run does not contain requested file: {file_name}")
+    remote_name = getattr(remote_file, "name", None)
+    if remote_name != file_name:
+        raise RuntimeError(
+            f"W&B returned a different run file than requested: requested={file_name!r}, returned={remote_name!r}"
+        )
+
+    downloaded = remote_file.download(root=str(root_path), replace=True)
+    try:
+        downloaded_name = getattr(downloaded, "name", None)
+        if not isinstance(downloaded_name, (str, os.PathLike)):
+            raise RuntimeError(f"W&B download returned no usable file path for {file_name!r}")
+        downloaded_path = Path(downloaded_name).expanduser()
+        if not downloaded_path.is_absolute():
+            downloaded_path = root_path / downloaded_path
+        downloaded_path = downloaded_path.resolve()
+    finally:
+        close = getattr(downloaded, "close", None)
+        if callable(close):
+            close()
+
+    if downloaded_path != expected_path:
+        raise RuntimeError(
+            "W&B downloaded a different path than requested: "
+            f"requested={expected_path}, returned={downloaded_path}"
+        )
+    if not downloaded_path.is_file():
+        raise FileNotFoundError(f"W&B reported a download that does not exist as a file: {downloaded_path}")
+    return downloaded_path
 
 
 def init_eval_logging() -> None:
@@ -78,9 +150,6 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
         Loaded experiment config and the originating wandb run path, if available.
     """
 
-    # lazy import wandb to avoid conflicts with site-packages python and Isaac
-    import wandb
-
     checkpoint = checkpoint_cfg.checkpoint
 
     if checkpoint is None:
@@ -97,48 +166,77 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
 
     wandb_run_path, artifact_path = _parse_wandb_reference(checkpoint_str)
 
+    # Lazy import W&B to avoid conflicts with site-packages Python and Isaac
+    # for the entirely local checkpoint path above.
+    import wandb
+
     api = wandb.Api()
     run = api.run(wandb_run_path)
     if artifact_path:
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
-                checkpoint_file = run.file(artifact_path)
-                downloaded = checkpoint_file.download(root=temp_dir, replace=True)
-                checkpoint_path = Path(downloaded.name)
-                if not checkpoint_path.is_absolute():
-                    checkpoint_path = (Path.cwd() / checkpoint_path).resolve()
+                checkpoint_path = _download_wandb_file_exact(run, artifact_path, temp_dir)
                 config, stored_wandb_path = _load_config_from_checkpoint(checkpoint_path)
                 effective_wandb_path = stored_wandb_path or wandb_run_path
                 logger.info(f"Loaded experiment config from W&B checkpoint payload: {checkpoint_str}")
                 return config, effective_wandb_path
         except Exception as exc:
-            logger.warning(
-                f"Failed to load experiment config from W&B checkpoint payload {checkpoint_str}; "
-                f"falling back to {CONFIG_NAME}. Error: {exc}"
-            )
+            raise RuntimeError(
+                f"Failed to load experiment config from exact W&B checkpoint payload: {checkpoint_str}"
+            ) from exc
 
-    config_file = run.file(CONFIG_NAME)
-    with tempfile.TemporaryDirectory() as temp_dir, config_file.download(root=temp_dir) as file:
-        return ExperimentConfig(**yaml.safe_load(file)), wandb_run_path
+    with tempfile.TemporaryDirectory() as temp_dir:
+        config_path = _download_wandb_file_exact(run, CONFIG_NAME, temp_dir)
+        with config_path.open(encoding="utf-8") as file:
+            config_data = yaml.safe_load(file)
+    if not isinstance(config_data, Mapping):
+        raise ValueError(f"W&B {CONFIG_NAME} must contain a mapping: {wandb_run_path}")
+    return ExperimentConfig(**dict(config_data)), wandb_run_path
 
 
 def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
     """Attempt to load the serialized ExperimentConfig from a checkpoint file."""
 
-    checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
-    config_data = checkpoint_contents["experiment_config"]
-    if isinstance(config_data, dict):
-        simulator_cfg = config_data.get("simulator")
-        if isinstance(simulator_cfg, dict):
-            sim_cfg = simulator_cfg.get("config")
-            if isinstance(sim_cfg, dict):
-                scene_cfg = sim_cfg.get("scene")
-                if isinstance(scene_cfg, dict):
-                    if scene_cfg.get("scene_files") is None:
-                        scene_cfg["scene_files"] = []
-                    if scene_cfg.get("rigid_objects") is None:
-                        scene_cfg["rigid_objects"] = []
-    return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint does not exist as a file: {checkpoint_path}")
+    checkpoint_contents, _ = load_verified_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+    )
+    if not isinstance(checkpoint_contents, Mapping):
+        raise ValueError(f"Checkpoint payload must be a mapping: {checkpoint_path}")
+    config_data = checkpoint_contents.get("experiment_config")
+    if not isinstance(config_data, Mapping):
+        raise ValueError(f"Checkpoint is missing a mapping experiment_config: {checkpoint_path}")
+    # Work on a regular mutable copy. Some older serialized scene configs used
+    # null for list fields that now have strict list types.
+    config_data = dict(config_data)
+    algo_wrapper = config_data.get("algo")
+    if isinstance(algo_wrapper, dict):
+        algo_config = algo_wrapper.get("config")
+        if isinstance(algo_config, dict) and "actor_obs_keys" in algo_config:
+            # FastSAC checkpoints written before the action transform was
+            # versioned used the scalar/max-range implementation. Preserve
+            # that exact policy function for evaluation instead of silently
+            # applying the corrected affine mapping default.
+            algo_config.setdefault(
+                "action_boundary_mode",
+                "legacy_max_range_scalar_v1",
+            )
+    simulator_cfg = config_data.get("simulator")
+    if isinstance(simulator_cfg, dict):
+        sim_cfg = simulator_cfg.get("config")
+        if isinstance(sim_cfg, dict):
+            scene_cfg = sim_cfg.get("scene")
+            if isinstance(scene_cfg, dict):
+                if scene_cfg.get("scene_files") is None:
+                    scene_cfg["scene_files"] = []
+                if scene_cfg.get("rigid_objects") is None:
+                    scene_cfg["rigid_objects"] = []
+    stored_wandb_path = checkpoint_contents.get("wandb_run_path")
+    if stored_wandb_path is not None and not isinstance(stored_wandb_path, str):
+        raise ValueError(f"Checkpoint wandb_run_path must be a string or null: {checkpoint_path}")
+    return ExperimentConfig(**config_data), stored_wandb_path
 
 
 class CheckpointMetadata(TypedDict):
@@ -269,8 +367,6 @@ def load_checkpoint(checkpoint: str, log_dir: str) -> Path:
         Path to the downloaded or local checkpoint file.
     """
 
-    import wandb
-
     wandb_run_path: str | None = None
     if checkpoint.startswith(_WANDB_PREFIX):
         wandb_run_path_from_uri, wandb_checkpoint_name = _parse_wandb_reference(checkpoint)
@@ -283,28 +379,32 @@ def load_checkpoint(checkpoint: str, log_dir: str) -> Path:
         checkpoint = wandb_checkpoint_name
 
     if wandb_run_path is not None:
+        import wandb
+
         api = wandb.Api()
         run = api.run(wandb_run_path)
-        # Create log dir
-        log_dir_path = Path(log_dir)
+        # Stage under the destination filesystem and publish atomically. A
+        # failed/retried network download can therefore never be mistaken for
+        # the exact requested checkpoint on a later run.
+        log_dir_path = Path(log_dir).expanduser().resolve()
         log_dir_path.mkdir(parents=True, exist_ok=True)
-        # Download checkpoint to log_dir
-        checkpoint_file = run.file(checkpoint)  # Get the specific checkpoint file
-        downloaded = checkpoint_file.download(root=log_dir, replace=True)
-        logger.info(f"Finished downloading checkpoint {checkpoint} to {log_dir} from W&B run {wandb_run_path}")
-        # `download()` returns a file handle whose `.name` is the actual downloaded file path.
-        downloaded_path = Path(downloaded.name)
-        if not downloaded_path.is_absolute():
-            downloaded_path = (Path.cwd() / downloaded_path).resolve()
-        else:
-            downloaded_path = downloaded_path.resolve()
-        checkpoint_path = downloaded_path
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(
-                f"Downloaded checkpoint not found: {checkpoint_path} (downloaded_name={downloaded.name})"
-            )
+        relative_checkpoint = _validated_relative_wandb_name(checkpoint)
+        checkpoint_path = (log_dir_path / relative_checkpoint).resolve()
+        try:
+            checkpoint_path.relative_to(log_dir_path)
+        except ValueError as exc:
+            raise ValueError(f"Checkpoint destination escapes log directory: {checkpoint!r}") from exc
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".wandb-download-", dir=log_dir_path) as temp_dir:
+            downloaded_path = _download_wandb_file_exact(run, checkpoint, temp_dir)
+            os.replace(downloaded_path, checkpoint_path)
+        if not checkpoint_path.is_file() or checkpoint_path.stat().st_size <= 0:
+            raise FileNotFoundError(f"Downloaded checkpoint is missing or empty: {checkpoint_path}")
+        logger.info(f"Finished downloading checkpoint {checkpoint} to {checkpoint_path} from W&B run {wandb_run_path}")
     else:
-        checkpoint_path = Path(checkpoint)
+        checkpoint_path = Path(checkpoint).expanduser()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Local checkpoint does not exist as a file: {checkpoint_path}")
     return checkpoint_path
 
 

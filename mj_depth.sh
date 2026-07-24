@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${ROOT_DIR}/scripts/mujoco_perception_env.sh"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
 LOG_ROOT="${LOG_ROOT:-/data/logs_new/WholeBodyTracking}"
 LOG_ROOTS_DEFAULT="${LOG_ROOTS_DEFAULT:-${LOG_ROOT}:/data/logs_new/boxer}"
@@ -513,9 +514,9 @@ case "${DEPTH_SOURCE}" in
     ;;
 esac
 
-export PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
-export PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
-export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
+holosoma_set_launcher_default PERCEPTION_CAMERA_WARP_EDGE_NOISE False
+holosoma_set_launcher_default PERCEPTION_CAMERA_WARP_ENABLE_HOLES False
+holosoma_set_launcher_default PERCEPTION_CAMERA_APPLY_SENSOR_NOISE False
 export POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-1}"
 export HOLOSOMA_MJ_TRACK_INTERNAL_CORE=1
 

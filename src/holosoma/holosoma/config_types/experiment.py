@@ -305,8 +305,8 @@ class ExperimentConfig:
         )
 
     def save_config(self, path: str) -> None:
-        with open(path, "w") as file:
-            yaml.safe_dump(self.to_serializable_dict(), file)
+        with open(path, "w", encoding="utf-8") as file:
+            yaml.safe_dump(self.to_serializable_dict(), file, sort_keys=False)
 
     def to_serializable_dict(self) -> dict:
         """Return a JSON-friendly representation of the config."""

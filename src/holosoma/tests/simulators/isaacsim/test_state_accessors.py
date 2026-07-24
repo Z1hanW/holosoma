@@ -116,7 +116,7 @@ class TestStateAccessors:
     def _create_mock_robot_states(self, xyzw_state: torch.Tensor):
         """Test helper to create a mock robot states object with the given xyzw state."""
         mock_robot_states = Mock()
-        mock_robot_states.__getitem__ = Mock(return_value=xyzw_state)
+        mock_robot_states.__getitem__ = Mock(side_effect=lambda indices: xyzw_state[indices])
         return mock_robot_states
 
     def _create_state_adapter(self, object_configs: list[tuple], default_robot_wxyz_state=None, num_envs=1):
@@ -368,8 +368,16 @@ class TestStateAccessors:
         nobjects = torch.arange(4)
         actual_states = proxy[nobjects, :]  # 2 objects x 2 envs = 4 states
 
-        # Expected states in xyzw format (what the proxy should return)
-        expected_states = torch.cat([self.multi_robot_xyzw, self.multi_box_xyzw], dim=0)
+        # ObjectRegistry uses an env-major/interleaved flat address space:
+        # [env0 objects][env1 objects]...
+        expected_states = torch.stack(
+            [
+                self.multi_robot_xyzw[0],
+                self.multi_box_xyzw[0],
+                self.multi_robot_xyzw[1],
+                self.multi_box_xyzw[1],
+            ]
+        )
         self._assert_full_state_equal(actual_states, expected_states, "Multi-object read")
 
         # Test write
@@ -443,8 +451,9 @@ class TestStateAccessors:
 
         # Reset scene and individual objects
         object_reset_indices = adapter._object_registry.get_object_indices(["table"] + box_names, reset_env_ids)
+        object_reset_poses = adapter._object_registry.get_initial_poses_batch(["table"] + box_names, reset_env_ids)
         current_object_states = proxy[object_reset_indices, :]
-        current_object_states[:, 0:7] = initial_poses[object_reset_indices, 0:7]  # Update poses only
+        current_object_states[:, 0:7] = object_reset_poses  # Update poses only
         proxy[object_reset_indices, :] = current_object_states
 
         # Verify robot reset worked
@@ -455,7 +464,7 @@ class TestStateAccessors:
 
         # Verify objects were reset to initial poses
         reset_object_states = proxy[object_reset_indices, :]
-        assert torch.allclose(reset_object_states[:, 0:7], initial_poses[object_reset_indices, 0:7]), (
+        assert torch.allclose(reset_object_states[:, 0:7], object_reset_poses), (
             "Objects not reset to initial poses"
         )
 
@@ -589,8 +598,8 @@ class TestStateAccessors:
 
         # 2. Test empty slice operations
         empty_indices = torch.tensor([], dtype=torch.long)
-        with pytest.raises(KeyError):
-            proxy[empty_indices, 0:3]
+        empty_states = proxy[empty_indices, 0:3]
+        assert empty_states.shape == (0, 3)
 
         # 3. Test registry operations on empty registry
         empty_registry = ObjectRegistry(device="cpu")

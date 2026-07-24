@@ -1619,6 +1619,12 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._pickup_button_default = os.environ.get("VISER_PICKUP_BUTTON_DEFAULT", "1").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self._drop_button_default = os.environ.get("VISER_DROP_BUTTON_DEFAULT", "0").lower() in (
             "1",
             "true",
@@ -1790,6 +1796,10 @@ class ViserLiveViewer:
         self._manual_root_yaw_slider = None
         self._manual_root_cmd_xy = None
         self._manual_root_cmd_yaw = None
+        self._pickup_button_cb = None
+        self._pickup_button_reset_button = None
+        self._pickup_button_status = None
+        self._pickup_button_gui_enabled = False
         self._drop_button_cb = None
         self._drop_button_reset_button = None
         self._drop_button_status = None
@@ -1845,6 +1855,22 @@ class ViserLiveViewer:
             "VISER_AUTO_FORWARD_AFTER_LIFT_DURATION_S",
             8.0,
         )
+        duration_steps_raw = os.environ.get("VISER_AUTO_FORWARD_AFTER_LIFT_DURATION_STEPS")
+        if duration_steps_raw is not None and duration_steps_raw.strip():
+            try:
+                self._auto_forward_after_lift_duration_steps = max(0, int(float(duration_steps_raw)))
+            except Exception:
+                self._auto_forward_after_lift_duration_steps = 0
+        else:
+            duration_hz = max(self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_DURATION_HZ", 50.0), 1.0)
+            self._auto_forward_after_lift_duration_steps = max(
+                0,
+                int(round(float(self._auto_forward_after_lift_duration_s) * duration_hz)),
+            )
+        self._auto_forward_after_lift_min_hand_contact_force = max(
+            0.0,
+            self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_MIN_HAND_CONTACT_FORCE", 0.0),
+        )
         self._auto_forward_after_lift_log_period_s = 1.0 / max(
             self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_LOG_HZ", 20.0),
             1.0,
@@ -1855,6 +1881,24 @@ class ViserLiveViewer:
                 "logs/runtime/viser_auto_forward_after_lift.jsonl",
             )
         ).expanduser()
+        self._auto_forward_after_lift_record_on_trigger = os.environ.get(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_RECORD_ON_TRIGGER",
+            "0",
+        ).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._auto_forward_after_lift_stop_recording_on_done = os.environ.get(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_STOP_RECORDING_ON_DONE",
+            "1",
+        ).lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
         self._auto_forward_after_lift_heading_hold_enabled = os.environ.get(
             "VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_HOLD",
             "0",
@@ -1887,9 +1931,25 @@ class ViserLiveViewer:
             "no",
             "off",
         )
+        self._auto_forward_after_lift_metric = os.environ.get(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_METRIC",
+            "rel_z_delta",
+        ).strip().lower()
+        if self._auto_forward_after_lift_metric not in {"rel_z_delta", "object_z_delta"}:
+            logger.warning(
+                "Unknown VISER_AUTO_FORWARD_AFTER_LIFT_METRIC='{}'; falling back to rel_z_delta.",
+                self._auto_forward_after_lift_metric,
+            )
+            self._auto_forward_after_lift_metric = "rel_z_delta"
+        self._auto_forward_after_lift_min_root_z = self._float_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_MIN_ROOT_Z",
+            0.0,
+        )
         self._auto_forward_after_lift_state = "waiting"
         self._auto_forward_after_lift_baseline_rel_z: float | None = None
+        self._auto_forward_after_lift_baseline_object_z: float | None = None
         self._auto_forward_after_lift_ready_count = 0
+        self._auto_forward_after_lift_active_steps = 0
         self._auto_forward_after_lift_trigger_time: float | None = None
         self._auto_forward_after_lift_last_log_time = 0.0
         self._auto_forward_after_lift_log_handle = None
@@ -2999,6 +3059,7 @@ class ViserLiveViewer:
         self._pending_control_sync = False
         self._update_manual_root_command()
         self._update_auto_forward_after_lift()
+        self._update_manual_pickup_button()
         self._update_manual_drop_button()
         self._update_manual_object_reset_override()
         if self._reset_visible_requested:
@@ -3127,6 +3188,7 @@ class ViserLiveViewer:
             manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
             if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
                 manual_yaw.zero_()
+        self._reset_manual_pickup_button(reset_gui_toggle=clear_gui_toggles)
         self._clear_manual_drop_button(clear_gui_toggle=clear_gui_toggles)
         self._hide_manual_command_arrow()
         self._update_manual_root_status()
@@ -3146,6 +3208,36 @@ class ViserLiveViewer:
                     cb.value = False
                 except Exception:
                     pass
+
+    def _set_manual_pickup_button(self, value: bool) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        device = self._env.device
+        pickup_value = 1.0 if value else 0.0
+        motion_cmd.manual_pickup_button_override_enabled = bool(self._pickup_button_gui_enabled)
+        motion_cmd.manual_pickup_button = torch.full(
+            (self._env.num_envs, 1),
+            pickup_value,
+            device=device,
+            dtype=torch.float32,
+        )
+
+    def _reset_manual_pickup_button(self, *, reset_gui_toggle: bool) -> None:
+        """Restore the training convention: pickup=1 before t1."""
+
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None:
+            manual_pickup_button = getattr(motion_cmd, "manual_pickup_button", None)
+            if isinstance(manual_pickup_button, torch.Tensor) and manual_pickup_button.numel() > 0:
+                manual_pickup_button.fill_(1.0)
+            motion_cmd.manual_pickup_button_override_enabled = bool(self._pickup_button_gui_enabled)
+        if reset_gui_toggle and self._pickup_button_cb is not None:
+            try:
+                self._pickup_button_cb.value = True
+            except Exception:
+                pass
+        self._update_pickup_button_status()
 
     def _set_manual_drop_button(self, value: bool) -> None:
         motion_cmd = self._get_motion_command()
@@ -3687,6 +3779,38 @@ class ViserLiveViewer:
             f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={dist_xy:.2f}`"
         )
 
+    def _update_pickup_button_status(self) -> None:
+        if self._pickup_button_status is None:
+            return
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._pickup_button_status.content = "pickup_button: `n/a`"
+            return
+        manual_pickup_button = getattr(motion_cmd, "manual_pickup_button", None)
+        if isinstance(manual_pickup_button, torch.Tensor) and manual_pickup_button.numel() > 0:
+            try:
+                value = float(manual_pickup_button[self._env_id].reshape(-1)[0].item())
+            except Exception:
+                value = 1.0
+        else:
+            value = 1.0 if self._pickup_button_cb is None or bool(self._pickup_button_cb.value) else 0.0
+        override = bool(getattr(motion_cmd, "manual_pickup_button_override_enabled", False))
+        self._pickup_button_status.content = f"pickup_button: `{value:.0f}`\n\noverride: `{override}`"
+
+    def _update_manual_pickup_button(self) -> None:
+        if not self._pickup_button_gui_enabled:
+            motion_cmd = self._get_motion_command()
+            if motion_cmd is not None:
+                motion_cmd.manual_pickup_button_override_enabled = False
+            return
+        value = (
+            bool(self._pickup_button_cb.value)
+            if self._pickup_button_cb is not None
+            else bool(self._pickup_button_default)
+        )
+        self._set_manual_pickup_button(value)
+        self._update_pickup_button_status()
+
     def _update_drop_button_status(self) -> None:
         if self._drop_button_status is None:
             return
@@ -3766,6 +3890,31 @@ class ViserLiveViewer:
             root_yaw_rate_est = float(yaw_delta / time_delta)
         self._auto_forward_after_lift_last_snapshot_wall_time = wall_time
         self._auto_forward_after_lift_last_snapshot_yaw = root_yaw
+        wrist_contact = self._auto_forward_after_lift_wrist_object_contact_snapshot()
+        hand_contact_force = 0.0
+        for key in (
+            "left_wrist_object_force",
+            "right_wrist_object_force",
+            "left_wrist_roll_object_force",
+            "right_wrist_roll_object_force",
+            "left_wrist_pitch_object_force",
+            "right_wrist_pitch_object_force",
+            "left_hand_object_force",
+            "right_hand_object_force",
+            "left_elbow_object_force",
+            "right_elbow_object_force",
+            "left_arm_object_force",
+            "right_arm_object_force",
+            "torso_object_force",
+            "left_rubber_hand_object_force",
+            "right_rubber_hand_object_force",
+        ):
+            value = wrist_contact.get(key)
+            if isinstance(value, (int, float)):
+                hand_contact_force = max(hand_contact_force, float(value))
+        hand_contact_ok = bool(
+            hand_contact_force >= float(self._auto_forward_after_lift_min_hand_contact_force)
+        )
 
         return {
             "wall_time": wall_time,
@@ -3781,6 +3930,20 @@ class ViserLiveViewer:
                 if self._auto_forward_after_lift_baseline_rel_z is None
                 else float(rel_z - self._auto_forward_after_lift_baseline_rel_z)
             ),
+            "object_z_delta": (
+                None
+                if self._auto_forward_after_lift_baseline_object_z is None
+                else float(object_pos[2] - self._auto_forward_after_lift_baseline_object_z)
+            ),
+            "lift_metric": self._auto_forward_after_lift_metric,
+            "lift_metric_value": None,
+            "min_root_z": float(self._auto_forward_after_lift_min_root_z),
+            "root_z_ok": bool(float(root_pos[2]) >= float(self._auto_forward_after_lift_min_root_z)),
+            "min_hand_contact_force": float(self._auto_forward_after_lift_min_hand_contact_force),
+            "hand_contact_force": float(hand_contact_force),
+            "hand_contact_ok": hand_contact_ok,
+            "active_steps": int(self._auto_forward_after_lift_active_steps),
+            "duration_steps": int(self._auto_forward_after_lift_duration_steps),
             "root_lin_vel_w": root_lin_vel_w,
             "root_ang_vel_w": root_ang_vel_w,
             "robot_root_state": robot_root_state,
@@ -3811,7 +3974,163 @@ class ViserLiveViewer:
                 self._auto_forward_after_lift_heading_xy_compensation_enabled
             ),
             "motion_timestep": motion_timestep,
+            **wrist_contact,
         }
+
+    def _auto_forward_after_lift_wrist_object_contact_snapshot(self) -> dict[str, Any]:
+        body_names_by_region = {
+            "left_elbow": ["left_elbow_link"],
+            "right_elbow": ["right_elbow_link"],
+            "left_wrist_roll": ["left_wrist_roll_link"],
+            "right_wrist_roll": ["right_wrist_roll_link"],
+            "left_wrist_pitch": ["left_wrist_pitch_link"],
+            "right_wrist_pitch": ["right_wrist_pitch_link"],
+            "left_wrist_yaw": ["left_wrist_yaw_link"],
+            "right_wrist_yaw": ["right_wrist_yaw_link"],
+            "left_rubber_hand": ["left_rubber_hand"],
+            "right_rubber_hand": ["right_rubber_hand"],
+            "torso": ["torso_link"],
+            "left_hand": [
+                "left_wrist_roll_link",
+                "left_wrist_pitch_link",
+                "left_wrist_yaw_link",
+                "left_rubber_hand",
+            ],
+            "right_hand": [
+                "right_wrist_roll_link",
+                "right_wrist_pitch_link",
+                "right_wrist_yaw_link",
+                "right_rubber_hand",
+            ],
+            "left_arm": [
+                "left_elbow_link",
+                "left_wrist_roll_link",
+                "left_wrist_pitch_link",
+                "left_wrist_yaw_link",
+                "left_rubber_hand",
+            ],
+            "right_arm": [
+                "right_elbow_link",
+                "right_wrist_roll_link",
+                "right_wrist_pitch_link",
+                "right_wrist_yaw_link",
+                "right_rubber_hand",
+            ],
+        }
+        out: dict[str, Any] = {
+            "wrist_object_contact_source": None,
+            "left_wrist_object_force": None,
+            "right_wrist_object_force": None,
+            "left_wrist_yaw_object_force": None,
+            "right_wrist_yaw_object_force": None,
+            "left_wrist_roll_object_force": None,
+            "right_wrist_roll_object_force": None,
+            "left_wrist_pitch_object_force": None,
+            "right_wrist_pitch_object_force": None,
+            "left_elbow_object_force": None,
+            "right_elbow_object_force": None,
+            "left_rubber_hand_object_force": None,
+            "right_rubber_hand_object_force": None,
+            "left_hand_object_force": None,
+            "right_hand_object_force": None,
+            "left_arm_object_force": None,
+            "right_arm_object_force": None,
+            "torso_object_force": None,
+            "right_minus_left_wrist_object_force": None,
+            "right_wrist_object_force_share": None,
+            "right_minus_left_hand_object_force": None,
+            "right_hand_object_force_share": None,
+            "wrist_object_contact_error": None,
+        }
+
+        source = "simulator"
+        getter = getattr(getattr(self._env, "simulator", None), "get_object_contact_force_history", None)
+        if getter is None:
+            source = "motion_command"
+            motion_cmd = self._get_motion_command()
+            getter = getattr(motion_cmd, "get_body_object_contact_force_history", None) if motion_cmd is not None else None
+        if getter is None:
+            out["wrist_object_contact_error"] = "object contact force getter unavailable"
+            return out
+
+        values: dict[str, float] = {}
+        try:
+            for region_name, body_names in body_names_by_region.items():
+                force_history = getter(body_names)
+                if not isinstance(force_history, torch.Tensor):
+                    force_history = torch.as_tensor(force_history)
+                if force_history.ndim != 4:
+                    raise ValueError(
+                        f"expected object contact force history shape [env, history, body, xyz], got {tuple(force_history.shape)}"
+                    )
+                if self._env_id >= int(force_history.shape[0]):
+                    raise IndexError(
+                        f"env_id {self._env_id} outside object contact force history shape {tuple(force_history.shape)}"
+                    )
+                current_force = force_history[self._env_id, 0].detach().float()
+                if current_force.numel() == 0:
+                    values[region_name] = 0.0
+                else:
+                    values[region_name] = float(torch.linalg.norm(current_force, dim=-1).max().item())
+        except Exception as exc:
+            out["wrist_object_contact_source"] = source
+            out["wrist_object_contact_error"] = str(exc)
+            return out
+
+        left_wrist_yaw_force = float(values.get("left_wrist_yaw", 0.0))
+        right_wrist_yaw_force = float(values.get("right_wrist_yaw", 0.0))
+        left_wrist_roll_force = float(values.get("left_wrist_roll", 0.0))
+        right_wrist_roll_force = float(values.get("right_wrist_roll", 0.0))
+        left_wrist_pitch_force = float(values.get("left_wrist_pitch", 0.0))
+        right_wrist_pitch_force = float(values.get("right_wrist_pitch", 0.0))
+        left_elbow_force = float(values.get("left_elbow", 0.0))
+        right_elbow_force = float(values.get("right_elbow", 0.0))
+        left_rubber_hand_force = float(values.get("left_rubber_hand", 0.0))
+        right_rubber_hand_force = float(values.get("right_rubber_hand", 0.0))
+        torso_force = float(values.get("torso", 0.0))
+        left_hand_force = float(
+            values.get(
+                "left_hand",
+                max(left_wrist_roll_force, left_wrist_pitch_force, left_wrist_yaw_force, left_rubber_hand_force),
+            )
+        )
+        right_hand_force = float(
+            values.get(
+                "right_hand",
+                max(right_wrist_roll_force, right_wrist_pitch_force, right_wrist_yaw_force, right_rubber_hand_force),
+            )
+        )
+        left_arm_force = float(values.get("left_arm", max(left_elbow_force, left_hand_force)))
+        right_arm_force = float(values.get("right_arm", max(right_elbow_force, right_hand_force)))
+        wrist_denom = left_wrist_yaw_force + right_wrist_yaw_force
+        hand_denom = left_hand_force + right_hand_force
+        out.update(
+            {
+                "wrist_object_contact_source": source,
+                "left_wrist_object_force": left_wrist_yaw_force,
+                "right_wrist_object_force": right_wrist_yaw_force,
+                "left_wrist_yaw_object_force": left_wrist_yaw_force,
+                "right_wrist_yaw_object_force": right_wrist_yaw_force,
+                "left_wrist_roll_object_force": left_wrist_roll_force,
+                "right_wrist_roll_object_force": right_wrist_roll_force,
+                "left_wrist_pitch_object_force": left_wrist_pitch_force,
+                "right_wrist_pitch_object_force": right_wrist_pitch_force,
+                "left_elbow_object_force": left_elbow_force,
+                "right_elbow_object_force": right_elbow_force,
+                "left_rubber_hand_object_force": left_rubber_hand_force,
+                "right_rubber_hand_object_force": right_rubber_hand_force,
+                "left_hand_object_force": left_hand_force,
+                "right_hand_object_force": right_hand_force,
+                "left_arm_object_force": left_arm_force,
+                "right_arm_object_force": right_arm_force,
+                "torso_object_force": torso_force,
+                "right_minus_left_wrist_object_force": right_wrist_yaw_force - left_wrist_yaw_force,
+                "right_wrist_object_force_share": None if wrist_denom <= 1.0e-9 else right_wrist_yaw_force / wrist_denom,
+                "right_minus_left_hand_object_force": right_hand_force - left_hand_force,
+                "right_hand_object_force_share": None if hand_denom <= 1.0e-9 else right_hand_force / hand_denom,
+            }
+        )
+        return out
 
     def _write_auto_forward_after_lift_log(self, snapshot: dict[str, Any], *, force: bool = False) -> None:
         now = time.time()
@@ -3830,6 +4149,47 @@ class ViserLiveViewer:
         except Exception as exc:
             if not self._auto_forward_after_lift_logged_start:
                 logger.warning("Failed to write auto-forward-after-lift log: {}", exc)
+
+    def _restart_video_recording_for_auto_forward_after_lift(self) -> dict[str, Any]:
+        recorder = getattr(getattr(self._env, "simulator", None), "video_recorder", None)
+        if recorder is None:
+            return {"video_recording_event": "unavailable", "video_recording_error": "video_recorder missing"}
+        if not bool(getattr(recorder, "enabled", False)):
+            return {"video_recording_event": "unavailable", "video_recording_error": "video_recorder disabled"}
+
+        out: dict[str, Any] = {
+            "video_recording_event": "restart_on_trigger",
+            "video_recording_was_active": bool(getattr(recorder, "is_recording", False)),
+        }
+        try:
+            if bool(getattr(recorder, "is_recording", False)):
+                recorder.stop_recording()
+            episode_id = int(time.time() * 1000) % 2_000_000_000
+            recorder.start_recording(episode_id=episode_id)
+            out["video_recording_episode_id"] = int(episode_id)
+            out["video_recording_active"] = bool(getattr(recorder, "is_recording", False))
+        except Exception as exc:
+            out["video_recording_error"] = str(exc)
+            logger.warning("Failed to restart video recording after lift trigger: {}", exc)
+        return out
+
+    def _stop_video_recording_for_auto_forward_after_lift(self) -> dict[str, Any]:
+        recorder = getattr(getattr(self._env, "simulator", None), "video_recorder", None)
+        if recorder is None:
+            return {"video_recording_event": "unavailable", "video_recording_error": "video_recorder missing"}
+
+        out: dict[str, Any] = {
+            "video_recording_event": "stop_on_duration_complete",
+            "video_recording_was_active": bool(getattr(recorder, "is_recording", False)),
+        }
+        try:
+            if bool(getattr(recorder, "is_recording", False)):
+                recorder.stop_recording()
+            out["video_recording_active"] = bool(getattr(recorder, "is_recording", False))
+        except Exception as exc:
+            out["video_recording_error"] = str(exc)
+            logger.warning("Failed to stop video recording after auto-forward duration: {}", exc)
+        return out
 
     def _apply_auto_forward_after_lift_command(self, command: list[float]) -> bool:
         motion_cmd = self._get_motion_command()
@@ -3936,11 +4296,16 @@ class ViserLiveViewer:
         if not self._auto_forward_after_lift_logged_start:
             logger.info(
                 "Auto-forward-after-lift enabled: command={} rel_z_delta_threshold={:.3f} consecutive_steps={} "
-                "duration_s={:.2f} heading_hold={} kp={:.3f} kd={:.3f} yaw_limit={:.3f} log_path={}",
+                "duration_s={:.2f} duration_steps={} metric={} min_root_z={:.3f} min_hand_contact_force={:.3f} "
+                "heading_hold={} kp={:.3f} kd={:.3f} yaw_limit={:.3f} log_path={}",
                 self._auto_forward_after_lift_command,
                 self._auto_forward_after_lift_rel_z_delta,
                 self._auto_forward_after_lift_consecutive_steps,
                 self._auto_forward_after_lift_duration_s,
+                self._auto_forward_after_lift_duration_steps,
+                self._auto_forward_after_lift_metric,
+                self._auto_forward_after_lift_min_root_z,
+                self._auto_forward_after_lift_min_hand_contact_force,
                 self._auto_forward_after_lift_heading_hold_enabled,
                 self._auto_forward_after_lift_heading_kp,
                 self._auto_forward_after_lift_heading_kd,
@@ -3950,35 +4315,67 @@ class ViserLiveViewer:
             self._auto_forward_after_lift_logged_start = True
 
         rel_z = float(snapshot["object_rel_z"])
+        object_z = float(snapshot["object_pos_w"][2])
+        root_z = float(snapshot["root_pos_w"][2])
         if self._auto_forward_after_lift_baseline_rel_z is None:
             self._auto_forward_after_lift_baseline_rel_z = rel_z
+            self._auto_forward_after_lift_baseline_object_z = object_z
             snapshot["event"] = "baseline"
             snapshot["object_rel_z_delta"] = 0.0
+            snapshot["object_z_delta"] = 0.0
+            snapshot["lift_metric_value"] = 0.0
+            snapshot["root_z_ok"] = bool(root_z >= float(self._auto_forward_after_lift_min_root_z))
             self._write_auto_forward_after_lift_log(snapshot, force=True)
             return
 
         rel_z_delta = float(rel_z - self._auto_forward_after_lift_baseline_rel_z)
         snapshot["object_rel_z_delta"] = rel_z_delta
+        object_z_delta = (
+            0.0
+            if self._auto_forward_after_lift_baseline_object_z is None
+            else float(object_z - self._auto_forward_after_lift_baseline_object_z)
+        )
+        snapshot["object_z_delta"] = object_z_delta
+        metric_value = object_z_delta if self._auto_forward_after_lift_metric == "object_z_delta" else rel_z_delta
+        root_z_ok = bool(root_z >= float(self._auto_forward_after_lift_min_root_z))
+        hand_contact_force = float(snapshot.get("hand_contact_force") or 0.0)
+        hand_contact_ok = bool(
+            hand_contact_force >= float(self._auto_forward_after_lift_min_hand_contact_force)
+        )
+        snapshot["lift_metric"] = self._auto_forward_after_lift_metric
+        snapshot["lift_metric_value"] = float(metric_value)
+        snapshot["root_z_ok"] = root_z_ok
+        snapshot["hand_contact_force"] = hand_contact_force
+        snapshot["hand_contact_ok"] = hand_contact_ok
+        snapshot["active_steps"] = int(self._auto_forward_after_lift_active_steps)
+        snapshot["duration_steps"] = int(self._auto_forward_after_lift_duration_steps)
 
         if self._auto_forward_after_lift_state == "waiting":
-            if rel_z_delta >= self._auto_forward_after_lift_rel_z_delta:
+            if root_z_ok and hand_contact_ok and metric_value >= self._auto_forward_after_lift_rel_z_delta:
                 self._auto_forward_after_lift_ready_count += 1
             else:
                 self._auto_forward_after_lift_ready_count = 0
 
             if self._auto_forward_after_lift_ready_count >= self._auto_forward_after_lift_consecutive_steps:
                 self._auto_forward_after_lift_state = "active"
+                self._auto_forward_after_lift_active_steps = 0
                 self._auto_forward_after_lift_trigger_time = time.time()
                 command = self._auto_forward_after_lift_command_for_snapshot(snapshot)
                 command_applied = self._apply_auto_forward_after_lift_command(command)
                 snapshot["state"] = self._auto_forward_after_lift_state
                 snapshot["event"] = "trigger"
+                snapshot["active_steps"] = int(self._auto_forward_after_lift_active_steps)
                 snapshot["command_applied"] = command_applied
                 snapshot["applied_command"] = [float(v) for v in command]
                 self._annotate_auto_forward_after_lift_command(snapshot, command)
+                if self._auto_forward_after_lift_record_on_trigger:
+                    snapshot.update(self._restart_video_recording_for_auto_forward_after_lift())
                 logger.info(
-                    "Auto-forward-after-lift triggered: rel_z_delta={:.3f}, command={} configured={}",
+                    "Auto-forward-after-lift triggered: metric={} value={:.3f} rel_z_delta={:.3f} object_z_delta={:.3f}, command={} configured={}",
+                    self._auto_forward_after_lift_metric,
+                    metric_value,
                     rel_z_delta,
+                    object_z_delta,
                     command,
                     self._auto_forward_after_lift_command,
                 )
@@ -3986,15 +4383,16 @@ class ViserLiveViewer:
                 return
 
         elif self._auto_forward_after_lift_state == "active":
+            self._auto_forward_after_lift_active_steps += 1
+            snapshot["active_steps"] = int(self._auto_forward_after_lift_active_steps)
             command = self._auto_forward_after_lift_command_for_snapshot(snapshot)
             command_applied = self._apply_auto_forward_after_lift_command(command)
             snapshot["command_applied"] = command_applied
             snapshot["applied_command"] = [float(v) for v in command]
             self._annotate_auto_forward_after_lift_command(snapshot, command)
             if (
-                self._auto_forward_after_lift_duration_s > 0.0
-                and self._auto_forward_after_lift_trigger_time is not None
-                and time.time() - self._auto_forward_after_lift_trigger_time >= self._auto_forward_after_lift_duration_s
+                self._auto_forward_after_lift_duration_steps > 0
+                and self._auto_forward_after_lift_active_steps >= self._auto_forward_after_lift_duration_steps
             ):
                 self._auto_forward_after_lift_state = "done"
                 command_applied = self._apply_auto_forward_after_lift_command([0.0, 0.0, 0.0])
@@ -4004,6 +4402,8 @@ class ViserLiveViewer:
                 snapshot["applied_command"] = [0.0, 0.0, 0.0]
                 self._auto_forward_after_lift_effective_command = [0.0, 0.0, 0.0]
                 snapshot["effective_command"] = [0.0, 0.0, 0.0]
+                if self._auto_forward_after_lift_record_on_trigger and self._auto_forward_after_lift_stop_recording_on_done:
+                    snapshot.update(self._stop_video_recording_for_auto_forward_after_lift())
                 logger.info("Auto-forward-after-lift duration complete; zeroed manual root command.")
                 self._write_auto_forward_after_lift_log(snapshot, force=True)
                 return
@@ -4880,6 +5280,8 @@ class ViserLiveViewer:
             "VISER_ENABLE_MANUAL_ROOT_GUI",
             manual_gui_enabled and not self._distill_minimal_ui,
         )
+        pickup_button_gui_enabled = _gui_section_enabled("VISER_ENABLE_PICKUP_BUTTON_GUI", False)
+        self._pickup_button_gui_enabled = bool(pickup_button_gui_enabled)
         drop_button_gui_enabled = _gui_section_enabled("VISER_ENABLE_DROP_BUTTON_GUI", False)
         self._drop_button_gui_enabled = bool(drop_button_gui_enabled)
         contact_force_gui_enabled = _gui_section_enabled(
@@ -4993,6 +5395,33 @@ class ViserLiveViewer:
                     def _(_evt) -> None:
                         self.queue_pending_controls()
                 self._sync_manual_root_command_from_robot()
+
+        if pickup_button_gui_enabled:
+            with self._server.gui.add_folder("Pickup Control", expand_by_default=True):
+                self._pickup_button_cb = self._server.gui.add_checkbox(
+                    "Pickup Button",
+                    initial_value=bool(self._pickup_button_default),
+                    hint="Explicit actor_obs_pickup_button: 1 before t1, 0 from t1 onward.",
+                )
+                self._pickup_button_reset_button = self._server.gui.add_button(
+                    "Reset Pickup Button",
+                    hint="Set actor_obs_pickup_button back to its pre-t1 value 1.",
+                )
+                self._pickup_button_status = self._server.gui.add_markdown(
+                    "pickup_button: `1`\n\noverride: `False`"
+                )
+
+                @self._pickup_button_cb.on_update
+                def _(_evt) -> None:
+                    self.queue_pending_controls()
+
+                @self._pickup_button_reset_button.on_click
+                def _(_evt) -> None:
+                    if self._pickup_button_cb is not None:
+                        self._pickup_button_cb.value = True
+                    self.queue_pending_controls()
+
+                self._update_manual_pickup_button()
 
         if drop_button_gui_enabled:
             with self._server.gui.add_folder("Drop Control", expand_by_default=True):
@@ -5690,6 +6119,8 @@ class ViserLiveViewer:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
 
         if motion_cmd is not None:
+            if self._pickup_button_gui_enabled:
+                self._reset_manual_pickup_button(reset_gui_toggle=True)
             if self._drop_button_gui_enabled:
                 self._clear_manual_drop_button(clear_gui_toggle=True)
             if manual_enabled:
@@ -5749,6 +6180,8 @@ class ViserLiveViewer:
         manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False))
         if self._manual_control_cb is not None:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
+        if self._pickup_button_gui_enabled:
+            self._reset_manual_pickup_button(reset_gui_toggle=True)
         if self._drop_button_gui_enabled:
             self._clear_manual_drop_button(clear_gui_toggle=True)
         if manual_enabled:
@@ -5891,9 +6324,9 @@ class ViserLiveViewer:
             sim.set_actor_root_state_tensor(env_ids, sim.all_root_states)
 
         if hasattr(sim, "set_dof_state_tensor_robots"):
-            sim.set_dof_state_tensor_robots(env_ids, sim.dof_state)
+            sim.set_dof_state_tensor_robots(env_ids)
         else:
-            sim.set_dof_state_tensor(env_ids, sim.dof_state)
+            sim.set_dof_state_tensor(env_ids)
 
         if motion_cmd.motion.has_object:
             obj_pos = motion_cmd.object_pos_w[env_ids].clone()

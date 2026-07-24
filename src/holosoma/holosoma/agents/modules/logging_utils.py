@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import math
 import os
 import pathlib
 import statistics
+import tempfile
 import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Any, Generator, TypedDict
 
-import torch
 import wandb
 from loguru import logger
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from torch.utils.tensorboard import SummaryWriter
 
 from holosoma.utils.average_meters import TensorAverageMeterDict
+from holosoma.utils.safe_torch_import import (
+    TensorboardSummaryWriter as SummaryWriter,
+    torch,
+)
 
 console = Console()
 
@@ -124,6 +128,14 @@ class TrainLogDict(TypedDict):
 
 
 class LoggingHelper:
+    _WANDB_METRIC_SUMMARIES = {
+        "Eval/fixed_bc_mu_mse": "min",
+        "Eval/fixed_bc_final_mu_mse": "last",
+        "Eval/fixed_bc_guard_reference_min_mu_mse": "min",
+        "Eval/fixed_bc_guard_effective_threshold_mu_mse": "last",
+        "Eval/fixed_bc_guard_consecutive_exceedances": "last",
+        "Eval/fixed_bc_guard_last_mu_mse": "last",
+    }
     _WANDB_HIDDEN_METRIC_EXACT = {
         "Train/num_samples",
         "Train/command_goal_training_iteration",
@@ -138,13 +150,12 @@ class LoggingHelper:
         "Train/teacher_action_mix_ratio_end_iteration",
         "Loss/teacher_bc_mask_fraction",
         "Eval/fixed_bc_num_samples",
+        "Eval/fixed_bc_terminal_observation",
+        "Eval/fixed_bc_scheduled_evaluation",
+        "Eval/fixed_bc_guard_applied",
     }
-    _WANDB_HIDDEN_METRIC_PREFIXES = (
-        "Perf/",
-    )
-    _WANDB_HIDDEN_METRIC_SUFFIXES = (
-        "/time",
-    )
+    _WANDB_HIDDEN_METRIC_PREFIXES = ("Perf/",)
+    _WANDB_HIDDEN_METRIC_SUFFIXES = ("/time",)
 
     def __init__(
         self,
@@ -204,6 +215,24 @@ class LoggingHelper:
         self.raw_ep_infos: list[dict[str, Any]] = []
         self.rewbuffer: deque[float] = deque(maxlen=100)
         self.lenbuffer: deque[float] = deque(maxlen=100)
+        self.rewweightbuffer: deque[float] = deque(maxlen=100)
+        self.lenweightbuffer: deque[float] = deque(maxlen=100)
+        # Completed episodes are tracked separately so distributed logging can
+        # transfer each episode exactly once.  Gathering the rolling deques
+        # themselves would duplicate old episodes at every iteration.
+        self._completed_rewards_since_sync: list[float] = []
+        self._completed_lengths_since_sync: list[float] = []
+        # A distributed iteration can complete far more than 100 episodes.  If
+        # rank payloads are appended to ``rewbuffer`` in rank order, deque
+        # truncation keeps only the highest ranks and is badly biased when a
+        # rank owns a fixed motion shard.  Store one exact, globally weighted
+        # aggregate per synchronization instead.  The window is measured in
+        # objective-weighted episode mass and trims the oldest aggregate
+        # proportionally when it crosses the legacy 100-episode horizon.
+        self._distributed_episode_batches: deque[tuple[float, float, float]] = deque()
+        self._distributed_episode_window_size = 100.0
+        self.distributed_loss_weight_sum = 1.0
+        self.distributed_effective_episode_count = 0.0
         self.cur_reward_sum: torch.Tensor = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         self.cur_episode_length: torch.Tensor = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         self.episode_env_tensors: TensorAverageMeterDict = TensorAverageMeterDict()
@@ -235,24 +264,382 @@ class LoggingHelper:
         infos : dict[str, Any]
             Additional info from the environment
         """
-        if not self.is_main_process:
-            return
-        self.ep_infos.append(infos["episode"])
+        episode_info = infos.get("episode", {})
+        if episode_info:
+            self.ep_infos.append(episode_info)
         # Also process raw episode data if it exists
-        if "raw_episode" in infos:
-            self.raw_ep_infos.append(infos["raw_episode"])
+        raw_episode_info = infos.get("raw_episode", {})
+        if raw_episode_info:
+            self.raw_ep_infos.append(raw_episode_info)
         self.cur_reward_sum += rewards
         self.cur_episode_length += 1
 
-        new_ids = (dones > 0).nonzero(as_tuple=False)
+        # BaseTask already materializes the transition-local reset IDs while
+        # selecting environment resets.  Reuse them to avoid a second CUDA
+        # ``nonzero`` synchronization; legacy/fake environments that do not
+        # publish the contract retain the historical dones-based fallback.
+        reset_env_ids = infos.get("reset_env_ids")
+        if isinstance(reset_env_ids, torch.Tensor):
+            new_ids = reset_env_ids.to(
+                device=self.cur_reward_sum.device,
+                dtype=torch.long,
+            ).reshape(-1, 1)
+        else:
+            new_ids = (dones > 0).nonzero(as_tuple=False)
         if len(new_ids) > 0:
-            self.rewbuffer.extend(self.cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-            self.lenbuffer.extend(self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+            completed_rewards = self.cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
+            completed_lengths = self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist()
+            self.rewbuffer.extend(completed_rewards)
+            self.lenbuffer.extend(completed_lengths)
+            self.rewweightbuffer.extend([1.0] * len(completed_rewards))
+            self.lenweightbuffer.extend([1.0] * len(completed_lengths))
+            self._completed_rewards_since_sync.extend(completed_rewards)
+            self._completed_lengths_since_sync.extend(completed_lengths)
             self.cur_reward_sum[new_ids] = 0
             self.cur_episode_length[new_ids] = 0
 
         # Update episode environment tensors
         self.episode_env_tensors.add(infos["to_log"])
+
+    @staticmethod
+    def _prepare_tensor_dict_summary_entries(
+        items: list[dict[str, Any]],
+    ) -> list[tuple[str, torch.Tensor, int]]:
+        """Build per-value device sums in the historical traversal order."""
+
+        entries: list[tuple[str, torch.Tensor, int]] = []
+        for item in items:
+            for key, raw_value in item.items():
+                value = raw_value.detach() if isinstance(raw_value, torch.Tensor) else torch.as_tensor(raw_value)
+                value = value.to(dtype=torch.float64).reshape(-1)
+                if value.numel() == 0:
+                    continue
+                entries.append((str(key), value.sum(), int(value.numel())))
+        return entries
+
+    def _prepare_env_summary_entries(self) -> list[tuple[str, torch.Tensor, int]]:
+        """Build environment-meter sums in the historical key/step order."""
+
+        entries: list[tuple[str, torch.Tensor, int]] = []
+        for key, meter in self.episode_env_tensors.data.items():
+            for raw_value in meter.tensors:
+                value = raw_value.detach().to(dtype=torch.float64).reshape(-1)
+                if value.numel() == 0:
+                    continue
+                entries.append((str(key), value.sum(), int(value.numel())))
+        return entries
+
+    @staticmethod
+    def _summarize_prepared_tensor_groups(
+        groups: dict[str, list[tuple[str, torch.Tensor, int]]],
+    ) -> dict[str, dict[str, tuple[float, int]]]:
+        """Bulk-copy scalar sums once per device, then merge on the host.
+
+        Each input entry is already ordered exactly like the former nested
+        summary loops.  Device transfers are batched across all metric groups,
+        while the final Python additions still happen entry-by-entry in that
+        original order.  This preserves the existing floating-point rounding,
+        key insertion order, and element-count semantics.
+        """
+
+        host_values: dict[str, list[float | None]] = {
+            group_name: [None] * len(entries)
+            for group_name, entries in groups.items()
+        }
+        by_device: dict[torch.device, list[tuple[str, int, torch.Tensor]]] = {}
+        for group_name, entries in groups.items():
+            for entry_index, (_, value_sum, _) in enumerate(entries):
+                by_device.setdefault(value_sum.device, []).append(
+                    (group_name, entry_index, value_sum)
+                )
+
+        for device_entries in by_device.values():
+            copied_values = torch.stack(
+                [value_sum for _, _, value_sum in device_entries]
+            ).cpu().tolist()
+            for (group_name, entry_index, _), copied_value in zip(
+                device_entries,
+                copied_values,
+                strict=True,
+            ):
+                host_values[group_name][entry_index] = float(copied_value)
+
+        summaries: dict[str, dict[str, tuple[float, int]]] = {}
+        for group_name, entries in groups.items():
+            summary: dict[str, tuple[float, int]] = {}
+            for (key, _, value_count), value_sum in zip(
+                entries,
+                host_values[group_name],
+                strict=True,
+            ):
+                if value_sum is None:
+                    raise RuntimeError(
+                        f"Metric sum for group {group_name!r}, key {key!r} was not copied to the host."
+                    )
+                old_sum, old_count = summary.get(key, (0.0, 0))
+                summary[key] = (
+                    old_sum + value_sum,
+                    old_count + value_count,
+                )
+            summaries[group_name] = summary
+        return summaries
+
+    @staticmethod
+    def _summarize_tensor_dicts(items: list[dict[str, Any]]) -> dict[str, tuple[float, int]]:
+        """Return per-key sums/counts without retaining rank-sized tensors."""
+
+        groups = {
+            "summary": LoggingHelper._prepare_tensor_dict_summary_entries(items),
+        }
+        return LoggingHelper._summarize_prepared_tensor_groups(groups)["summary"]
+
+    def _summarize_env_tensors(self) -> dict[str, tuple[float, int]]:
+        groups = {"summary": self._prepare_env_summary_entries()}
+        return self._summarize_prepared_tensor_groups(groups)["summary"]
+
+    def _summarize_iteration_tensors(self) -> dict[str, dict[str, tuple[float, int]]]:
+        """Summarize all iteration tensor metrics with one copy per device."""
+
+        return self._summarize_prepared_tensor_groups(
+            {
+                "episode": self._prepare_tensor_dict_summary_entries(self.ep_infos),
+                "raw_episode": self._prepare_tensor_dict_summary_entries(self.raw_ep_infos),
+                "env": self._prepare_env_summary_entries(),
+            }
+        )
+
+    @staticmethod
+    def _merge_summaries(
+        payloads: list[dict[str, Any]],
+        field: str,
+    ) -> dict[str, float]:
+        totals: dict[str, tuple[float, float]] = {}
+        for payload in payloads:
+            rank_weight = float(payload["loss_weight"])
+            if rank_weight <= 0.0:
+                continue
+            for key, (value_sum, value_count) in payload[field].items():
+                old_sum, old_count = totals.get(key, (0.0, 0.0))
+                totals[key] = (
+                    old_sum + rank_weight * float(value_sum),
+                    old_count + rank_weight * int(value_count),
+                )
+        return {key: value_sum / value_count for key, (value_sum, value_count) in totals.items() if value_count > 0}
+
+    @staticmethod
+    def _weighted_buffer_mean(values: deque[float], weights: deque[float]) -> float:
+        if values and not weights:
+            # Backward-compatible for callers/tests that seed the public
+            # rolling value deques directly.
+            return statistics.mean(values)
+        if len(values) != len(weights):
+            raise RuntimeError("Distributed episode value/weight buffers are misaligned.")
+        denominator = sum(weights)
+        if denominator <= 0.0:
+            return statistics.mean(values)
+        return sum(value * weight for value, weight in zip(values, weights, strict=True)) / denominator
+
+    def _append_distributed_episode_batch(self, payloads: list[dict[str, Any]]) -> None:
+        reward_sum = 0.0
+        length_sum = 0.0
+        weighted_count = 0.0
+        for payload in payloads:
+            rank_weight = float(payload["loss_weight"])
+            episode_count = int(payload["completed_episode_count"])
+            if episode_count < 0:
+                raise RuntimeError("Distributed completed-episode count cannot be negative.")
+            if episode_count == 0 or rank_weight == 0.0:
+                continue
+            reward_sum += rank_weight * float(payload["completed_reward_sum"])
+            length_sum += rank_weight * float(payload["completed_length_sum"])
+            weighted_count += rank_weight * episode_count
+
+        if weighted_count <= 0.0:
+            # A no-completion iteration must not evict or dilute the existing
+            # rolling window.
+            self.distributed_effective_episode_count = sum(batch[2] for batch in self._distributed_episode_batches)
+            return
+        if not all(math.isfinite(value) for value in (reward_sum, length_sum, weighted_count)):
+            raise RuntimeError("Distributed episode aggregates must be finite.")
+
+        self._distributed_episode_batches.append((reward_sum, length_sum, weighted_count))
+        total_count = sum(batch[2] for batch in self._distributed_episode_batches)
+        window_size = float(self._distributed_episode_window_size)
+        while (
+            self._distributed_episode_batches and total_count - self._distributed_episode_batches[0][2] >= window_size
+        ):
+            total_count -= self._distributed_episode_batches.popleft()[2]
+        if self._distributed_episode_batches and total_count > window_size:
+            excess = total_count - window_size
+            old_reward_sum, old_length_sum, old_count = self._distributed_episode_batches[0]
+            keep_fraction = (old_count - excess) / old_count
+            self._distributed_episode_batches[0] = (
+                old_reward_sum * keep_fraction,
+                old_length_sum * keep_fraction,
+                old_count * keep_fraction,
+            )
+            total_count = window_size
+        self.distributed_effective_episode_count = total_count
+
+    def _distributed_episode_means(self) -> tuple[float, float] | None:
+        if not self._distributed_episode_batches:
+            return None
+        denominator = sum(batch[2] for batch in self._distributed_episode_batches)
+        if denominator <= 0.0:
+            return None
+        reward_mean = sum(batch[0] for batch in self._distributed_episode_batches) / denominator
+        length_mean = sum(batch[1] for batch in self._distributed_episode_batches) / denominator
+        return reward_mean, length_mean
+
+    def _mean_reward(self) -> float:
+        distributed_means = self._distributed_episode_means()
+        if distributed_means is not None:
+            return distributed_means[0]
+        return self._weighted_buffer_mean(self.rewbuffer, self.rewweightbuffer)
+
+    def _mean_episode_length(self) -> float:
+        distributed_means = self._distributed_episode_means()
+        if distributed_means is not None:
+            return distributed_means[1]
+        return self._weighted_buffer_mean(self.lenbuffer, self.lenweightbuffer)
+
+    def _has_reward_statistics(self) -> bool:
+        return bool(self.rewbuffer) or self._distributed_episode_means() is not None
+
+    def _has_length_statistics(self) -> bool:
+        return bool(self.lenbuffer) or self._distributed_episode_means() is not None
+
+    @staticmethod
+    def _merge_weighted_losses(payloads: list[dict[str, Any]]) -> dict[str, float]:
+        keys = {str(key) for payload in payloads for key in payload["loss_dict"]}
+        result: dict[str, float] = {}
+        for key in keys:
+            entries = [
+                (float(payload["loss_dict"][key]), float(payload["loss_weight"]))
+                for payload in payloads
+                if key in payload["loss_dict"]
+            ]
+            positive_weight = sum(weight for _, weight in entries if weight > 0.0)
+            if positive_weight > 0.0:
+                result[key] = sum(value * weight for value, weight in entries if weight > 0.0) / positive_weight
+            elif entries:
+                result[key] = sum(value for value, _ in entries) / len(entries)
+        return result
+
+    def synchronize_distributed_metrics(
+        self,
+        loss_dict: dict[str, float],
+        *,
+        loss_weight: float = 1.0,
+        process_group=None,
+    ) -> dict[str, float]:
+        """Aggregate compact training statistics across ranks before rank-zero logging.
+
+        Every rank must call this method in the same order.  Only sums, counts,
+        newly completed episode returns/lengths, and scalar losses are moved;
+        rollout-sized tensors never leave their owning rank.
+        """
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            self._completed_rewards_since_sync.clear()
+            self._completed_lengths_since_sync.clear()
+            return loss_dict
+
+        world_size = torch.distributed.get_world_size(group=process_group)
+        if world_size <= 1:
+            self._completed_rewards_since_sync.clear()
+            self._completed_lengths_since_sync.clear()
+            return loss_dict
+
+        backend = str(torch.distributed.get_backend(process_group)).lower()
+        if "nccl" in backend:
+            raise RuntimeError(
+                "Distributed metric object synchronization requires a Gloo process group; "
+                "refusing to pickle metrics through NCCL."
+            )
+        rank = torch.distributed.get_rank(group=process_group)
+        if bool(rank == 0) != bool(self.is_main_process):
+            raise RuntimeError("Distributed metric process-group rank 0 must be the configured main process.")
+        completed_episode_count = len(self._completed_rewards_since_sync)
+        if completed_episode_count != len(self._completed_lengths_since_sync):
+            raise RuntimeError("Completed reward/length deltas are misaligned before distributed synchronization.")
+        tensor_summaries = self._summarize_iteration_tensors()
+        payload = {
+            "loss_dict": {str(key): float(value) for key, value in loss_dict.items()},
+            "loss_weight": float(loss_weight),
+            "episode": tensor_summaries["episode"],
+            "raw_episode": tensor_summaries["raw_episode"],
+            "env": tensor_summaries["env"],
+            "completed_reward_sum": float(sum(self._completed_rewards_since_sync)),
+            "completed_length_sum": float(sum(self._completed_lengths_since_sync)),
+            "completed_episode_count": completed_episode_count,
+            "collection_time": float(self.collection_time),
+            "learn_time": float(self.learn_time),
+        }
+        gathered: list[dict[str, Any] | None] = [None] * world_size
+        torch.distributed.all_gather_object(gathered, payload, group=process_group)
+
+        self._completed_rewards_since_sync.clear()
+        self._completed_lengths_since_sync.clear()
+        if not all(item is not None for item in gathered):
+            raise RuntimeError("Distributed metric synchronization returned an incomplete payload list.")
+        payloads = [item for item in gathered if item is not None]
+        loss_weights = [float(item["loss_weight"]) for item in payloads]
+        if not all(math.isfinite(weight) and weight >= 0.0 for weight in loss_weights):
+            raise RuntimeError(f"Distributed loss weights must be finite and non-negative, got {loss_weights}.")
+        self.distributed_loss_weight_sum = sum(loss_weights)
+        if self.distributed_loss_weight_sum <= 0.0:
+            raise RuntimeError("At least one rank must have a positive distributed loss weight.")
+        if not math.isclose(
+            self.distributed_loss_weight_sum,
+            float(world_size),
+            rel_tol=1.0e-5,
+            abs_tol=1.0e-5,
+        ):
+            raise RuntimeError(
+                "Distributed loss weights must sum to world_size because gradient reduction divides by "
+                f"world_size: sum={self.distributed_loss_weight_sum}, world_size={world_size}."
+            )
+        merged_loss = self._merge_weighted_losses(payloads)
+        if rank != 0:
+            # Non-main ranks never call post_epoch_logging(), so clear their
+            # per-iteration data here rather than accumulating it forever.
+            self.ep_infos.clear()
+            self.raw_ep_infos.clear()
+            self.episode_env_tensors.clear()
+            self.collection_time = 0.0
+            self.learn_time = 0.0
+            return merged_loss
+
+        episode_means = self._merge_summaries(payloads, "episode")
+        raw_episode_means = self._merge_summaries(payloads, "raw_episode")
+        env_means = self._merge_summaries(payloads, "env")
+        self.ep_infos = (
+            [{key: torch.tensor([value], device=self.device) for key, value in episode_means.items()}]
+            if episode_means
+            else []
+        )
+        self.raw_ep_infos = (
+            [{key: torch.tensor([value], device=self.device) for key, value in raw_episode_means.items()}]
+            if raw_episode_means
+            else []
+        )
+        self.episode_env_tensors.clear()
+        if env_means:
+            self.episode_env_tensors.add(
+                {key: torch.tensor([value], device=self.device) for key, value in env_means.items()}
+            )
+
+        self._append_distributed_episode_batch(payloads)
+        # Use the collection/learning split from the actual slowest rank.  The
+        # previous max(collection)+max(learning) could combine two different
+        # ranks and overstate iteration time.
+        slowest_payload = max(
+            payloads,
+            key=lambda item: float(item["collection_time"]) + float(item["learn_time"]),
+        )
+        self.collection_time = float(slowest_payload["collection_time"])
+        self.learn_time = float(slowest_payload["learn_time"])
+        return merged_loss
 
     def post_epoch_logging(
         self,
@@ -321,9 +708,18 @@ class LoggingHelper:
             fps=fps,
         )
 
-        # Use rich Live to update console
-        with Live(Panel(log_string, title=self.title), refresh_per_second=4, console=console):
-            pass
+        panel = Panel(log_string, title=self.title)
+        force_live = os.environ.get("HOLOSOMA_FORCE_RICH_LIVE_LOGGING", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if force_live or console.is_terminal:
+            with Live(panel, refresh_per_second=4, console=console):
+                pass
+        else:
+            console.print(panel)
 
         # Clear episode infos after logging
         self.ep_infos.clear()
@@ -431,13 +827,13 @@ class LoggingHelper:
         scalars_to_log["Perf/learning_time"] = self.learn_time
 
         # Log reward metrics if available
-        if len(self.rewbuffer) > 0:
-            mean_reward = statistics.mean(self.rewbuffer)
+        if self._has_reward_statistics():
+            mean_reward = self._mean_reward()
             scalars_to_log["Train/mean_reward"] = mean_reward
             scalars_to_log["Train/mean_reward/time"] = mean_reward
             scalars_to_log["Reward/mean"] = mean_reward
-        if len(self.lenbuffer) > 0:
-            mean_episode_length = statistics.mean(self.lenbuffer)
+        if self._has_length_statistics():
+            mean_episode_length = self._mean_episode_length()
             scalars_to_log["Train/mean_episode_length"] = mean_episode_length
             scalars_to_log["Train/mean_episode_length/time"] = mean_episode_length
             scalars_to_log["Episode Length/mean"] = mean_episode_length
@@ -505,8 +901,13 @@ class LoggingHelper:
                 continue
             if self._should_hide_wandb_metric(metric_name):
                 wandb.define_metric(metric_name, hidden=True, summary="last")
-            elif metric_name == f"{self.prefix}Eval/fixed_bc_mu_mse":
-                wandb.define_metric(metric_name, summary="min")
+            elif self._strip_prefix(metric_name) in self._WANDB_METRIC_SUMMARIES:
+                wandb.define_metric(
+                    metric_name,
+                    summary=self._WANDB_METRIC_SUMMARIES[
+                        self._strip_prefix(metric_name)
+                    ],
+                )
             self._wandb_defined_metrics.add(metric_name)
 
     def _create_console_output(
@@ -561,14 +962,17 @@ class LoggingHelper:
         )
 
         # Add training metrics if available
-        if len(self.rewbuffer) > 0:
-            log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
-        if len(self.lenbuffer) > 0:
-            log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
+        if self._has_reward_statistics():
+            mean_reward = self._mean_reward()
+            log_string += f"""{"Mean reward:":>{pad}} {mean_reward:.2f}\n"""
+        if self._has_length_statistics():
+            mean_episode_length = self._mean_episode_length()
+            log_string += f"""{"Mean episode length:":>{pad}} {mean_episode_length:.2f}\n"""
 
         # Add loss metrics
         for key, value in loss_dict.items():
-            log_string += f"{f'{key}:':>{pad}} {value:.4f}\n"
+            formatted_value = f"{value:.3e}" if key.endswith("learning_rate") else f"{value:.4f}"
+            log_string += f"{f'{key}:':>{pad}} {formatted_value}\n"
 
         # Add environment metrics
         env_log_string = ""
@@ -600,12 +1004,55 @@ class LoggingHelper:
         return log_string
 
     def save_checkpoint_artifact(self, state_dict: dict[str, Any], path: str) -> None:
-        if not path.startswith(self.log_dir):
-            raise ValueError(f"Path {path} is not in the logging directory {self.log_dir}")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        logger.info(f"Saving checkpoint to {path}")
-        torch.save(state_dict, path)
-        self.save_to_wandb(path)
+        # Resolve the parent (rather than the final component) so an existing
+        # symlink at the checkpoint name is atomically replaced instead of
+        # followed.  pathlib/commonpath semantics also avoid the old string
+        # prefix bug where e.g. ``/logs-other`` passed a ``/logs`` check.
+        log_root = pathlib.Path(self.log_dir).expanduser().resolve()
+        requested_path = pathlib.Path(path).expanduser()
+        if not requested_path.is_absolute():
+            requested_path = pathlib.Path.cwd() / requested_path
+        target_parent = requested_path.parent.resolve()
+        target_path = target_parent / requested_path.name
+        try:
+            target_path.relative_to(log_root)
+        except ValueError as exc:
+            raise ValueError(f"Path {path} is not in the logging directory {self.log_dir}") from exc
+
+        target_parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving checkpoint atomically to {}", target_path)
+        temp_fd, temp_path_raw = tempfile.mkstemp(
+            dir=target_parent,
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+        )
+        os.close(temp_fd)
+        temp_path = pathlib.Path(temp_path_raw)
+        try:
+            # torch.save() closes the file it opens, but explicitly fsync the
+            # completed archive before publication.  os.replace() is atomic
+            # because the temporary file lives in the target directory.
+            torch.save(state_dict, temp_path)
+            if temp_path.stat().st_size <= 0:
+                raise RuntimeError(f"Checkpoint serialization produced an empty file: {temp_path}")
+            serialized_fd = os.open(temp_path, os.O_RDONLY)
+            try:
+                os.fsync(serialized_fd)
+            finally:
+                os.close(serialized_fd)
+
+            os.replace(temp_path, target_path)
+            directory_fd = os.open(target_parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            # If serialization or publication fails, leave any previously
+            # published checkpoint untouched and remove only our private temp.
+            temp_path.unlink(missing_ok=True)
+
+        self.save_to_wandb(str(target_path))
 
     def save_to_wandb(self, file_path: str) -> None:
         """Saves file to wandb if run is initialized."""

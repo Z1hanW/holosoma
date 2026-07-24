@@ -1,5 +1,10 @@
 # Holosoma Inference
 
+> **UNSUPPORTED / NON-SCIENTIFIC ARCHIVE:** This directory is a stale historical snapshot and must
+> not be installed or used for experiments, simulation, or robot deployment. Use
+> `src/holosoma_inference`. Import and installation are blocked by default; the exact escape hatch
+> `HOLOSOMA_ALLOW_UNSAFE_ARCHIVAL_INFERENCE=1` exists only for explicit historical forensics.
+
 Policy inference for humanoid robot policies.
 
 ## Supported Policies

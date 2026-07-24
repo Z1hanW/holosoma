@@ -56,6 +56,24 @@ class CameraSensor(BaseSensor):
         self.initialize_camera_matrices()
         # Initialize camera tensors
         self.create_warp_camera_tensors()
+        self._synchronize_cuda_initialization()
+
+    def _synchronize_cuda_initialization(self):
+        """Publish Warp mesh/BVH and Torch storage before cross-stream capture.
+
+        Warp may build meshes on its own CUDA stream while camera tensors are
+        initialized on PyTorch's current stream.  Later captures deliberately
+        run on the caller's Torch stream, which is not implicitly ordered
+        after either setup stream.  A one-time setup barrier makes every mesh,
+        mapping and pose allocation visible before the sensor is returned;
+        collection itself remains fully asynchronous.
+        """
+
+        torch_device = torch.device(self.device)
+        if torch_device.type != "cuda":
+            return
+        wp.synchronize_device(self.device)
+        torch.cuda.synchronize(device=torch_device)
 
     def initialize_camera_matrices(self):
         # Calculate camera params
@@ -118,6 +136,24 @@ class CameraSensor(BaseSensor):
             device=self.device,
             requires_grad=False,
         )
+        # Kernels index simulator state and the full output tensor through this
+        # launch-row -> global-environment mapping.  The captured full-batch
+        # graph uses the immutable identity mapping.  Reset-only captures use a
+        # compact K-row mapping, so they launch K * cameras * pixels rays rather
+        # than launching the full grid and returning early behind a mask.
+        self.full_capture_env_ids_tensor = torch.arange(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.int32,
+            requires_grad=False,
+        )
+        self.full_capture_env_ids = wp.from_torch(
+            self.full_capture_env_ids_tensor, dtype=wp.int32
+        )
+        # Keep the compact tensor/Warp view alive until a later capture.  Warp
+        # borrows Torch storage and its launch is asynchronous.
+        self._capture_env_ids_tensor = self.full_capture_env_ids_tensor
+        self._capture_env_ids = self.full_capture_env_ids
         # Create camera sensor pose tensors
         euler_sensor_frame_rot = self.cfg.offset_rot_base
         sensor_frame_rot_rad = torch.deg2rad(
@@ -237,21 +273,9 @@ class CameraSensor(BaseSensor):
         if self.cfg.segmentation_camera == True:
             raise ValueError("Segmentation camera is not supported for pointcloud")
         else:
-            wp.launch(
-                kernel=DepthCameraWarpKernels.draw_optimized_kernel_pointcloud,
-                dim=(self.num_envs, self.num_sensors, self.width, self.height),
-                inputs=[
-                    self.terrain_mesh_id,
-                    self.camera_position_array,
-                    self.camera_orientation_array,
-                    self.K_inv,
-                    self.far_plane,
-                    self.pixels,
-                    self.c_x,
-                    self.c_y,
-                    self.pointcloud_in_world_frame,
-                ],
-                device=self.device,
+            self._launch_pointcloud(
+                self.full_capture_env_ids,
+                self.num_envs,
             )
         if not debug:
             print(f"finishing capture of render graph")
@@ -266,48 +290,15 @@ class CameraSensor(BaseSensor):
             raise ValueError("Segmentation camera is not supported for depth range")
         else:
             if not self.is_dyna_mesh:
-                wp.launch(
-                    kernel=DepthCameraWarpKernels.draw_optimized_kernel_depth_range,
-                    dim=(self.num_envs, self.num_sensors, self.width, self.height),
-                    inputs=[
-                        self.terrain_mesh_id,
-                        self.camera_position_array,
-                        self.camera_orientation_array,
-                        self.K_inv,
-                        self.far_plane,
-                        self.pixels,
-                        self.c_x,
-                        self.c_y,
-                        self.calculate_depth,
-                    ],
-                    device=self.device,
+                self._launch_depth_range(
+                    self.full_capture_env_ids,
+                    self.num_envs,
                 )
             else:
                 # Dynamic mesh support
-                wp.launch(
-                    kernel=DepthCameraWarpKernels.draw_optimized_kernel_depth_range_dynamic,
-                    dim=(self.num_envs, self.num_sensors, self.width, self.height),
-                    inputs=[
-                        self.terrain_mesh_id,
-                        self.robot_mesh_ids,
-                        self.primitive_body_active,
-                        self.primitive_body_half_extents,
-                        self.ray_cast_body_poses,
-                        self.ray_cast_body_quats,
-                        self.primitive_body_poses,
-                        self.primitive_body_quats,
-                        self.camera_position_array,
-                        self.camera_orientation_array,
-                        self.K_inv,
-                        self.far_plane,
-                        self.pixels,
-                        self.c_x,
-                        self.c_y,
-                        self.calculate_depth,
-                        self.num_robot_bodies,
-                        len(self.primitive_bodies),
-                    ],
-                    device=self.device,
+                self._launch_depth_range(
+                    self.full_capture_env_ids,
+                    self.num_envs,
                 )
                 # # 1) refill with no_hit
                 # wp.launch(
@@ -365,15 +356,135 @@ class CameraSensor(BaseSensor):
         self.camera_position_array = wp.from_torch(positions, dtype=wp.vec3)
         self.camera_orientation_array = wp.from_torch(orientations, dtype=wp.quat)
 
+    def set_capture_env_ids(self, env_ids=None):
+        """Prepare a launch-row -> global-env mapping and return its row count.
+
+        ``index_select`` both preserves caller order/duplicates and validates
+        indices before Warp consumes them.  Keeping the selected tensor on the
+        sensor is required because ``wp.from_torch`` is a zero-copy view and
+        launches are asynchronous.
+        """
+        if env_ids is None:
+            self._capture_env_ids_tensor = self.full_capture_env_ids_tensor
+            self._capture_env_ids = self.full_capture_env_ids
+            return self.num_envs
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1)
+        self._capture_env_ids_tensor = torch.index_select(
+            self.full_capture_env_ids_tensor,
+            0,
+            env_ids,
+        )
+        self._capture_env_ids = wp.from_torch(
+            self._capture_env_ids_tensor, dtype=wp.int32
+        )
+        return env_ids.numel()
+
+    def _current_warp_stream(self):
+        torch_device = torch.device(self.device)
+        if torch_device.type != "cuda":
+            return None
+        torch_stream = torch.cuda.current_stream(device=torch_device)
+        return wp.stream_from_torch(torch_stream)
+
+    def _launch_pointcloud(self, launch_env_ids, launch_env_count, stream=None):
+        wp.launch(
+            kernel=DepthCameraWarpKernels.draw_optimized_kernel_pointcloud,
+            dim=(launch_env_count, self.num_sensors, self.width, self.height),
+            inputs=[
+                self.terrain_mesh_id,
+                launch_env_ids,
+                self.camera_position_array,
+                self.camera_orientation_array,
+                self.K_inv,
+                self.far_plane,
+                self.pixels,
+                self.c_x,
+                self.c_y,
+                self.pointcloud_in_world_frame,
+            ],
+            device=self.device,
+            stream=stream,
+        )
+
+    def _launch_depth_range(self, launch_env_ids, launch_env_count, stream=None):
+        if not self.is_dyna_mesh:
+            kernel = DepthCameraWarpKernels.draw_optimized_kernel_depth_range
+            inputs = [
+                self.terrain_mesh_id,
+                launch_env_ids,
+                self.camera_position_array,
+                self.camera_orientation_array,
+                self.K_inv,
+                self.far_plane,
+                self.pixels,
+                self.c_x,
+                self.c_y,
+                self.calculate_depth,
+            ]
+        else:
+            kernel = DepthCameraWarpKernels.draw_optimized_kernel_depth_range_dynamic
+            inputs = [
+                self.terrain_mesh_id,
+                launch_env_ids,
+                self.robot_mesh_ids,
+                self.primitive_body_active,
+                self.primitive_body_half_extents,
+                self.ray_cast_body_poses,
+                self.ray_cast_body_quats,
+                self.primitive_body_poses,
+                self.primitive_body_quats,
+                self.camera_position_array,
+                self.camera_orientation_array,
+                self.K_inv,
+                self.far_plane,
+                self.pixels,
+                self.c_x,
+                self.c_y,
+                self.calculate_depth,
+                self.num_robot_bodies,
+                len(self.primitive_bodies),
+            ]
+        wp.launch(
+            kernel=kernel,
+            dim=(launch_env_count, self.num_sensors, self.width, self.height),
+            inputs=inputs,
+            device=self.device,
+            stream=stream,
+        )
+
     # @nvtx.annotate()
-    def capture(self, debug=False):
+    def capture(self, debug=False, active_env_ids=None):
+        if active_env_ids is not None:
+            launch_env_count = self.set_capture_env_ids(active_env_ids)
+            if launch_env_count:
+                stream = self._current_warp_stream()
+                if self.cfg.return_pointcloud:
+                    self._launch_pointcloud(
+                        self._capture_env_ids,
+                        launch_env_count,
+                        stream=stream,
+                    )
+                else:
+                    self._launch_depth_range(
+                        self._capture_env_ids,
+                        launch_env_count,
+                        stream=stream,
+                    )
+            self.pixels_tensors = wp.to_torch(self.pixels)
+            return self.pixels_tensors
+
         if self.graph is None:
             if self.cfg.return_pointcloud:
                 self.create_render_graph_pointcloud(debug=debug)
             else:
                 self.create_render_graph_depth_range(debug=debug)
         if self.graph is not None:
-            wp.capture_launch(self.graph)
+            # Pose/mapping tensors are produced by PyTorch immediately before
+            # capture, and the returned depth is consumed by PyTorch
+            # immediately afterwards.  Launch on the active Torch stream so
+            # this ordering remains correct even when the caller uses a
+            # non-default CUDA stream.
+            wp.capture_launch(self.graph, stream=self._current_warp_stream())
 
         self.pixels_tensors = wp.to_torch(self.pixels)
         # Apply noise

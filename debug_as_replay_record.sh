@@ -30,6 +30,7 @@ Environment knobs:
   AS_VIDEO_DIR                      Default: ${AS_DEBUG_ROOT}/videos
   AS_PAIR_WORK_ROOT                 Default: ${AS_DEBUG_ROOT}/single_pair_banks
   PYTHON_BIN                        Isaac Sim python. Auto-detected if unset.
+  FFPROBE_BIN                       ffprobe executable. Default: ffprobe from PATH.
   VIS_GPU                           GPU id or "auto". Default: auto.
   HEADLESS                          True/False. Default: True.
   ENABLE_VISER                      1 to open Viser alongside recording. Default: 0.
@@ -263,6 +264,95 @@ SKIP_EXISTING=${SKIP_EXISTING:-0}
 KEEP_GOING=${KEEP_GOING:-1}
 TEE_LOGS=${TEE_LOGS:-1}
 
+snapshot_replay_mp4_entries() {
+  local video_dir=$1
+  local output_name=$2
+  local -n output_ref="${output_name}"
+  local candidate fingerprint
+
+  output_ref=()
+  if [[ ! -e "${video_dir}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${video_dir}" || ! -r "${video_dir}" ]]; then
+    echo "[ERROR] Replay video directory is not a readable directory: ${video_dir}" >&2
+    return 1
+  fi
+  while IFS= read -r -d '' candidate; do
+    if ! fingerprint=$(stat -c '%F|%d|%i|%s|%y|%z' -- "${candidate}"); then
+      echo "[ERROR] Could not fingerprint replay MP4 entry: ${candidate}" >&2
+      return 1
+    fi
+    output_ref["${candidate}"]="${fingerprint}"
+  done < <(find -H "${video_dir}" -mindepth 1 -maxdepth 1 -name '*.mp4' -print0)
+}
+
+collect_changed_replay_mp4_entries() {
+  local video_dir=$1
+  local before_name=$2
+  local output_name=$3
+  local -n before_ref="${before_name}"
+  local -n output_ref="${output_name}"
+  local -A after=()
+  local candidate
+
+  output_ref=()
+  snapshot_replay_mp4_entries "${video_dir}" after || return 1
+  for candidate in "${!after[@]}"; do
+    if [[ -z "${before_ref[${candidate}]+present}" \
+      || "${before_ref[${candidate}]}" != "${after[${candidate}]}" ]]; then
+      output_ref+=("${candidate}")
+    fi
+  done
+}
+
+validate_replay_mp4() {
+  local video_path=$1
+  local requested_ffprobe=${FFPROBE_BIN:-ffprobe}
+  local ffprobe_path probe_output key value
+  local codec_type='' width='' height='' frame_count=''
+
+  if [[ -L "${video_path}" || ! -f "${video_path}" || ! -s "${video_path}" ]]; then
+    echo "[ERROR] Replay artifact must be a non-empty regular MP4: ${video_path}" >&2
+    return 1
+  fi
+  if [[ "${requested_ffprobe}" == */* ]]; then
+    ffprobe_path=${requested_ffprobe}
+  else
+    ffprobe_path=$(command -v -- "${requested_ffprobe}" || true)
+  fi
+  if [[ -z "${ffprobe_path}" || ! -x "${ffprobe_path}" ]]; then
+    echo "[ERROR] Could not find executable ffprobe: ${requested_ffprobe}" >&2
+    return 1
+  fi
+  if ! probe_output=$("${ffprobe_path}" \
+    -v error \
+    -count_frames \
+    -select_streams v:0 \
+    -show_entries stream=codec_type,width,height,nb_read_frames \
+    -of default=noprint_wrappers=1 \
+    "${video_path}" 2>&1); then
+    echo "[ERROR] ffprobe rejected replay MP4 ${video_path}: ${probe_output}" >&2
+    return 1
+  fi
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      codec_type) codec_type=${value} ;;
+      width) width=${value} ;;
+      height) height=${value} ;;
+      nb_read_frames) frame_count=${value} ;;
+    esac
+  done <<< "${probe_output}"
+  if [[ "${codec_type}" != "video" \
+    || ! "${width}" =~ ^[1-9][0-9]*$ \
+    || ! "${height}" =~ ^[1-9][0-9]*$ \
+    || ! "${frame_count}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] Replay MP4 has no decodable non-empty video stream: ${video_path}" >&2
+    return 1
+  fi
+  echo "[INFO] Replay artifact verified: path=${video_path} frames=${frame_count} size=${width}x${height}"
+}
+
 total=$(wc -l < "${AS_MANIFEST}" | tr -d '[:space:]')
 index=0
 failed=0
@@ -346,21 +436,43 @@ while IFS=$'\t' read -r clip_id pair_dir pair_map object_urdf source_npz video_d
 
   safe_clip_log_name="${clip_id//[^A-Za-z0-9_.-]/_}"
   log_path="${AS_LOG_DIR}/${index}_${safe_clip_log_name}.log"
+  declare -A replay_mp4_before=()
+  replay_mp4_candidates=()
+  if ! snapshot_replay_mp4_entries "${video_dir}" replay_mp4_before; then
+    echo "[ERROR] Could not establish the pre-launch MP4 state for ${clip_id}." >&2
+    exit 1
+  fi
+
+  clip_failed=0
   if [[ "${TEE_LOGS}" == "1" ]]; then
     if ! "${cmd[@]}" 2>&1 | tee "${log_path}"; then
-      failed=$((failed + 1))
-      echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
-      if [[ "${KEEP_GOING}" != "1" ]]; then
-        exit 1
-      fi
+      clip_failed=1
+      echo "[ERROR] Replay producer failed for ${clip_id}; log=${log_path}" >&2
     fi
   else
     if ! "${cmd[@]}" >"${log_path}" 2>&1; then
-      failed=$((failed + 1))
-      echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
-      if [[ "${KEEP_GOING}" != "1" ]]; then
-        exit 1
-      fi
+      clip_failed=1
+      echo "[ERROR] Replay producer failed for ${clip_id}; log=${log_path}" >&2
+    fi
+  fi
+  if [[ "${clip_failed}" == "0" ]]; then
+    if ! collect_changed_replay_mp4_entries \
+      "${video_dir}" replay_mp4_before replay_mp4_candidates; then
+      clip_failed=1
+      echo "[ERROR] Could not inspect the replay artifact for ${clip_id}." >&2
+    elif [[ "${#replay_mp4_candidates[@]}" != "1" ]]; then
+      clip_failed=1
+      echo "[ERROR] Replay producer must create exactly one new or changed MP4 for ${clip_id}; found=${#replay_mp4_candidates[@]}." >&2
+    elif ! validate_replay_mp4 "${replay_mp4_candidates[0]}"; then
+      clip_failed=1
+      echo "[ERROR] Replay artifact validation failed for ${clip_id}." >&2
+    fi
+  fi
+  if [[ "${clip_failed}" != "0" ]]; then
+    failed=$((failed + 1))
+    echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
+    if [[ "${KEEP_GOING}" != "1" ]]; then
+      exit 1
     fi
   fi
 done < "${AS_MANIFEST}"

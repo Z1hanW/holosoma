@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
-import torch.nn.functional as torch_nn_func
-from torch import Tensor
 
+from holosoma.utils.safe_torch_import import F as torch_nn_func
+from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import (
     copysign,
     normalize,
 )
 from holosoma.utils.torch_jit import torch_jit_script
+
+Tensor = torch.Tensor
 
 
 @torch_jit_script

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from holosoma.config_types.curriculum import CurriculumManagerCfg, CurriculumTermCfg
@@ -55,6 +56,18 @@ class CurriculumManager:
         # Initialize terms
         self._initialize_terms()
 
+    def _effective_term_cfg(self, term_cfg: CurriculumTermCfg) -> CurriculumTermCfg:
+        """Merge manager-wide hook parameters with explicit term overrides."""
+
+        global_params = self.cfg.params or {}
+        term_params = term_cfg.params or {}
+        if not isinstance(global_params, dict) or not isinstance(term_params, dict):
+            raise TypeError("Curriculum manager and term params must be dictionaries.")
+        return replace(
+            term_cfg,
+            params={**global_params, **term_params},
+        )
+
     def _initialize_terms(self) -> None:
         """Initialize curriculum terms and resolve their functions/classes.
 
@@ -64,7 +77,8 @@ class CurriculumManager:
         separately so their lifecycle methods (``setup``/``reset``/``step``) can
         be called automatically.
         """
-        for term_name, term_cfg in self.cfg.setup_terms.items():
+        for term_name, configured_term_cfg in self.cfg.setup_terms.items():
+            term_cfg = self._effective_term_cfg(configured_term_cfg)
             resolved = resolve_callable(term_cfg.func, context="curriculum term")
 
             # Check if it's a class (stateful) or function (stateless)
@@ -82,7 +96,8 @@ class CurriculumManager:
             self._setup_names.append(term_name)
             self._setup_cfgs.append(term_cfg)
 
-        for term_name, term_cfg in self.cfg.reset_terms.items():
+        for term_name, configured_term_cfg in self.cfg.reset_terms.items():
+            term_cfg = self._effective_term_cfg(configured_term_cfg)
             resolved = resolve_callable(term_cfg.func, context="curriculum term")
 
             if isinstance(resolved, type) and issubclass(resolved, CurriculumTermBase):
@@ -97,7 +112,8 @@ class CurriculumManager:
             self._reset_names.append(term_name)
             self._reset_cfgs.append(term_cfg)
 
-        for term_name, term_cfg in self.cfg.step_terms.items():
+        for term_name, configured_term_cfg in self.cfg.step_terms.items():
+            term_cfg = self._effective_term_cfg(configured_term_cfg)
             resolved = resolve_callable(term_cfg.func, context="curriculum term")
 
             if isinstance(resolved, type) and issubclass(resolved, CurriculumTermBase):

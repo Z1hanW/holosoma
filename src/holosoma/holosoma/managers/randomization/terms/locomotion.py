@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 import torch
 from loguru import logger
 
+from holosoma.config_types.command import NoiseToInitialPoseConfig
 from holosoma.config_types.simulator import MujocoBackend
 from holosoma.managers.action.terms.joint_control import JointPositionActionTerm
 from holosoma.managers.randomization.base import RandomizationTermBase
@@ -30,6 +33,78 @@ def _ensure_env_ids_tensor(env: Any, env_ids: torch.Tensor | Sequence[int] | Non
     if isinstance(env_ids, torch.Tensor):
         return env_ids.to(device=env.device, dtype=torch.long)
     return torch.as_tensor(list(env_ids), device=env.device, dtype=torch.long)
+
+
+class MotionRelativeResetRandomizerState(RandomizationTermBase):
+    """Own motion-relative reset noise that is applied by ``MotionCommand``.
+
+    WBT's command reset is the authoritative final writer of the robot and
+    object state.  A conventional randomization-manager reset term runs before
+    it and is therefore overwritten.  This setup-only state lets a
+    randomization preset configure the final motion-relative write without
+    changing nominal physics or actuator behavior.
+    """
+
+    _VECTOR_FIELDS = ("root_pos", "root_rot", "root_lin_vel", "root_ang_vel", "object_pos")
+
+    def __init__(self, cfg: Any, env: Any):
+        super().__init__(cfg, env)
+        params = dict(cfg.params or {})
+        allowed = {"overall_noise_scale", "dof_pos", "dof_vel", *self._VECTOR_FIELDS}
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError(
+                "MotionRelativeResetRandomizerState received unsupported parameter(s): "
+                + ", ".join(unknown)
+            )
+
+        vector_values: dict[str, list[float]] = {}
+        for name in self._VECTOR_FIELDS:
+            raw = params.get(name, [0.0, 0.0, 0.0])
+            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or len(raw) != 3:
+                raise ValueError(f"{name} must contain exactly three non-negative finite values.")
+            values = [float(value) for value in raw]
+            if any(not math.isfinite(value) or value < 0.0 for value in values):
+                raise ValueError(f"{name} must contain exactly three non-negative finite values.")
+            vector_values[name] = values
+
+        scalar_values: dict[str, float] = {}
+        for name, default in (
+            ("overall_noise_scale", 1.0),
+            ("dof_pos", 0.0),
+            ("dof_vel", 0.0),
+        ):
+            value = float(params.get(name, default))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be a non-negative finite value.")
+            scalar_values[name] = value
+
+        self.noise_config = NoiseToInitialPoseConfig(
+            **scalar_values,
+            **vector_values,
+        )
+        logger.info(
+            "[Randomization] motion-relative reset state: scale={} dof_pos={} rad "
+            "dof_vel={} rad/s root_pos={} root_rot={} root_lin_vel={} "
+            "root_ang_vel={} object_pos={}",
+            self.noise_config.overall_noise_scale,
+            self.noise_config.dof_pos,
+            self.noise_config.dof_vel,
+            self.noise_config.root_pos,
+            self.noise_config.root_rot,
+            self.noise_config.root_lin_vel,
+            self.noise_config.root_ang_vel,
+            self.noise_config.object_pos,
+        )
+
+    def setup(self) -> None:
+        """No buffers are required; construction validates and freezes the config."""
+
+    def reset(self, env_ids: torch.Tensor | None) -> None:
+        """The final state write is deliberately owned by ``MotionCommand.reset``."""
+
+    def step(self) -> None:
+        """This randomizer has no per-step behavior."""
 
 
 def _get_joint_action_term(env: Any) -> JointPositionActionTerm | None:
@@ -159,12 +234,18 @@ def _isaacsim_randomize_rigid_body_material(
     dynamic_friction_range: tuple[float, float],
     restitution_range: tuple[float, float],
     num_buckets: int,
+    dynamic_friction_ratio_range: tuple[float, float] | None = None,
 ):
     try:
         from isaaclab.envs import mdp
         from isaaclab.managers import EventTermCfg
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim material randomization requires isaaclab.") from exc
+    isaaclab_dynamic_range = (
+        dynamic_friction_ratio_range
+        if dynamic_friction_ratio_range is not None
+        else dynamic_friction_range
+    )
     func = mdp.randomize_rigid_body_material(
         EventTermCfg(
             func=mdp.randomize_rigid_body_material,
@@ -173,13 +254,27 @@ def _isaacsim_randomize_rigid_body_material(
                 "env_ids": env_ids_cpu,
                 "asset_cfg": asset_cfg,
                 "static_friction_range": static_friction_range,
-                "dynamic_friction_range": dynamic_friction_range,
+                # In coupled mode IsaacLab samples this column as the ratio.
+                # We convert it to dynamic friction before material assignment.
+                "dynamic_friction_range": isaaclab_dynamic_range,
                 "restitution_range": restitution_range,
                 "num_buckets": num_buckets,
             },
         ),
         simulator,
     )
+    if dynamic_friction_ratio_range is not None:
+        if not hasattr(func, "material_buckets"):
+            raise RuntimeError(
+                "Installed IsaacLab material randomizer does not expose material_buckets; "
+                "cannot enforce coupled object friction sampling."
+            )
+        func.material_buckets = _couple_friction_material_buckets(
+            func.material_buckets,
+            static_friction_range=static_friction_range,
+            dynamic_friction_ratio_range=dynamic_friction_ratio_range,
+            restitution_range=restitution_range,
+        )
     func(
         simulator,
         env_ids_cpu,
@@ -189,6 +284,122 @@ def _isaacsim_randomize_rigid_body_material(
         restitution_range=restitution_range,
         num_buckets=num_buckets,
     )
+    if dynamic_friction_ratio_range is not None:
+        materials = simulator.scene[asset_cfg.name].root_physx_view.get_material_properties()
+        assigned = materials[env_ids_cpu]
+        if assigned.ndim < 2 or assigned.shape[-1] < 2:
+            raise RuntimeError(
+                "PhysX material readback has an unexpected shape after coupled "
+                f"friction assignment: {tuple(assigned.shape)}"
+            )
+        static = assigned[..., 0]
+        dynamic = assigned[..., 1]
+        if not torch.all(torch.isfinite(static)) or not torch.all(torch.isfinite(dynamic)):
+            raise RuntimeError("PhysX material readback contains non-finite friction values.")
+        if not torch.all(static > 0.0):
+            raise RuntimeError("PhysX material readback contains non-positive static friction.")
+        observed_ratio = dynamic / static
+        tolerance = 8.0 * torch.finfo(observed_ratio.dtype).eps
+        ratio_lower, ratio_upper = dynamic_friction_ratio_range
+        if not torch.all(
+            (observed_ratio >= ratio_lower - tolerance)
+            & (observed_ratio <= ratio_upper + tolerance)
+        ):
+            raise RuntimeError(
+                "PhysX material readback violates coupled friction ratio "
+                f"{dynamic_friction_ratio_range}; observed "
+                f"[{float(observed_ratio.min()):.9g}, {float(observed_ratio.max()):.9g}]"
+            )
+        logger.info(
+            "[Randomization] coupled object friction applied to '{}': "
+            "observed dynamic/static=[{:.6f}, {:.6f}]",
+            asset_cfg.name,
+            float(observed_ratio.min()),
+            float(observed_ratio.max()),
+        )
+
+
+def _validate_uniform_range(
+    name: str,
+    values: Sequence[float],
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> tuple[float, float]:
+    if len(values) != 2:
+        raise ValueError(f"{name} must contain exactly [lower, upper], got {values!r}")
+    lower, upper = float(values[0]), float(values[1])
+    if not math.isfinite(lower) or not math.isfinite(upper) or upper < lower:
+        raise ValueError(f"{name} must be finite with upper >= lower, got {values!r}")
+    if minimum is not None and lower < minimum:
+        raise ValueError(f"{name} lower bound must be >= {minimum}, got {values!r}")
+    if maximum is not None and upper > maximum:
+        raise ValueError(f"{name} upper bound must be <= {maximum}, got {values!r}")
+    return lower, upper
+
+
+def _couple_friction_material_buckets(
+    material_buckets: torch.Tensor,
+    *,
+    static_friction_range: Sequence[float],
+    dynamic_friction_ratio_range: Sequence[float],
+    restitution_range: Sequence[float],
+) -> torch.Tensor:
+    """Convert pre-sampled ``[static, ratio, restitution]`` buckets in place.
+
+    IsaacLab still owns the original three uniform draws, bucket count, and
+    subsequent material assignment. Treating its second draw as a ratio avoids
+    any extra RNG consumption while ensuring ``dynamic = static * ratio``.
+    """
+    static_lower, static_upper = _validate_uniform_range(
+        "static_friction_range",
+        static_friction_range,
+        minimum=0.0,
+    )
+    ratio_lower, ratio_upper = _validate_uniform_range(
+        "dynamic_friction_ratio_range",
+        dynamic_friction_ratio_range,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    restitution_lower, restitution_upper = _validate_uniform_range(
+        "restitution_range",
+        restitution_range,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if ratio_lower <= 0.0:
+        raise ValueError(
+            "dynamic_friction_ratio_range lower bound must be > 0, "
+            f"got {dynamic_friction_ratio_range!r}"
+        )
+    if material_buckets.ndim != 2 or material_buckets.shape[1] != 3:
+        raise ValueError(
+            "material_buckets must have shape [num_buckets, 3], "
+            f"got {tuple(material_buckets.shape)}"
+        )
+    if material_buckets.shape[0] <= 0:
+        raise ValueError("material_buckets must contain at least one bucket.")
+    if not torch.all(torch.isfinite(material_buckets)):
+        raise ValueError("material_buckets must contain only finite values.")
+
+    static = material_buckets[:, 0]
+    ratio = material_buckets[:, 1]
+    restitution = material_buckets[:, 2]
+    tolerance = 4.0 * torch.finfo(material_buckets.dtype).eps
+    if not torch.all((static >= static_lower - tolerance) & (static <= static_upper + tolerance)):
+        raise ValueError("IsaacLab static-friction bucket values fall outside the configured range.")
+    if not torch.all((ratio >= ratio_lower - tolerance) & (ratio <= ratio_upper + tolerance)):
+        raise ValueError("IsaacLab ratio bucket values fall outside the configured range.")
+    if not torch.all(
+        (restitution >= restitution_lower - tolerance)
+        & (restitution <= restitution_upper + tolerance)
+    ):
+        raise ValueError("IsaacLab restitution bucket values fall outside the configured range.")
+
+    coupled = material_buckets.clone()
+    coupled[:, 1] = static * ratio
+    return coupled
 
 
 def _object_physx_view_has_env_rows(
@@ -1098,8 +1309,9 @@ def randomize_object_rigid_body_material_startup(
     env_ids: Sequence[int] | torch.Tensor | None = None,
     *,
     static_friction_range: Sequence[float],
-    dynamic_friction_range: Sequence[float],
     restitution_range: Sequence[float],
+    dynamic_friction_range: Sequence[float] | None = None,
+    dynamic_friction_ratio_range: Sequence[float] | None = None,
     enabled: bool = True,
     **_,
 ) -> None:
@@ -1121,7 +1333,65 @@ def randomize_object_rigid_body_material_startup(
     if env_ids_cpu.numel() == 0:
         return
 
+    static_range = _validate_uniform_range(
+        "static_friction_range",
+        static_friction_range,
+        minimum=0.0,
+    )
+    restitution = _validate_uniform_range(
+        "restitution_range",
+        restitution_range,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if dynamic_friction_ratio_range is not None and dynamic_friction_range is not None:
+        raise ValueError(
+            "Specify either dynamic_friction_ratio_range for coupled sampling or "
+            "dynamic_friction_range for legacy independent sampling, not both."
+        )
+    if dynamic_friction_ratio_range is None and dynamic_friction_range is None:
+        raise ValueError(
+            "Object material randomization requires dynamic_friction_ratio_range "
+            "or legacy dynamic_friction_range."
+        )
+
+    ratio_range: tuple[float, float] | None = None
+    if dynamic_friction_ratio_range is not None:
+        ratio_range = _validate_uniform_range(
+            "dynamic_friction_ratio_range",
+            dynamic_friction_ratio_range,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        if ratio_range[0] <= 0.0:
+            raise ValueError(
+                "dynamic_friction_ratio_range lower bound must be > 0, "
+                f"got {dynamic_friction_ratio_range!r}"
+            )
+        # IsaacLab's assignment term still requires a dynamic-friction range
+        # in its call signature. The material buckets are replaced below by
+        # exact coupled samples, so this envelope is metadata only.
+        dynamic_range = (
+            static_range[0] * ratio_range[0],
+            static_range[1] * ratio_range[1],
+        )
+    else:
+        dynamic_range = _validate_uniform_range(
+            "dynamic_friction_range",
+            dynamic_friction_range,
+            minimum=0.0,
+        )
+
     num_buckets = 64
+    logger.info(
+        "[Randomization] object material: static={} dynamic/static={} "
+        "dynamic_envelope={} restitution={} buckets={}",
+        static_range,
+        ratio_range if ratio_range is not None else "independent",
+        dynamic_range,
+        restitution,
+        num_buckets,
+    )
     for asset_cfg in _resolve_object_asset_cfgs(simulator):
         if not _object_physx_view_has_env_rows(
             simulator,
@@ -1134,10 +1404,11 @@ def randomize_object_rigid_body_material_startup(
             simulator,
             env_ids_cpu,
             asset_cfg,
-            static_friction_range=(static_friction_range[0], static_friction_range[1]),
-            dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
-            restitution_range=(restitution_range[0], restitution_range[1]),
+            static_friction_range=static_range,
+            dynamic_friction_range=dynamic_range,
+            restitution_range=restitution,
             num_buckets=num_buckets,
+            dynamic_friction_ratio_range=ratio_range,
         )
 
 
@@ -1391,14 +1662,36 @@ def apply_pushes(
 
 
 def _camera_raycast_enabled(env: Any) -> bool:
-    pm = getattr(env, "perception_manager", None)
-    if pm is None or not hasattr(pm, "cfg"):
-        return False
-    cfg = pm.cfg
-    return bool(
-        getattr(cfg, "output_mode", "") == "camera_depth"
-        and getattr(cfg, "camera_source", "") in {"mesh_raycast", "far_tracking_warp"}
-    )
+    # Distillation may attach camera observations only to the teacher or
+    # critic.  Camera randomization state is environment-owned and consumed
+    # by every perception manager, so keying this gate only to the actor would
+    # leave those managers without the configured pose/noise samples and make
+    # their first update fail closed.  Traverse each unique role manager.
+    seen: set[int] = set()
+    for attr_name in (
+        "perception_manager",
+        "teacher_perception_manager",
+        "critic_perception_manager",
+    ):
+        pm = getattr(env, attr_name, None)
+        if pm is None or id(pm) in seen:
+            continue
+        seen.add(id(pm))
+        if not bool(getattr(pm, "enabled", True)) or not hasattr(pm, "cfg"):
+            continue
+        cfg = pm.cfg
+        if (
+            getattr(cfg, "output_mode", "") == "camera_depth"
+            and getattr(cfg, "camera_source", "")
+            in {
+                "mesh_raycast",
+                "far_tracking_warp",
+                "rendered",
+                "rendered_depth_sensor",
+            }
+        ):
+            return True
+    return False
 
 
 def setup_camera_raycast_randomization(
@@ -1436,72 +1729,106 @@ def randomize_camera_raycast(
 
     device = env.device
 
-    if not hasattr(env, "_perception_camera_offset_pos"):
+    def _finite_bound(value: Any, *, label: str) -> float:
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{label} must be a finite real number, got boolean {value!r}.")
+        try:
+            result = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be a finite real number, got {value!r}.") from exc
+        if not math.isfinite(result):
+            raise ValueError(f"{label} must be finite, got {value!r}.")
+        return result
+
+    def _range_pair(spec: Any, *, label: str) -> tuple[float, float]:
+        if isinstance(spec, Sequence) and not isinstance(spec, (str, bytes)):
+            if len(spec) != 2:
+                raise ValueError(f"{label} must contain exactly [low, high], got {spec!r}.")
+            low = _finite_bound(spec[0], label=f"{label}[0]")
+            high = _finite_bound(spec[1], label=f"{label}[1]")
+        else:
+            low = high = _finite_bound(spec, label=label)
+        if low > high:
+            raise ValueError(f"{label} lower bound {low} exceeds upper bound {high}.")
+        return low, high
+
+    def _parse_vec_range(spec: Any, keys: tuple[str, str, str], *, label: str):
+        if spec is None:
+            return None
+        if isinstance(spec, Mapping):
+            if set(spec) != set(keys):
+                raise ValueError(
+                    f"{label} must declare exactly axes {list(keys)}, got {sorted(str(key) for key in spec)}."
+                )
+            pairs = [_range_pair(spec[key], label=f"{label}.{key}") for key in keys]
+        else:
+            shared = _range_pair(spec, label=label)
+            pairs = [shared] * len(keys)
+        mins = torch.tensor([pair[0] for pair in pairs], device=device, dtype=torch.float32)
+        maxs = torch.tensor([pair[1] for pair in pairs], device=device, dtype=torch.float32)
+        return mins, maxs
+
+    def _sample_scalar(spec: Any, *, label: str, lower_limit: float, upper_limit: float | None = None):
+        if spec is None:
+            return None
+        low, high = _range_pair(spec, label=label)
+        if low < lower_limit or (upper_limit is not None and high > upper_limit):
+            interval = f"[{lower_limit}, {upper_limit}]" if upper_limit is not None else f"[{lower_limit}, +inf)"
+            raise ValueError(f"{label} must lie within {interval}, got [{low}, {high}].")
+        return torch_rand_float(low, high, (idx.numel(), 1), device=device).squeeze(1)
+
+    if not isinstance(getattr(env, "_perception_camera_offset_pos", None), torch.Tensor):
         env._perception_camera_offset_pos = torch.zeros((env.num_envs, 3), device=device)
         env._perception_camera_offset_quat = torch.zeros((env.num_envs, 4), device=device)
         env._perception_camera_offset_quat[:, 3] = 1.0
+    elif not isinstance(getattr(env, "_perception_camera_offset_quat", None), torch.Tensor):
+        raise ValueError("Camera position/quaternion randomization state is only partially initialized.")
+    if not isinstance(getattr(env, "_perception_camera_offset_rpy", None), torch.Tensor):
+        env._perception_camera_offset_rpy = torch.zeros((env.num_envs, 3), device=device)
 
     if translation_range is not None or rotation_range_deg is not None:
-        def _parse_vec_range(spec, keys):
-            if spec is None:
-                return None
-            if isinstance(spec, (list, tuple)) and len(spec) == 2:
-                mins = torch.tensor([float(spec[0])] * len(keys), device=device)
-                maxs = torch.tensor([float(spec[1])] * len(keys), device=device)
-                return mins, maxs
-            if isinstance(spec, (int, float)):
-                mins = torch.tensor([float(spec)] * len(keys), device=device)
-                maxs = torch.tensor([float(spec)] * len(keys), device=device)
-                return mins, maxs
-            if isinstance(spec, dict):
-                mins = []
-                maxs = []
-                for key in keys:
-                    val = spec.get(key, [0.0, 0.0])
-                    if isinstance(val, (list, tuple)) and len(val) == 2:
-                        mins.append(float(val[0]))
-                        maxs.append(float(val[1]))
-                    else:
-                        v = float(val)
-                        mins.append(v)
-                        maxs.append(v)
-                return torch.tensor(mins, device=device), torch.tensor(maxs, device=device)
-            raise ValueError("Invalid range spec for camera randomization.")
-
-        trans_range = _parse_vec_range(translation_range, ("x", "y", "z"))
+        trans_range = _parse_vec_range(
+            translation_range,
+            ("x", "y", "z"),
+            label="translation_range",
+        )
         if trans_range is not None:
             t_min, t_max = trans_range
             rand = torch.rand((idx.numel(), 3), device=device)
             env._perception_camera_offset_pos[idx] = t_min + (t_max - t_min) * rand
 
-        rot_range = _parse_vec_range(rotation_range_deg, ("roll", "pitch", "yaw"))
+        rot_range = _parse_vec_range(
+            rotation_range_deg,
+            ("roll", "pitch", "yaw"),
+            label="rotation_range_deg",
+        )
         if rot_range is not None:
             r_min, r_max = rot_range
             rand = torch.rand((idx.numel(), 3), device=device)
             rot_deg = r_min + (r_max - r_min) * rand
             rot_rad = torch.deg2rad(rot_deg)
             quat = quat_from_euler_xyz(rot_rad[:, 0], rot_rad[:, 1], rot_rad[:, 2])
+            env._perception_camera_offset_rpy[idx] = rot_rad
             env._perception_camera_offset_quat[idx] = quat
 
-    def _sample_scalar(spec):
-        if spec is None:
-            return None
-        if isinstance(spec, (list, tuple)) and len(spec) == 2:
-            low, high = float(spec[0]), float(spec[1])
-        else:
-            low = high = float(spec)
-        # torch_rand_float expects a 2D shape tuple.
-        return torch_rand_float(low, high, (idx.numel(), 1), device=device).squeeze(1)
-
-    std_mult = _sample_scalar(noise_std_mult_range)
-    drop_prob = _sample_scalar(noise_drop_prob_range)
+    std_mult = _sample_scalar(
+        noise_std_mult_range,
+        label="noise_std_mult_range",
+        lower_limit=0.0,
+    )
+    drop_prob = _sample_scalar(
+        noise_drop_prob_range,
+        label="noise_drop_prob_range",
+        lower_limit=0.0,
+        upper_limit=1.0,
+    )
 
     if std_mult is not None:
-        if not hasattr(env, "_perception_camera_noise_std_mult"):
+        if not isinstance(getattr(env, "_perception_camera_noise_std_mult", None), torch.Tensor):
             env._perception_camera_noise_std_mult = torch.zeros((env.num_envs,), device=device)
         env._perception_camera_noise_std_mult[idx] = std_mult
 
     if drop_prob is not None:
-        if not hasattr(env, "_perception_camera_noise_drop_prob"):
+        if not isinstance(getattr(env, "_perception_camera_noise_drop_prob", None), torch.Tensor):
             env._perception_camera_noise_drop_prob = torch.zeros((env.num_envs,), device=device)
         env._perception_camera_noise_drop_prob[idx] = drop_prob

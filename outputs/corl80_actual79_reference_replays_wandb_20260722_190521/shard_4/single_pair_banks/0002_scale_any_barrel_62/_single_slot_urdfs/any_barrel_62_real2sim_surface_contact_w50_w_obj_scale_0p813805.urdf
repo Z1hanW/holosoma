@@ -1,0 +1,32 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="any_barrel_62_real2sim_surface_contact_w50_w_obj_scale_0p813805">
+  <dynamics damping="0.5" friction="0.9" />
+  <link name="baseLink">
+    <inertial>
+      <mass value="0.1" />
+      <origin xyz="0 0 0" />
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002" />
+    </inertial>
+    <contact>
+      <lateral_friction value="0.9" />
+      <rolling_friction value="0.5" />
+      <stiffness value="30000" />
+      <damping value="1000" />
+    </contact>
+    <visual name="visual_000">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../../../../../../data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball/objects/any_barrel_62_real2sim_surface_contact_w50/any_barrel_62_real2sim_surface_contact_w50.obj" scale="0.813805157 0.813805157 0.813805157" />
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 0.7" />
+      </material>
+    </visual>
+    <collision name="collision_000">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../../../../../../data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball/objects/any_barrel_62_real2sim_surface_contact_w50/any_barrel_62_real2sim_surface_contact_w50.obj" scale="0.813805157 0.813805157 0.813805157" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

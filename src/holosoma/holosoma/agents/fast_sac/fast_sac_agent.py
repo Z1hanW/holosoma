@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+import numbers
 import os
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Sequence
@@ -21,13 +22,29 @@ from holosoma.agents.modules.augmentation_utils import SymmetryUtils
 from holosoma.agents.modules.logging_utils import LoggingHelper
 from holosoma.config_types.algo import FastSACConfig
 from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.managers.action.terms.joint_control import JointPositionActionTerm
 from holosoma.utils.average_meters import TensorAverageMeterDict
+from holosoma.utils.checkpoint_validation import (
+    load_verified_torch_checkpoint,
+    validate_checkpoint_iterations,
+    validate_finite_tree,
+    validate_module_state_compatibility,
+)
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
     export_policy_as_onnx,
     get_command_ranges_from_env,
     get_control_gains_from_config,
     get_urdf_text_from_robot_config,
+)
+from holosoma.utils.policy_init_preflight import (
+    ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
+    allow_legacy_unverified_policy_load,
+    validate_policy_init_payload_identity,
+)
+from holosoma.utils.rng_checkpoint import (
+    capture_rng_checkpoint_state,
+    restore_rng_checkpoint_state,
 )
 from holosoma.utils.safe_torch_import import (
     F,
@@ -39,6 +56,7 @@ from holosoma.utils.safe_torch_import import (
     optim,
     torch,
 )
+from holosoma.utils.training_provenance import validate_training_provenance
 
 torch.set_float32_matmul_precision("high")
 
@@ -49,13 +67,22 @@ class FastSACEnv:
         env: BaseTask,
         actor_obs_keys: Sequence[str],
         critic_obs_keys: Sequence[str],
+        action_boundary_mode: str,
     ):
         self._env = env
+        extras_contract_setter = getattr(env, "set_collection_extras_contract", None)
+        if callable(extras_contract_setter):
+            extras_contract_setter(dense_episode_stats=True)
+        else:
+            setattr(env, "_dense_episode_stats_each_step", True)
         self._actor_obs_keys = actor_obs_keys
         self._critic_obs_keys = critic_obs_keys
+        self._action_boundary_mode = action_boundary_mode
+        self._include_critic_obs = True
 
-        # Initialize per-joint action boundaries for proper tanh scaling
-        self._action_boundaries = self._compute_action_boundaries()
+        # Initialize the versioned transform from tanh outputs to the raw
+        # action vector consumed by the environment action manager.
+        self._action_boundaries, self._action_bias = self._compute_action_transform()
 
     def __getattr__(self, name: str):
         """Delegate attribute access to the wrapped environment."""
@@ -66,9 +93,15 @@ class FastSACEnv:
         return torch.cat([obs_dict[k] for k in self._actor_obs_keys], dim=1)
 
     def reset_with_critic_obs(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._include_critic_obs:
+            raise RuntimeError("Critic observations are unavailable in FastSAC evaluation-only mode.")
         obs_dict = self._env.reset_all()
         actor_obs = torch.cat([obs_dict[k] for k in self._actor_obs_keys], dim=1)
-        critic_obs = torch.cat([obs_dict[k] for k in self._critic_obs_keys], dim=1)
+        critic_obs = (
+            torch.cat([obs_dict[k] for k in self._critic_obs_keys], dim=1)
+            if self._include_critic_obs
+            else actor_obs
+        )
         return actor_obs, critic_obs
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
@@ -79,7 +112,11 @@ class FastSACEnv:
         if "final_observations" in info_dict:
             # Use true final observations when available
             final_actor_obs = torch.cat([info_dict["final_observations"][k] for k in self._actor_obs_keys], dim=1)
-            final_critic_obs = torch.cat([info_dict["final_observations"][k] for k in self._critic_obs_keys], dim=1)
+            final_critic_obs = (
+                torch.cat([info_dict["final_observations"][k] for k in self._critic_obs_keys], dim=1)
+                if self._include_critic_obs
+                else final_actor_obs
+            )
         else:
             final_actor_obs = actor_obs
             final_critic_obs = critic_obs
@@ -100,45 +137,127 @@ class FastSACEnv:
         }
         return actor_obs, rew_buf, reset_buf, extras
 
-    def _compute_action_boundaries(self) -> torch.Tensor:
-        """
-        Compute per-joint action scaling factors based on robot configuration.
-        Returns tensor of shape (num_dof,) containing the scaling factor for each joint.
+    def _compute_action_transform(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the versioned affine tanh-to-environment action transform."""
 
-        The scaling factor is the maximum difference between default and joint limits,
-        ensuring that action=0 corresponds to default position and action=±1 reaches
-        the furthest limit from default.
-        """
         robot_config = self._env.robot_config
+        device = self._env.device
+        dof_pos_lower_limits = torch.as_tensor(
+            robot_config.dof_pos_lower_limit_list,
+            dtype=torch.float32,
+            device=device,
+        )
+        dof_pos_upper_limits = torch.as_tensor(
+            robot_config.dof_pos_upper_limit_list,
+            dtype=torch.float32,
+            device=device,
+        )
+        num_dof = len(robot_config.dof_names)
+        if dof_pos_lower_limits.shape != (num_dof,) or dof_pos_upper_limits.shape != (num_dof,):
+            raise ValueError(
+                "FastSAC joint-limit arrays must match robot DOF order: "
+                f"num_dof={num_dof}, lower={tuple(dof_pos_lower_limits.shape)}, "
+                f"upper={tuple(dof_pos_upper_limits.shape)}."
+            )
+        if not bool(torch.isfinite(dof_pos_lower_limits).all().item()) or not bool(
+            torch.isfinite(dof_pos_upper_limits).all().item()
+        ):
+            raise ValueError("FastSAC joint limits must be finite.")
+        if bool((dof_pos_upper_limits <= dof_pos_lower_limits).any().item()):
+            raise ValueError("FastSAC upper joint limits must be strictly greater than lower limits.")
 
-        # Get joint limits and default positions
-        dof_pos_lower_limits = torch.tensor(robot_config.dof_pos_lower_limit_list, device=self._env.device)
-        dof_pos_upper_limits = torch.tensor(robot_config.dof_pos_upper_limit_list, device=self._env.device)
-
-        # Get default joint angles
-        default_joint_angles = torch.zeros(len(robot_config.dof_names), device=self._env.device)
+        default_joint_angles = torch.zeros(num_dof, dtype=torch.float32, device=device)
         for i, joint_name in enumerate(robot_config.dof_names):
             if joint_name in robot_config.init_state.default_joint_angles:
                 default_joint_angles[i] = robot_config.init_state.default_joint_angles[joint_name]
+        if not bool(torch.isfinite(default_joint_angles).all().item()):
+            raise ValueError("FastSAC default joint angles must be finite.")
 
-        # Get action scale from robot config
-        action_scale = robot_config.control.action_scale
+        if self._action_boundary_mode == "legacy_max_range_scalar_v1":
+            scalar_scale = robot_config.control.action_scale
+            if isinstance(scalar_scale, bool) or not math.isfinite(float(scalar_scale)) or float(scalar_scale) <= 0:
+                raise ValueError(
+                    f"Legacy FastSAC control.action_scale must be finite and positive, got {scalar_scale!r}."
+                )
+            max_range = torch.maximum(
+                torch.abs(dof_pos_lower_limits - default_joint_angles),
+                torch.abs(dof_pos_upper_limits - default_joint_angles),
+            )
+            actor_scale = max_range / float(scalar_scale)
+            actor_bias = torch.zeros_like(actor_scale)
+        elif self._action_boundary_mode == "joint_limit_affine_v2":
+            if robot_config.control.control_type != "P":
+                raise ValueError(
+                    "FastSAC joint_limit_affine_v2 requires position control (control_type='P')."
+                )
+            action_manager = getattr(self._env, "action_manager", None)
+            iter_terms = getattr(action_manager, "iter_terms", None)
+            if not callable(iter_terms):
+                raise RuntimeError(
+                    "FastSAC joint_limit_affine_v2 requires an initialized action manager."
+                )
+            joint_terms = [
+                (name, term)
+                for name, term in iter_terms()
+                if isinstance(term, JointPositionActionTerm)
+            ]
+            if len(joint_terms) != 1:
+                raise RuntimeError(
+                    "FastSAC requires exactly one JointPositionActionTerm for a scientific action transform; "
+                    f"found {[name for name, _ in joint_terms]!r}."
+                )
+            term_name, joint_term = joint_terms[0]
+            if int(getattr(action_manager, "total_action_dim", -1)) != num_dof or joint_term.action_dim != num_dof:
+                raise ValueError(
+                    "FastSAC action-manager dimension must equal robot actions_dim/num_dof: "
+                    f"term={term_name!r}, manager_dim={getattr(action_manager, 'total_action_dim', None)!r}, "
+                    f"term_dim={joint_term.action_dim}, num_dof={num_dof}."
+                )
+            effective_scale = joint_term.action_scales.detach().to(device=device, dtype=torch.float32)
+            if effective_scale.shape != (num_dof,) or not bool(torch.isfinite(effective_scale).all().item()):
+                raise ValueError(
+                    "FastSAC JointPositionActionTerm.action_scales must be a finite per-DOF vector."
+                )
+            if bool((effective_scale <= 0).any().item()):
+                raise ValueError("FastSAC effective JointPositionActionTerm action scales must be positive.")
+            if bool((default_joint_angles < dof_pos_lower_limits).any().item()) or bool(
+                (default_joint_angles > dof_pos_upper_limits).any().item()
+            ):
+                raise ValueError("FastSAC default joint angles must lie within configured joint limits.")
+            half_range = 0.5 * (dof_pos_upper_limits - dof_pos_lower_limits)
+            midpoint = 0.5 * (dof_pos_upper_limits + dof_pos_lower_limits)
+            actor_scale = half_range / effective_scale
+            actor_bias = (midpoint - default_joint_angles) / effective_scale
+            if bool(getattr(robot_config.control, "clip_actions", False)):
+                clip_limit = float(robot_config.control.action_clip_value)
+                if not math.isfinite(clip_limit) or clip_limit <= 0:
+                    raise ValueError("FastSAC action clip limit must be finite and positive.")
+                endpoint_magnitude = torch.maximum(
+                    torch.abs(actor_bias - actor_scale),
+                    torch.abs(actor_bias + actor_scale),
+                )
+                if bool((endpoint_magnitude > clip_limit).any().item()):
+                    raise ValueError(
+                        "FastSAC joint-limit affine transform exceeds the environment raw-action clip; "
+                        "the requested joint-limit mapping would be silently truncated."
+                    )
+        else:
+            raise ValueError(
+                "Unsupported FastSAC action_boundary_mode "
+                f"{self._action_boundary_mode!r}."
+            )
 
-        # Compute maximum range from default to either limit for each joint
-        # This ensures symmetric scaling where action=0 -> default position
-        range_to_lower = torch.abs(dof_pos_lower_limits - default_joint_angles)
-        range_to_upper = torch.abs(dof_pos_upper_limits - default_joint_angles)
-        max_range = torch.maximum(range_to_lower, range_to_upper)
-
-        # Account for action_scale: the environment applies actions_scaled = actions * action_scale
-        # So our scaling factor should be: max_range / action_scale
-        action_scaling_factors = max_range / action_scale
-
-        logger.info(f"Computed action scaling factors for {len(robot_config.dof_names)} DOFs")
-        logger.info(f"Action scale: {action_scale}")
-        logger.info(f"Scaling: {action_scaling_factors}")
-
-        return action_scaling_factors
+        if not bool(torch.isfinite(actor_scale).all().item()) or not bool(
+            torch.isfinite(actor_bias).all().item()
+        ):
+            raise ValueError("FastSAC actor action scale/bias must be finite.")
+        logger.info(
+            "Computed FastSAC action transform mode={} scale={} bias={}",
+            self._action_boundary_mode,
+            actor_scale,
+            actor_bias,
+        )
+        return actor_scale, actor_bias
 
 
 class FastSACAgent(BaseAlgo):
@@ -157,7 +276,12 @@ class FastSACAgent(BaseAlgo):
     def __init__(
         self, env: BaseTask, config: FastSACConfig, device: str, log_dir: str, multi_gpu_cfg: dict | None = None
     ):
-        wrapped_env = FastSACEnv(env, config.actor_obs_keys, config.critic_obs_keys)
+        wrapped_env = FastSACEnv(
+            env,
+            config.actor_obs_keys,
+            config.critic_obs_keys,
+            config.action_boundary_mode,
+        )
 
         super().__init__(wrapped_env, config, device, multi_gpu_cfg)  # type: ignore[arg-type]
         self.unwrapped_env = env
@@ -188,15 +312,34 @@ class FastSACAgent(BaseAlgo):
         args = self.config
         device = self.device
         env = self.env
+        evaluation_only = bool(getattr(self, "_evaluation_only", False))
+        for field_name in ("num_updates", "policy_frequency"):
+            value = getattr(args, field_name)
+            if isinstance(value, bool) or not isinstance(value, numbers.Integral) or int(value) <= 0:
+                raise ValueError(f"FastSAC {field_name} must be a positive integer, got {value!r}.")
+        env._include_critic_obs = not evaluation_only
 
-        algo_obs_dim_dict = self.env.observation_manager.get_obs_dims()
+        required_obs_groups = list(args.actor_obs_keys)
+        if not evaluation_only:
+            required_obs_groups.extend(args.critic_obs_keys)
+        algo_obs_dim_dict = self.env.observation_manager.get_obs_dims(required_obs_groups)
 
-        algo_history_length_dict: Dict[str, int] = {}
-
-        for group_cfg in self.env.observation_manager.cfg.groups.values():
-            history_len = getattr(group_cfg, "history_length", 1)
-            for term_name in group_cfg.terms:
-                algo_history_length_dict[term_name] = history_len
+        def concatenated_group_dim(group_name: str) -> int:
+            if group_name not in algo_obs_dim_dict:
+                raise KeyError(f"FastSAC observation group {group_name!r} does not exist.")
+            group_cfg = self.env.observation_manager.cfg.groups.get(group_name)
+            if group_cfg is None or getattr(group_cfg, "concatenate", None) is not True:
+                raise ValueError(
+                    f"FastSAC observation group {group_name!r} must concatenate its terms."
+                )
+            dimension = algo_obs_dim_dict[group_name]
+            if type(dimension) is not int or dimension <= 0:
+                raise ValueError(
+                    f"FastSAC observation group {group_name!r} must have a positive integer dimension, "
+                    f"got {dimension!r}."
+                )
+            # ObservationManager.get_obs_dims() already includes group history.
+            return dimension
 
         actor_obs_keys = self.config.actor_obs_keys
         critic_obs_keys = self.config.critic_obs_keys
@@ -207,8 +350,7 @@ class FastSACAgent(BaseAlgo):
         actor_obs_dim = 0
         self.actor_obs_indices = {}
         for obs_key in actor_obs_keys:
-            history_len = algo_history_length_dict.get(obs_key, 1)
-            obs_size = algo_obs_dim_dict[obs_key] * history_len
+            obs_size = concatenated_group_dim(obs_key)
 
             # Store start and end indices for this observation key
             self.actor_obs_indices[obs_key] = {
@@ -223,31 +365,27 @@ class FastSACAgent(BaseAlgo):
         # Compute critic observation dimensions and store indices
         critic_obs_dim = 0
         self.critic_obs_indices = {}
-        for obs_key in critic_obs_keys:
-            history_len = algo_history_length_dict.get(obs_key, 1)
-            obs_size = algo_obs_dim_dict[obs_key] * history_len
+        if not evaluation_only:
+            for obs_key in critic_obs_keys:
+                obs_size = concatenated_group_dim(obs_key)
 
-            # Store start and end indices for this observation key
-            self.critic_obs_indices[obs_key] = {
-                "start": critic_obs_dim,
-                "end": critic_obs_dim + obs_size,
-                "size": obs_size,
-            }
-            critic_obs_dim += obs_size
-
-        self.scaler = GradScaler(enabled=args.amp)
+                # Store start and end indices for this observation key
+                self.critic_obs_indices[obs_key] = {
+                    "start": critic_obs_dim,
+                    "end": critic_obs_dim + obs_size,
+                    "size": obs_size,
+                }
+                critic_obs_dim += obs_size
 
         self.obs_normalization = args.obs_normalization
         if args.obs_normalization:
             self.obs_normalizer: nn.Module = EmpiricalNormalization(shape=actor_obs_dim, device=device)
-            self.critic_obs_normalizer: nn.Module = EmpiricalNormalization(shape=critic_obs_dim, device=device)
         else:
             self.obs_normalizer = nn.Identity()
-            self.critic_obs_normalizer = nn.Identity()
 
         # Get action scaling parameters from the environment
         action_scale = env._action_boundaries if args.use_tanh else torch.ones(n_act, device=device)
-        action_bias = torch.zeros(n_act, device=device)  # Assuming zero bias for now
+        action_bias = env._action_bias if args.use_tanh else torch.zeros(n_act, device=device)
 
         # Handle CNN actor/critic
         if args.use_cnn_encoder:
@@ -257,7 +395,7 @@ class FastSACAgent(BaseAlgo):
         else:
             actor_mlp_obs_keys = list(actor_obs_keys)
             critic_mlp_obs_keys = list(critic_obs_keys)
-        actor_cls, critic_cls = (CNNActor, CNNCritic) if args.use_cnn_encoder else (Actor, Critic)
+        actor_cls = CNNActor if args.use_cnn_encoder else Actor
 
         self.actor = actor_cls(
             obs_indices=self.actor_obs_indices,
@@ -275,6 +413,28 @@ class FastSACAgent(BaseAlgo):
             encoder_obs_key=args.encoder_obs_key,
             encoder_obs_shape=args.encoder_obs_shape,
         )
+
+        self.policy = self.actor.explore
+        if evaluation_only:
+            self.actor.eval()
+            self.obs_normalizer.eval()
+            logger.info(
+                "FastSAC evaluation-only setup constructed actor/actor-normalizer only; "
+                "critic, target, optimizers, scaler, replay buffer, symmetry, and training collectives skipped."
+            )
+            return
+
+        # Count optimizer updates rather than collection iterations.  This
+        # keeps delayed actor updates correct across collection boundaries
+        # when num_updates is not a multiple of policy_frequency.
+        self._critic_update_step = 0
+        self.scaler = GradScaler(enabled=args.amp)
+        if args.obs_normalization:
+            self.critic_obs_normalizer = EmpiricalNormalization(shape=critic_obs_dim, device=device)
+        else:
+            self.critic_obs_normalizer = nn.Identity()
+
+        critic_cls = CNNCritic if args.use_cnn_encoder else Critic
         self.qnet = critic_cls(
             obs_indices=self.critic_obs_indices,
             obs_keys=critic_mlp_obs_keys,
@@ -294,8 +454,6 @@ class FastSACAgent(BaseAlgo):
         print(self.qnet)
 
         self.log_alpha = torch.tensor([math.log(args.alpha_init)], requires_grad=True, device=device)
-        self.policy = self.actor.explore
-
         self.qnet_target = critic_cls(
             obs_indices=self.critic_obs_indices,
             obs_keys=critic_mlp_obs_keys,
@@ -622,26 +780,232 @@ class FastSACAgent(BaseAlgo):
     def load(self, ckpt_path: str | None) -> None:
         if not ckpt_path:
             return
-        # Load checkpoint if specified
-        torch_checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        raise RuntimeError(
+            "FastSAC exact full resume is intentionally disabled: existing checkpoints do not "
+            "serialize the replay buffer or complete rank-local RNG/rollout continuation state. "
+            "Restoring global_step and optimizers without that state repeats or changes the data "
+            "distribution and is not a scientific continuation. Use "
+            "--training.policy-init-checkpoint for an explicit actor-only warm start, or start a "
+            "fresh run until a versioned full-state FastSAC checkpoint schema is implemented."
+        )
 
-        # Handle DDP-wrapped models
-        actor_state_dict = torch_checkpoint["actor_state_dict"]
-        qnet_state_dict = torch_checkpoint["qnet_state_dict"]
+    def _runtime_policy_config_dict(self) -> dict[str, Any] | None:
+        runtime_config = getattr(self, "_policy_load_runtime_config", None)
+        if runtime_config is None or not hasattr(runtime_config, "to_serializable_dict"):
+            return None
+        serialized = runtime_config.to_serializable_dict()
+        return serialized if isinstance(serialized, dict) else None
 
-        self.actor.load_state_dict(actor_state_dict)
-        self.qnet.load_state_dict(qnet_state_dict)
+    @staticmethod
+    def _validate_fast_sac_completed_step(checkpoint: dict[str, Any]) -> int:
+        completed_step, _next_step = validate_checkpoint_iterations(checkpoint)
+        global_step = checkpoint.get("global_step")
+        if isinstance(global_step, bool) or not isinstance(global_step, numbers.Integral):
+            raise ValueError(
+                f"FastSAC checkpoint global_step must be an integer, got {global_step!r}."
+            )
+        if int(global_step) < 0:
+            raise ValueError(f"FastSAC checkpoint global_step must be non-negative, got {global_step!r}.")
+        if int(global_step) != completed_step:
+            raise ValueError(
+                "FastSAC checkpoint step metadata is inconsistent: "
+                f"global_step={int(global_step)}, iteration={completed_step}."
+            )
+        return completed_step
 
-        self.obs_normalizer.load_state_dict(torch_checkpoint["obs_normalizer_state"])
-        self.critic_obs_normalizer.load_state_dict(torch_checkpoint["critic_obs_normalizer_state"])
-        self.qnet_target.load_state_dict(torch_checkpoint["qnet_target_state_dict"])
-        self.log_alpha.data.copy_(torch_checkpoint["log_alpha"].to(self.device))
-        self.actor_optimizer.load_state_dict(torch_checkpoint["actor_optimizer_state_dict"])
-        self.q_optimizer.load_state_dict(torch_checkpoint["q_optimizer_state_dict"])
-        self.alpha_optimizer.load_state_dict(torch_checkpoint["alpha_optimizer_state_dict"])
-        self.scaler.load_state_dict(torch_checkpoint["grad_scaler_state_dict"])
-        self.global_step = torch_checkpoint["global_step"]
-        self._restore_env_state(torch_checkpoint.get("env_state"))
+    def _validate_actor_action_transform(self, actor_state: dict[str, Any]) -> None:
+        reference_state = self.actor.state_dict()
+        for key in ("action_scale", "action_bias"):
+            checkpoint_value = actor_state.get(key)
+            runtime_value = reference_state.get(key)
+            if not isinstance(checkpoint_value, torch.Tensor) or not isinstance(runtime_value, torch.Tensor):
+                raise ValueError(f"FastSAC actor state must contain tensor buffer {key!r}.")
+            if not torch.allclose(
+                checkpoint_value.detach().to(device="cpu"),
+                runtime_value.detach().to(device="cpu"),
+                rtol=1e-6,
+                atol=1e-7,
+            ):
+                max_error = float(
+                    torch.max(
+                        torch.abs(
+                            checkpoint_value.detach().to(device="cpu")
+                            - runtime_value.detach().to(device="cpu")
+                        )
+                    ).item()
+                )
+                raise ValueError(
+                    "FastSAC checkpoint actor action transform disagrees with the versioned runtime "
+                    f"robot/action contract for {key!r}; max_abs_error={max_error:.9g}."
+                )
+
+    def _load_actor_only_impl(
+        self,
+        ckpt_path: str,
+        *,
+        evaluation: bool,
+    ) -> dict[str, Any] | None:
+        legacy_unverified = allow_legacy_unverified_policy_load()
+        current_config = self._runtime_policy_config_dict()
+        current_provenance = None if evaluation else getattr(self, "_training_provenance", None)
+        expected_sha256: str | None = None
+        if current_provenance is not None and not isinstance(current_provenance, dict):
+            raise ValueError(
+                "Attached FastSAC policy-init training provenance must be a mapping when present."
+            )
+        if not evaluation:
+            if isinstance(current_provenance, dict):
+                current_provenance = validate_training_provenance(
+                    current_provenance,
+                    require_finalized=True,
+                )
+                if current_provenance.get("policy_init_enabled") is not True:
+                    raise ValueError(
+                        "FastSAC.load_policy_init was called while training provenance does not enable "
+                        "policy initialization."
+                    )
+                expected_sha256 = current_provenance.get("policy_init_sha256")
+                if not isinstance(expected_sha256, str):
+                    raise ValueError(
+                        "FastSAC policy-init provenance has no authenticated policy_init_sha256."
+                    )
+            elif not legacy_unverified:
+                raise ValueError(
+                    "Scientific FastSAC policy initialization requires finalized current training "
+                    "provenance with policy_init_sha256. Set "
+                    f"{ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV}=1 only for an explicitly "
+                    "non-scientific legacy warm start."
+                )
+            else:
+                logger.warning(
+                    "{}=1: allowing FastSAC policy initialization without authenticated provenance.",
+                    ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
+                )
+        if current_config is None and not legacy_unverified:
+            raise ValueError(
+                "FastSAC actor-only loading requires attached runtime experiment_config metadata so "
+                "equal-shaped observation/action tensors cannot hide semantic drift. Set "
+                f"{ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV}=1 only for an explicitly non-scientific "
+                "legacy policy load."
+            )
+
+        checkpoint, actual_sha256 = load_verified_torch_checkpoint(
+            ckpt_path,
+            expected_sha256=expected_sha256,
+            map_location="cpu",
+        )
+        if not isinstance(checkpoint, dict):
+            raise ValueError("FastSAC checkpoint payload must be a mapping.")
+        saved_config = checkpoint.get("experiment_config")
+        if not isinstance(saved_config, dict):
+            raise ValueError("FastSAC checkpoint is missing mapping experiment_config metadata.")
+        if current_config is not None:
+            validate_policy_init_payload_identity(checkpoint, current_config)
+        else:
+            validate_policy_init_payload_identity(checkpoint, saved_config)
+            logger.warning(
+                "{}=1: FastSAC actor load has no live semantic-contract comparison.",
+                ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
+            )
+
+        actor_state = checkpoint.get("actor_state_dict")
+        if not isinstance(actor_state, dict):
+            raise ValueError("FastSAC checkpoint actor_state_dict must be a mapping.")
+        validate_finite_tree(actor_state, path="actor_state_dict")
+        validate_module_state_compatibility(
+            actor_state,
+            reference_state=self.actor.state_dict(),
+            path="actor_state_dict",
+        )
+        self._validate_actor_action_transform(actor_state)
+
+        normalizer_state = checkpoint.get("obs_normalizer_state")
+        if not isinstance(normalizer_state, dict):
+            raise ValueError("FastSAC checkpoint obs_normalizer_state must be a mapping.")
+        validate_module_state_compatibility(
+            normalizer_state,
+            reference_state=self.obs_normalizer.state_dict(),
+            path="obs_normalizer_state",
+        )
+
+        completed_step: int | None = None
+        source_provenance: dict[str, Any] | None = None
+        if evaluation:
+            completed_step = self._validate_fast_sac_completed_step(checkpoint)
+            raw_source_provenance = checkpoint.get("training_provenance")
+            if raw_source_provenance is not None:
+                source_provenance = validate_training_provenance(
+                    raw_source_provenance,
+                    require_finalized=True,
+                )
+
+        self.actor.load_state_dict(actor_state, strict=True)
+        self.obs_normalizer.load_state_dict(normalizer_state, strict=True)
+        validate_finite_tree(self.actor.state_dict(), path="live.actor_state_dict")
+        validate_finite_tree(
+            self.obs_normalizer.state_dict(),
+            path="live.obs_normalizer_state",
+        )
+        self.actor.eval() if evaluation else self.actor.train()
+        self.obs_normalizer.eval() if evaluation else self.obs_normalizer.train()
+
+        if evaluation:
+            assert completed_step is not None
+            self._evaluation_completed_iteration = completed_step
+            self._source_checkpoint_sha256 = actual_sha256
+            self._source_experiment_config_dict = copy.deepcopy(saved_config)
+            self._training_provenance = source_provenance
+            logger.info(
+                "Loaded FastSAC actor-only evaluation checkpoint step={}; ignored critic, target, "
+                "optimizers, scaler, replay buffer, global_step, env state, and critic normalizer; "
+                "retained source SHA/config/provenance.",
+                completed_step,
+            )
+        else:
+            logger.info(
+                "Loaded FastSAC actor-only policy initializer; training counter, critic, target, "
+                "optimizers, scaler, replay buffer, environment, and RNG streams remain fresh."
+            )
+        infos = checkpoint.get("infos")
+        return infos if isinstance(infos, dict) else None
+
+    def load_policy_init(self, ckpt_path: str | None) -> dict[str, Any] | None:
+        if ckpt_path is None:
+            return None
+        rng_state = capture_rng_checkpoint_state()
+        try:
+            return self._load_actor_only_impl(ckpt_path, evaluation=False)
+        finally:
+            restore_rng_checkpoint_state(
+                rng_state,
+                path="pre_fast_sac_policy_init_rng_state",
+            )
+
+    def load_evaluation(self, ckpt_path: str | None) -> dict[str, Any] | None:
+        if ckpt_path is None:
+            return None
+        if getattr(self, "_evaluation_only", False) is not True:
+            raise RuntimeError(
+                "FastSAC.load_evaluation requires attach_evaluation_metadata() before setup()."
+            )
+        rng_state = (
+            getattr(self, "_evaluation_rng_boundary_state", None)
+            or capture_rng_checkpoint_state()
+        )
+        try:
+            return self._load_actor_only_impl(ckpt_path, evaluation=True)
+        finally:
+            restore_rng_checkpoint_state(
+                rng_state,
+                path="pre_fast_sac_evaluation_setup_rng_state",
+            )
+
+    def _record_critic_update_and_should_update_policy(self) -> bool:
+        frequency = getattr(self.config, "policy_frequency", None)
+        if isinstance(frequency, bool) or not isinstance(frequency, numbers.Integral) or int(frequency) <= 0:
+            raise ValueError(f"FastSAC policy_frequency must be a positive integer, got {frequency!r}.")
+        self._critic_update_step = int(getattr(self, "_critic_update_step", 0)) + 1
+        return self._critic_update_step % int(frequency) == 0
 
     def learn(self) -> None:
         args = self.config
@@ -731,7 +1095,7 @@ class FastSACAgent(BaseAlgo):
                     prepared_batches = self._sample_and_prepare_batches(
                         batch_size, args.num_updates, normalize_obs, normalize_critic_obs
                     )
-                    for i, data in enumerate(prepared_batches):
+                    for data in prepared_batches:
                         # Data is already normalized, just run the updates
                         (
                             buffer_rewards,
@@ -741,10 +1105,7 @@ class FastSACAgent(BaseAlgo):
                             qf_min,
                             alpha_loss,
                         ) = update_main(data)
-                        if args.num_updates > 1:
-                            if i % args.policy_frequency == 1:
-                                actor_grad_norm, actor_loss, policy_entropy, action_std = update_pol(data)
-                        elif self.global_step % args.policy_frequency == 0:
+                        if self._record_critic_update_and_should_update_policy():
                             actor_grad_norm, actor_loss, policy_entropy, action_std = update_pol(data)
 
                         # Accumulate training metrics for smoother logging
@@ -973,7 +1334,12 @@ class FastSACAgent(BaseAlgo):
             "robot_urdf": urdf_str,
             "robot_urdf_path": urdf_file_path,
         }
-        metadata.update(self._checkpoint_metadata(iteration=self.global_step))
+        completed_iteration = (
+            self._evaluation_completed_iteration
+            if self._evaluation_completed_iteration is not None
+            else self.global_step
+        )
+        metadata.update(self._checkpoint_metadata(iteration=completed_iteration))
 
         attach_onnx_metadata(
             onnx_path=onnx_file_path,

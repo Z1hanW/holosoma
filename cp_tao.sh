@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
 NFS_TAO_ROOT=${NFS_TAO_ROOT:-/nfs/zzzihanw/tao}
 ROLLOUT_ASSET_ROOT=${ROLLOUT_ASSET_ROOT:-${NFS_TAO_ROOT}/teacher_rollout_assets_20260415}
 ROLLOUT_ARCHIVE=${ROLLOUT_ARCHIVE:-${NFS_TAO_ROOT}/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc.tar.gz}
-RAW_EXPORT_DEST=${RAW_EXPORT_DEST:-${SCRIPT_DIR}/outputs/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc}
-FILTERED_MOTION_BANK_NAME=${FILTERED_MOTION_BANK_NAME:-motion_bank_success_box_0_92_0p3}
+RAW_EXPORT_DEST=${RAW_EXPORT_DEST-${SCRIPT_DIR}/outputs/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc}
+FILTERED_MOTION_BANK_NAME=${FILTERED_MOTION_BANK_NAME-motion_bank_success_box_0_92_0p3}
 
 # Optional standalone AS teacher-rollout distillation bank filtered by:
 #   stable_contact_success=True and final_object_position_error_m<=0.5
@@ -16,13 +16,161 @@ FILTERED_MOTION_BANK_NAME=${FILTERED_MOTION_BANK_NAME:-motion_bank_success_box_0
 # this script installs a repo-local copy with only relative symlinks.
 COPY_AS_SUCCESS133=${COPY_AS_SUCCESS133:-0}
 ONLY_AS_SUCCESS133=${ONLY_AS_SUCCESS133:-0}
-AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5}
+AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME-carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5}
 AS_SUCCESS133_EXPECTED_TOTAL=${AS_SUCCESS133_EXPECTED_TOTAL:-133}
-AS_SUCCESS133_CONTACT_EXPORT_NAME=${AS_SUCCESS133_CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
+AS_SUCCESS133_CONTACT_EXPORT_NAME=${AS_SUCCESS133_CONTACT_EXPORT_NAME-contact_export_from_teacher_success133_final0p5}
 AS_SUCCESS133_SOURCE=${AS_SUCCESS133_SOURCE:-}
-LOCAL_AS_ROOT=${LOCAL_AS_ROOT:-data/ds_as_data}
+LOCAL_AS_ROOT=${LOCAL_AS_ROOT-data/ds_as_data}
 NFS_TAO_PARENT=$(dirname "${NFS_TAO_ROOT}")
 AS_SUCCESS133_SOURCE_CANDIDATES=${AS_SUCCESS133_SOURCE_CANDIDATES:-"${NFS_TAO_ROOT}/${AS_SUCCESS133_BANK_NAME} ${NFS_TAO_ROOT}/ds_as_data/${AS_SUCCESS133_BANK_NAME} ${NFS_TAO_PARENT}/ds_as_data/${AS_SUCCESS133_BANK_NAME}"}
+
+REPO_OUTPUT_ROOT="${SCRIPT_DIR}/outputs"
+REPO_VIS_OUTPUT_ROOT="${SCRIPT_DIR}/outputs_vis"
+REPO_STATS_OUTPUT_ROOT="${SCRIPT_DIR}/outputs_sts"
+REPO_AS_BANK_ROOT="${SCRIPT_DIR}/data/ds_as_data"
+
+is_truthy() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_safe_component() {
+  local value="${1:-}"
+  local label="$2"
+  if [[ -z "${value}" || "${value}" == "." || "${value}" == ".." || "${value}" == */* || "${value}" == *\\* ]]; then
+    echo "[ERROR] Unsafe ${label}: ${value:-<empty>}" >&2
+    return 2
+  fi
+}
+
+resolve_owned_descendant() {
+  local raw_path="${1:-}"
+  local allowed_root="$2"
+  local label="$3"
+  local allow_root="${4:-0}"
+  local allowed_lexical
+  local allowed_resolved
+  local target_lexical
+  local target_resolved
+  local relative_lexical
+  local relative_resolved
+  local cursor
+  local component
+  local -a components=()
+
+  if [[ -z "${raw_path//[[:space:]]/}" ]]; then
+    echo "[ERROR] Refusing empty ${label}." >&2
+    return 2
+  fi
+  if ! command -v realpath >/dev/null 2>&1; then
+    echo "[ERROR] realpath is required for destructive path validation." >&2
+    return 2
+  fi
+
+  allowed_lexical=$(realpath -ms -- "${allowed_root}")
+  allowed_resolved=$(realpath -m -- "${allowed_root}")
+  target_lexical=$(realpath -ms -- "${raw_path}")
+  target_resolved=$(realpath -m -- "${raw_path}")
+
+  if [[ -L "${allowed_lexical}" ]]; then
+    echo "[ERROR] Refusing symlinked allowed root for ${label}: ${allowed_lexical}" >&2
+    return 2
+  fi
+
+  case "${target_lexical}" in
+    "${allowed_lexical}")
+      if ! is_truthy "${allow_root}"; then
+        echo "[ERROR] Refusing to use allowed root itself as ${label}: ${allowed_resolved}" >&2
+        return 2
+      fi
+      ;;
+    "${allowed_lexical}"/*) ;;
+    *)
+      echo "[ERROR] Refusing ${label} outside allowed root ${allowed_resolved}: ${target_lexical}" >&2
+      return 2
+      ;;
+  esac
+  case "${target_resolved}" in
+    "${allowed_resolved}")
+      if ! is_truthy "${allow_root}"; then
+        echo "[ERROR] Refusing resolved allowed root itself as ${label}: ${allowed_resolved}" >&2
+        return 2
+      fi
+      ;;
+    "${allowed_resolved}"/*) ;;
+    *)
+      echo "[ERROR] Refusing symlink escape for ${label}: ${target_lexical} -> ${target_resolved}" >&2
+      return 2
+      ;;
+  esac
+
+  if [[ "${target_lexical}" == "${allowed_lexical}" ]]; then
+    relative_lexical=""
+  else
+    relative_lexical=${target_lexical#"${allowed_lexical}"/}
+  fi
+  if [[ "${target_resolved}" == "${allowed_resolved}" ]]; then
+    relative_resolved=""
+  else
+    relative_resolved=${target_resolved#"${allowed_resolved}"/}
+  fi
+  if [[ "${relative_lexical}" != "${relative_resolved}" ]]; then
+    echo "[ERROR] Refusing aliased or root ${label}: ${target_lexical} -> ${target_resolved}" >&2
+    return 2
+  fi
+
+  if [[ -n "${relative_lexical}" ]]; then
+    IFS='/' read -r -a components <<< "${relative_lexical}"
+    cursor="${allowed_lexical}"
+    for component in "${components[@]}"; do
+      cursor="${cursor}/${component}"
+      if [[ -L "${cursor}" ]]; then
+        echo "[ERROR] Refusing symlink component in ${label}: ${cursor}" >&2
+        return 2
+      fi
+    done
+  fi
+
+  case "${target_resolved}" in
+    /|"${SCRIPT_DIR}"|"${REPO_OUTPUT_ROOT}"|"${REPO_AS_BANK_ROOT}")
+      echo "[ERROR] Refusing protected root as ${label}: ${target_resolved}" >&2
+      return 2
+      ;;
+  esac
+  printf '%s\n' "${target_resolved}"
+}
+
+validate_local_as_root() {
+  local configured_root="$1"
+  local configured_lexical
+  local configured_resolved
+  local expected_lexical
+  local expected_resolved
+  local cursor
+
+  if [[ -z "${configured_root//[[:space:]]/}" ]]; then
+    echo "[ERROR] LOCAL_AS_ROOT must be the repo-owned AS bank root: $(realpath -m -- "${REPO_AS_BANK_ROOT}")" >&2
+    echo "[ERROR] Got an empty path." >&2
+    return 2
+  fi
+  configured_lexical=$(realpath -ms -- "${configured_root}")
+  configured_resolved=$(realpath -m -- "${configured_root}")
+  expected_lexical=$(realpath -ms -- "${REPO_AS_BANK_ROOT}")
+  expected_resolved=$(realpath -m -- "${REPO_AS_BANK_ROOT}")
+  if [[ "${configured_lexical}" != "${expected_lexical}" || "${configured_resolved}" != "${expected_resolved}" ]]; then
+    echo "[ERROR] LOCAL_AS_ROOT must be the repo-owned AS bank root: ${expected_resolved}" >&2
+    echo "[ERROR] Got: ${configured_root} -> ${configured_resolved}" >&2
+    return 2
+  fi
+  cursor="${SCRIPT_DIR}/data"
+  if [[ -L "${cursor}" || -L "${REPO_AS_BANK_ROOT}" ]]; then
+    echo "[ERROR] Refusing symlinked repo AS bank root: ${REPO_AS_BANK_ROOT}" >&2
+    return 2
+  fi
+  printf '%s\n' "${expected_resolved}"
+}
 
 case "${1:-}" in
   success133|as-success133|as_success133|success133-final0p5|success133_final0p5)
@@ -37,10 +185,21 @@ if [[ $# -gt 0 ]]; then
   exit 2
 fi
 
-case "$(echo "${ONLY_AS_SUCCESS133}" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes|on) ;;
-  *) mkdir -p outputs ;;
-esac
+require_safe_component "${FILTERED_MOTION_BANK_NAME}" "FILTERED_MOTION_BANK_NAME"
+require_safe_component "${AS_SUCCESS133_BANK_NAME}" "AS_SUCCESS133_BANK_NAME"
+require_safe_component "${AS_SUCCESS133_CONTACT_EXPORT_NAME}" "AS_SUCCESS133_CONTACT_EXPORT_NAME"
+LOCAL_AS_ROOT=$(validate_local_as_root "${LOCAL_AS_ROOT}")
+
+if ! is_truthy "${ONLY_AS_SUCCESS133}"; then
+  OUTPUT_MOTION_BANK=$(resolve_owned_descendant "${REPO_OUTPUT_ROOT}/motion_bank" "${REPO_OUTPUT_ROOT}" "motion bank destination")
+  OUTPUT_FILTERED_MOTION_BANK=$(resolve_owned_descendant "${REPO_OUTPUT_ROOT}/${FILTERED_MOTION_BANK_NAME}" "${REPO_OUTPUT_ROOT}" "filtered motion bank destination")
+  OUTPUT_DROP_FINAL_MOTION_BANK=$(resolve_owned_descendant "${REPO_OUTPUT_ROOT}/motion_bank_drop_final_1aaf51f7c2" "${REPO_OUTPUT_ROOT}" "drop-final motion bank destination")
+  OUTPUT_CLIPS=$(resolve_owned_descendant "${REPO_OUTPUT_ROOT}/clips" "${REPO_OUTPUT_ROOT}" "rollout clips destination")
+  OUTPUT_VIS=$(resolve_owned_descendant "${REPO_VIS_OUTPUT_ROOT}" "${REPO_VIS_OUTPUT_ROOT}" "rollout visualization destination" 1)
+  OUTPUT_STS=$(resolve_owned_descendant "${REPO_STATS_OUTPUT_ROOT}" "${REPO_STATS_OUTPUT_ROOT}" "rollout statistics destination" 1)
+  RAW_EXPORT_DEST=$(resolve_owned_descendant "${RAW_EXPORT_DEST}" "${REPO_OUTPUT_ROOT}" "raw rollout export destination")
+  mkdir -p "${REPO_OUTPUT_ROOT}"
+fi
 
 require_dir() {
   local path="$1"
@@ -48,13 +207,6 @@ require_dir() {
     echo "[ERROR] Missing directory: ${path}" >&2
     exit 1
   fi
-}
-
-is_truthy() {
-  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    1|true|yes|on) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 if ! is_truthy "${ONLY_AS_SUCCESS133}"; then
@@ -121,12 +273,19 @@ if not clip_ids:
     raise SystemExit(f"[ERROR] No clips listed in {success_clips_file}")
 
 def infer_clip_id(dir_name: str) -> str:
-    return dir_name.split("_", 1)[1].strip() if "_" in dir_name else dir_name.strip()
+    normalized = dir_name.strip()
+    prefix, separator, suffix = normalized.partition("_")
+    return suffix.strip() if separator and prefix.isdecimal() and suffix.strip() else normalized
 
 contact_dirs: dict[str, Path] = {}
 for candidate in clips_dir.iterdir():
     if candidate.is_dir():
-        contact_dirs.setdefault(infer_clip_id(candidate.name), candidate)
+        clip_id = candidate.name if candidate.name in seen else infer_clip_id(candidate.name)
+        if clip_id in contact_dirs:
+            raise SystemExit(
+                f"[ERROR] Duplicate contact directories for {clip_id}: {contact_dirs[clip_id]}, {candidate}"
+            )
+        contact_dirs[clip_id] = candidate
 
 missing: list[str] = []
 for clip_id in clip_ids:
@@ -154,11 +313,11 @@ PY
 if ! is_truthy "${ONLY_AS_SUCCESS133}"; then
   validate_rollout_assets "${SOURCE_MOTION_BANK}" "${SOURCE_CLIPS}" "${SOURCE_SUCCESS_CLIPS}"
 
-  mkdir -p outputs/motion_bank
-  mkdir -p "outputs/${FILTERED_MOTION_BANK_NAME}"
-  mkdir -p outputs/clips
-  mkdir -p outputs_vis
-  mkdir -p outputs_sts
+  mkdir -p "${OUTPUT_MOTION_BANK}"
+  mkdir -p "${OUTPUT_FILTERED_MOTION_BANK}"
+  mkdir -p "${OUTPUT_CLIPS}"
+  mkdir -p "${OUTPUT_VIS}"
+  mkdir -p "${OUTPUT_STS}"
 fi
 
 count_npz_in_dir() {
@@ -333,8 +492,10 @@ install_as_success133_bank() {
     return 0
   fi
 
-  local dest_dir="${LOCAL_AS_ROOT}/${AS_SUCCESS133_BANK_NAME}"
-  local tmp_dir="${LOCAL_AS_ROOT}/.${AS_SUCCESS133_BANK_NAME}.tmp.$$"
+  local dest_dir
+  local tmp_dir
+  dest_dir=$(resolve_owned_descendant "${LOCAL_AS_ROOT}/${AS_SUCCESS133_BANK_NAME}" "${LOCAL_AS_ROOT}" "AS success133 destination bank")
+  tmp_dir=$(resolve_owned_descendant "${LOCAL_AS_ROOT}/.${AS_SUCCESS133_BANK_NAME}.tmp.$$" "${LOCAL_AS_ROOT}" "AS success133 staging bank")
   local source_abs
   local dest_abs
   source_abs=$(python3 - "${source_dir}" <<'PY'
@@ -483,7 +644,9 @@ if not clips_root.is_dir():
     bad.append(f"missing contact sidecars: {clips_root}")
 else:
     def infer_clip_id(dir_name: str) -> str:
-        return dir_name.split("_", 1)[1].strip() if "_" in dir_name else dir_name.strip()
+        normalized = dir_name.strip()
+        prefix, separator, suffix = normalized.partition("_")
+        return suffix.strip() if separator and prefix.isdecimal() and suffix.strip() else normalized
 
     required_files = (
         "metadata.json",
@@ -496,13 +659,15 @@ else:
     )
     contact_ids: set[str] = set()
     for clip_dir in sorted(path for path in clips_root.iterdir() if path.is_dir()):
-        clip_id = infer_clip_id(clip_dir.name)
+        clip_id = clip_dir.name if clip_dir.name in npz_ids else infer_clip_id(clip_dir.name)
         metadata_path = clip_dir / "metadata.json"
         if metadata_path.is_file():
             try:
                 clip_id = str(json.loads(metadata_path.read_text(encoding="utf-8")).get("clip_id") or clip_id)
             except Exception as exc:
                 bad.append(f"{clip_dir.name}: invalid metadata.json: {exc}")
+        if clip_id in contact_ids:
+            bad.append(f"duplicate contact directory for active clip {clip_id}")
         contact_ids.add(clip_id)
         for file_name in required_files:
             if not (clip_dir / file_name).is_file():
@@ -542,54 +707,54 @@ if is_truthy "${ONLY_AS_SUCCESS133}"; then
 fi
 
 echo "[INFO] Syncing teacher rollout motion bank -> outputs/motion_bank"
-rsync -avh --delete "${SOURCE_MOTION_BANK}/" outputs/motion_bank/
+rsync -avh --delete "${SOURCE_MOTION_BANK}/" "${OUTPUT_MOTION_BANK}/"
 
 if [[ -d "${SOURCE_FILTERED_MOTION_BANK}" ]]; then
   echo "[INFO] Syncing filtered rollout motion bank -> outputs/${FILTERED_MOTION_BANK_NAME}"
-  rsync -avh --delete "${SOURCE_FILTERED_MOTION_BANK}/" "outputs/${FILTERED_MOTION_BANK_NAME}/"
+  rsync -avh --delete "${SOURCE_FILTERED_MOTION_BANK}/" "${OUTPUT_FILTERED_MOTION_BANK}/"
 fi
 
 if [[ -n "${SOURCE_DROP_FINAL_MOTION_BANK}" && -d "${SOURCE_DROP_FINAL_MOTION_BANK}" ]]; then
-  mkdir -p outputs/motion_bank_drop_final_1aaf51f7c2
+  mkdir -p "${OUTPUT_DROP_FINAL_MOTION_BANK}"
   echo "[INFO] Syncing drop-final motion bank -> outputs/motion_bank_drop_final_1aaf51f7c2"
-  rsync -avh --delete "${SOURCE_DROP_FINAL_MOTION_BANK}/" outputs/motion_bank_drop_final_1aaf51f7c2/
+  rsync -avh --delete "${SOURCE_DROP_FINAL_MOTION_BANK}/" "${OUTPUT_DROP_FINAL_MOTION_BANK}/"
 else
   echo "[WARN] Drop-final motion bank not found in NFS/archive sources; leaving outputs/motion_bank_drop_final_1aaf51f7c2 unchanged"
 fi
 
 echo "[INFO] Syncing rollout clip references -> outputs/clips"
-rsync -avh --delete "${SOURCE_CLIPS}/" outputs/clips/
+rsync -avh --delete "${SOURCE_CLIPS}/" "${OUTPUT_CLIPS}/"
 
 if [[ -d "${SOURCE_OUTPUTS_VIS}" ]]; then
   echo "[INFO] Syncing rollout visualizations -> outputs_vis"
-  rsync -avh --delete "${SOURCE_OUTPUTS_VIS}/" outputs_vis/
+  rsync -avh --delete "${SOURCE_OUTPUTS_VIS}/" "${OUTPUT_VIS}/"
 else
   echo "[WARN] Visualization directory not found at ${SOURCE_OUTPUTS_VIS}; skipping outputs_vis sync"
 fi
 
 if [[ -d "${SOURCE_OUTPUTS_STS}" ]]; then
   echo "[INFO] Syncing rollout statistics -> outputs_sts"
-  rsync -avh --delete "${SOURCE_OUTPUTS_STS}/" outputs_sts/
+  rsync -avh --delete "${SOURCE_OUTPUTS_STS}/" "${OUTPUT_STS}/"
 else
   echo "[WARN] Statistics directory not found at ${SOURCE_OUTPUTS_STS}; skipping outputs_sts sync"
 fi
 
 prepare_success_motion_subset \
-  outputs/motion_bank \
-  outputs_sts/success_clips.txt \
-  "outputs/${FILTERED_MOTION_BANK_NAME}"
+  "${OUTPUT_MOTION_BANK}" \
+  "${OUTPUT_STS}/success_clips.txt" \
+  "${OUTPUT_FILTERED_MOTION_BANK}"
 
 if is_truthy "${COPY_AS_SUCCESS133}"; then
   install_as_success133_bank
 fi
 
 echo "[INFO] Restored rollout assets:"
-echo "  - $(count_npz_in_dir outputs/motion_bank) clips in outputs/motion_bank"
-echo "  - $(count_npz_or_symlinks_in_dir "outputs/${FILTERED_MOTION_BANK_NAME}") clips in outputs/${FILTERED_MOTION_BANK_NAME}"
-echo "  - $(count_npz_in_dir outputs/motion_bank_drop_final_1aaf51f7c2) clips in outputs/motion_bank_drop_final_1aaf51f7c2"
-echo "  - $(find outputs/clips -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') clip dirs in outputs/clips"
-echo "  - $(find outputs_vis/clips -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_vis/clips"
-echo "  - $(find outputs_sts/clips -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_sts/clips"
+echo "  - $(count_npz_in_dir "${OUTPUT_MOTION_BANK}") clips in outputs/motion_bank"
+echo "  - $(count_npz_or_symlinks_in_dir "${OUTPUT_FILTERED_MOTION_BANK}") clips in outputs/${FILTERED_MOTION_BANK_NAME}"
+echo "  - $(count_npz_in_dir "${OUTPUT_DROP_FINAL_MOTION_BANK}") clips in outputs/motion_bank_drop_final_1aaf51f7c2"
+echo "  - $(find "${OUTPUT_CLIPS}" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') clip dirs in outputs/clips"
+echo "  - $(find "${OUTPUT_VIS}/clips" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_vis/clips"
+echo "  - $(find "${OUTPUT_STS}/clips" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_sts/clips"
 if [[ -d "${LOCAL_AS_ROOT}/${AS_SUCCESS133_BANK_NAME}" ]]; then
   echo "  - $(count_npz_or_symlinks_in_dir "${LOCAL_AS_ROOT}/${AS_SUCCESS133_BANK_NAME}") clips in ${LOCAL_AS_ROOT}/${AS_SUCCESS133_BANK_NAME}"
 fi

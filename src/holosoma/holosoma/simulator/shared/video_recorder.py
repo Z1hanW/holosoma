@@ -492,6 +492,9 @@ class VideoRecorderInterface(ABC):
                 save_dir=save_dir,
                 output_format=self.config.output_format,
                 wandb_logging=self.config.upload_to_wandb,
+                # Training metrics own the explicit iteration step.  Buffer
+                # rollout media so it cannot advance W&B ahead of that row.
+                wandb_commit=False,
                 episode_id=self._current_episode,
             )
 

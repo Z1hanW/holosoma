@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -48,6 +50,11 @@ class BaseTask:
         """
         self._manager_domain_rand_cfg = None
         self.is_evaluating = False
+        # Direct/FastSAC consumers historically receive dense per-environment
+        # reward episode statistics on every step.  PPO opts into sparse
+        # reset-only statistics through ``set_collection_extras_contract`` so
+        # its common no-reset path can skip the entire reset stack.
+        self._dense_episode_stats_each_step = True
 
         observation_config = tyro_config.observation
         simulator_config = tyro_config.simulator
@@ -89,12 +96,16 @@ class BaseTask:
         torch._C._jit_set_profiling_mode(False)
         torch._C._jit_set_profiling_executor(False)
 
-        # Compute experiment directory from logger config
-        from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
+        # Training publishes one process-wide identity before constructing the
+        # environment.  Reuse it so simulator/video paths cannot drift away
+        # from checkpoints and rank logs due to a later local timestamp.
+        from holosoma.utils.experiment_paths import get_process_experiment_dir
 
-        timestamp = get_timestamp()
-        experiment_dir = get_experiment_dir(
-            tyro_config.logger, tyro_config.training, timestamp, task_name=self._get_task_name()
+        experiment_dir = get_process_experiment_dir(
+            tyro_config.logger,
+            tyro_config.training,
+            task_name=self._get_task_name(),
+            use_override_task_name=True,
         )
 
         SimulatorClass = get_class(simulator_config._target_)
@@ -204,6 +215,7 @@ class BaseTask:
             self.curriculum_manager.setup()
         if self.terrain_manager is not None:
             self.terrain_manager.setup()
+        self._validate_rendered_perception_topology()
         if self.perception_manager is not None:
             self.perception_manager.setup()
         if self.teacher_perception_manager is not None:
@@ -247,16 +259,177 @@ class BaseTask:
     def _refresh_sim_tensors(self):
         self.simulator.refresh_sim_tensors()
 
-    def get_checkpoint_state(self) -> dict[str, torch.Tensor | float]:
+    def _perception_checkpoint_topology(
+        self,
+    ) -> tuple[dict[str, str | None], dict[str, PerceptionManager]]:
+        """Return role aliases and each unique enabled perception manager."""
+
+        role_owners: dict[str, str | None] = {}
+        managers_by_owner: dict[str, PerceptionManager] = {}
+        owner_by_identity: dict[int, str] = {}
+        for role, attribute in (
+            ("actor", "perception_manager"),
+            ("teacher", "teacher_perception_manager"),
+            ("critic", "critic_perception_manager"),
+        ):
+            manager = getattr(self, attribute, None)
+            if manager is None or not bool(getattr(manager, "enabled", False)):
+                role_owners[role] = None
+                continue
+            identity = id(manager)
+            owner = owner_by_identity.get(identity)
+            if owner is None:
+                owner = role
+                owner_by_identity[identity] = owner
+                managers_by_owner[owner] = manager
+            role_owners[role] = owner
+        return role_owners, managers_by_owner
+
+    def _validate_rendered_perception_topology(self) -> None:
+        """Reject unique rendered managers that target one shared camera."""
+
+        _, managers_by_owner = self._perception_checkpoint_topology()
+        target_owners: dict[tuple[str, int], str] = {}
+        for owner, manager in managers_by_owner.items():
+            if not manager._uses_rendered_camera():
+                continue
+            target = (
+                str(getattr(manager, "_simulator_backend", "unknown")),
+                int(getattr(manager, "_rendered_camera_env_id", 0)),
+            )
+            existing = target_owners.get(target)
+            if existing is not None:
+                raise RuntimeError(
+                    "Multiple unique rendered perception managers target the same simulator camera "
+                    f"{target}: owners={existing!r},{owner!r}. Their prim/model camera state would "
+                    "overwrite each other; share one manager or use distinct camera targets."
+                )
+            target_owners[target] = owner
+
+    def _get_perception_checkpoint_state(self) -> dict[str, Any]:
+        # Every PPO checkpoint advertises an exact canonical continuation.
+        # Refuse to publish one for a backend whose hidden temporal state is
+        # known to be outside this envelope.
+        self._validate_perception_exact_resume_supported()
+        role_owners, managers_by_owner = self._perception_checkpoint_topology()
+        return {
+            "version": 1,
+            "role_owners": role_owners,
+            "states": {
+                owner: manager.get_persistent_checkpoint_state()
+                for owner, manager in managers_by_owner.items()
+            },
+        }
+
+    def _perception_checkpoint_state_required(self) -> bool:
+        _, managers_by_owner = self._perception_checkpoint_topology()
+        return any(
+            manager.persistent_checkpoint_state_required()
+            for manager in managers_by_owner.values()
+        )
+
+    @property
+    def environment_state_checkpoint_required(self) -> bool:
+        """Whether a full resume must include this rank's environment state."""
+
+        return self._perception_checkpoint_state_required()
+
+    def _validate_perception_checkpoint_state(self, state: Any) -> None:
+        expected_roles, managers_by_owner = self._perception_checkpoint_topology()
+        if state is None:
+            if self._perception_checkpoint_state_required():
+                raise RuntimeError(
+                    "Legacy environment checkpoint has no perception calibration/stream state, but an "
+                    "enabled perception manager has persistent policy-input phase; exact resume is impossible."
+                )
+            return
+        if not isinstance(state, dict) or set(state) != {
+            "version",
+            "role_owners",
+            "states",
+        }:
+            raise ValueError("Perception-manager checkpoint envelope is malformed.")
+        version = state.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+            raise ValueError(f"Unsupported perception-manager checkpoint version: {version!r}.")
+        if state.get("role_owners") != expected_roles:
+            raise ValueError(
+                "Perception-manager role/alias topology differs from the active runtime."
+            )
+        states = state.get("states")
+        if not isinstance(states, dict) or set(states) != set(managers_by_owner):
+            raise ValueError(
+                "Perception-manager checkpoint state owners differ from the active runtime."
+            )
+        for owner, manager in managers_by_owner.items():
+            manager.validate_persistent_checkpoint_state(states[owner])
+
+    def _load_perception_checkpoint_state(self, state: Any) -> None:
+        self._validate_perception_checkpoint_state(state)
+        if state is None:
+            return
+        _, managers_by_owner = self._perception_checkpoint_topology()
+        # Check every owner before mutating any of them so a mixed backend
+        # topology fails atomically.
+        for manager in managers_by_owner.values():
+            manager.validate_exact_resume_supported()
+        for owner, manager in managers_by_owner.items():
+            manager.load_persistent_checkpoint_state(state["states"][owner])
+
+    def _validate_perception_exact_resume_supported(self) -> None:
+        _, managers_by_owner = self._perception_checkpoint_topology()
+        for manager in managers_by_owner.values():
+            manager.validate_exact_resume_supported()
+
+    def _reset_perception_canonical_rollout_state(self) -> None:
+        """Canonicalize each unique manager exactly once before reset warm-up."""
+
+        _, managers_by_owner = self._perception_checkpoint_topology()
+        for manager in managers_by_owner.values():
+            manager.reset_canonical_rollout_state()
+
+    def get_checkpoint_state(self) -> dict[str, Any]:
         """Return environment-specific state to persist in checkpoints."""
         return {}
 
-    def load_checkpoint_state(self, state: dict[str, torch.Tensor | float] | None) -> None:
+    def validate_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        """Validate environment checkpoint state without mutating live state."""
+        if not state:
+            return
+
+    def validate_full_resume_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        """Validate state plus backend capabilities for an exact full resume."""
+
+        self.validate_checkpoint_state(state)
+        self._validate_perception_exact_resume_supported()
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None) -> None:
         """Restore environment-specific state from a checkpoint."""
         if not state:
             return
 
-    def synchronize_curriculum_state(self, *, device: str, world_size: int) -> None:
+    def _restore_checkpoint_state_after_canonical_reset(self, state: dict[str, Any] | None) -> None:
+        """Restore adaptive state without arming a future reset suppression."""
+
+        self.load_checkpoint_state(state)
+
+    def reset_all_at_checkpoint_boundary(self):
+        """Reset simulator/manager episode state while preserving curricula.
+
+        Checkpoint restart intentionally discards live physical episodes, but
+        the forced reset itself is not training evidence.  Preserve adaptive
+        state around it so uninterrupted and resumed processes start from the
+        same curriculum rather than counting the operational reset as a fall
+        or successful episode.
+        """
+
+        checkpoint_state = self.get_checkpoint_state()
+        self._reset_perception_canonical_rollout_state()
+        observations = self.reset_all()
+        self._restore_checkpoint_state_after_canonical_reset(checkpoint_state)
+        return observations
+
+    def synchronize_curriculum_state(self, *, device: str, world_size: int, process_group=None) -> None:
         """Synchronize curriculum-related state across distributed processes."""
         return
 
@@ -266,7 +439,10 @@ class BaseTask:
         self.reset_envs_idx(env_ids)
 
         self.simulator.set_actor_root_state_tensor_robots(env_ids, self.simulator.robot_root_states)
-        self.simulator.set_dof_state_tensor_robots(env_ids, self.simulator.dof_state)
+        # ``None`` is the standardized "write current state" contract.  On
+        # IsaacSim this avoids assembling a full [env, dof, 2] tensor merely to
+        # write the selected reset rows.
+        self.simulator.set_dof_state_tensor_robots(env_ids)
 
         actions = torch.zeros(self.num_envs, self.dim_actions, device=self.device, requires_grad=False)
         actor_state = {}
@@ -275,13 +451,60 @@ class BaseTask:
         self._log_startup_depth_if_needed()
         return obs_dict
 
+    def _simulator_episode_callback_ids(self, env_ids) -> list[int] | None:
+        """Materialize reset IDs once when simulator lifecycle hooks are active.
+
+        BaseSimulator exposes an explicit capability so the common training
+        configuration avoids both CUDA iteration and synchronization.  Legacy
+        duck-typed simulators without that capability remain compatible: the
+        presence of either batched or scalar lifecycle hooks enables callbacks.
+        """
+
+        capability = getattr(self.simulator, "requires_episode_callbacks", None)
+        if capability is None:
+            callbacks_required = any(
+                callable(getattr(self.simulator, hook_name, None))
+                for hook_name in (
+                    "on_episodes_start",
+                    "on_episodes_end",
+                    "on_episode_start",
+                    "on_episode_end",
+                )
+            )
+        else:
+            callbacks_required = capability() if callable(capability) else bool(capability)
+
+        if not callbacks_required:
+            return None
+        return env_ids.tolist()
+
+    def _notify_simulator_episode_callbacks(
+        self,
+        phase: str,
+        env_ids: list[int] | None,
+    ) -> None:
+        """Dispatch one batched hook, falling back to the legacy scalar hook."""
+
+        if env_ids is None:
+            return
+
+        batch_callback = getattr(self.simulator, f"on_episodes_{phase}", None)
+        if callable(batch_callback):
+            batch_callback(env_ids)
+            return
+
+        scalar_callback = getattr(self.simulator, f"on_episode_{phase}", None)
+        if callable(scalar_callback):
+            for env_id in env_ids:
+                scalar_callback(env_id)
+
     def reset_envs_idx(self, env_ids, target_states=None, target_buf=None):
         """Reset some environments and handle video recording callbacks."""
 
-        # Call episode end for environments that are being reset
-        for env_id in env_ids:
-            if hasattr(self.simulator, "on_episode_end"):
-                self.simulator.on_episode_end(env_id.item())
+        # Callback IDs are copied to the host at most once, and only when a
+        # simulator lifecycle consumer is actually active.
+        episode_callback_ids = self._simulator_episode_callback_ids(env_ids)
+        self._notify_simulator_episode_callbacks("end", episode_callback_ids)
         self._finalize_depth_logging_if_needed()
         self._finalize_startup_depth_video_if_needed(env_ids)
         if hasattr(self, "_rollout_recorder"):
@@ -291,16 +514,16 @@ class BaseTask:
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
-        if self.perception_manager is not None:
-            self.perception_manager.reset(env_ids)
-        if self.teacher_perception_manager is not None:
-            self.teacher_perception_manager.reset(env_ids)
-        if (
-            self.critic_perception_manager is not None
-            and self.critic_perception_manager is not self.perception_manager
-            and self.critic_perception_manager is not self.teacher_perception_manager
+        reset_perception_manager_ids: set[int] = set()
+        for perception_manager in (
+            self.perception_manager,
+            self.teacher_perception_manager,
+            self.critic_perception_manager,
         ):
-            self.critic_perception_manager.reset(env_ids)
+            if perception_manager is None or id(perception_manager) in reset_perception_manager_ids:
+                continue
+            reset_perception_manager_ids.add(id(perception_manager))
+            perception_manager.reset(env_ids)
 
         self._pending_episode_lengths[env_ids] = self.episode_length_buf[env_ids]
         self._pending_episode_update_mask[env_ids] = False
@@ -327,11 +550,16 @@ class BaseTask:
         # Call manager-based reset events
         self.reset_manager.reset_scene(env_ids)
 
-        # Call episode start for environments that have been reset
-        for env_id in env_ids:
-            if hasattr(self.simulator, "on_episode_start"):
-                self.simulator.on_episode_start(env_id.item())
+        # Call episode start for environments that have been reset.
+        self._notify_simulator_episode_callbacks("start", episode_callback_ids)
         self._start_depth_logging_if_needed()
+        # Simulator state written by a reset still needs the task-specific
+        # refresh pass.  Keep this host-side marker in addition to the per-env
+        # device mask so the common no-reset step can avoid materializing that
+        # mask with ``nonzero()``.  This also covers reset_all() and explicit
+        # resets issued outside the post-physics loop.
+        if len(env_ids) > 0:
+            self._reset_refresh_pending = True
 
     def _reset_envs_idx_impl(self, env_ids, target_states=None, target_buf=None):
         """Template implementation of environment reset.
@@ -430,6 +658,13 @@ class BaseTask:
     # ------------------------------------------------------------------
     # Reset hooks
 
+    def set_collection_extras_contract(self, *, dense_episode_stats: bool) -> None:
+        """Select dense-every-step or reset-only episode reward statistics."""
+
+        if not isinstance(dense_episode_stats, bool):
+            raise TypeError("dense_episode_stats must be a boolean.")
+        self._dense_episode_stats_each_step = dense_episode_stats
+
     def _reset_buffers_callback(self, env_ids, target_buf=None):
         """Reset environment-specific buffers prior to manager resets.
 
@@ -452,7 +687,44 @@ class BaseTask:
         if self.reward_manager is None:
             return
 
-        reward_extras = self.reward_manager.reset(env_ids)
+        include_all = bool(getattr(self, "_dense_episode_stats_each_step", True))
+        capability = getattr(
+            type(self.reward_manager),
+            "supports_include_all_episode_extras",
+            None,
+        )
+        if capability is None:
+            cached_capability = getattr(
+                self,
+                "_reward_reset_include_all_capability_cache",
+                None,
+            )
+            if cached_capability is None or cached_capability[0] is not self.reward_manager:
+                try:
+                    reset_parameters = inspect.signature(self.reward_manager.reset).parameters.values()
+                except (TypeError, ValueError):
+                    supports_include_all = False
+                else:
+                    supports_include_all = any(
+                        parameter.name == "include_all"
+                        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in reset_parameters
+                    )
+                self._reward_reset_include_all_capability_cache = (
+                    self.reward_manager,
+                    supports_include_all,
+                )
+            else:
+                supports_include_all = bool(cached_capability[1])
+        else:
+            supports_include_all = bool(capability)
+
+        if supports_include_all:
+            reward_extras = self.reward_manager.reset(env_ids, include_all=include_all)
+        else:
+            # Preserve duck-typed fake and third-party managers that implement
+            # the historical reset(env_ids) signature.
+            reward_extras = self.reward_manager.reset(env_ids)
 
         # Normalise extras dictionary to contain (possibly empty) sub-sections.
         self.extras["episode"] = reward_extras.get("episode", {})
@@ -477,7 +749,16 @@ class BaseTask:
         if hasattr(self, "_viser_live") and getattr(self._viser_live, "enabled", False):
             self._viser_live.apply_pending_controls()
             self._viser_live.wait_if_paused()
-        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        # Per-env-step boundaries are intentionally verbose diagnostics.  The
+        # launcher documents HOLOSOMA_DEBUG_HEARTBEAT as iteration-level
+        # liveness and HOLOSOMA_DEBUG_HEARTBEAT_VERBOSE as the opt-in for every
+        # rollout step.  Using the coarse flag here emitted four log records
+        # per step on every rank and forced reset_buf.sum().item() even when
+        # verbose heartbeat was explicitly disabled.
+        debug_heartbeat = os.environ.get(
+            "HOLOSOMA_DEBUG_HEARTBEAT_VERBOSE",
+            "",
+        ).lower() not in ("", "0", "false", "no")
         actions = actor_state["actions"]
         if debug_heartbeat:
             logger.info(
@@ -536,7 +817,19 @@ class BaseTask:
             self.action_manager.apply_actions()
 
     def _post_physics_step(self):
+        # ``extras`` is reused across environment steps.  Episode summaries and
+        # final observations are transition-local reset data, so clear them
+        # explicitly instead of relying on an empty ``reset_envs_idx`` call to
+        # overwrite them.  ``time_outs`` remains a live view of the buffer that
+        # ``_check_termination`` refreshes in-place on every step.
+        self.extras.pop("final_observations", None)
+        for key in ("episode", "episode_all", "raw_episode", "raw_episode_all"):
+            self.extras[key] = {}
+        self.extras["time_outs"] = self.time_out_buf
         timing = self.step_timing if self.step_timing.enabled else None
+        dense_episode_stats = bool(
+            getattr(self, "_dense_episode_stats_each_step", True)
+        )
         if timing is None:
             self._refresh_sim_tensors()
             self.episode_length_buf += 1
@@ -553,24 +846,46 @@ class BaseTask:
                 self._viser_live.record_step()
 
             env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+            # Publish the already-materialized reset selection for rollout
+            # consumers.  This is assigned on every transition (including an
+            # empty one), so a reused extras dictionary cannot expose stale IDs.
+            self.extras["reset_env_ids"] = env_ids
+            refresh_was_pending = bool(
+                getattr(self, "_reset_refresh_pending", False)
+            )
             final_obs_dict = {}
-            if env_ids.numel() > 0:
+            if env_ids.numel() > 0 and torch.any(self.time_out_buf[env_ids]):
                 final_obs_dict = self._compute_final_observations()
 
-            self.reset_envs_idx(env_ids)
+            if env_ids.numel() > 0 or dense_episode_stats:
+                self.reset_envs_idx(env_ids)
 
-            refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
-            if refresh_env_ids.numel() > 0:
-                self._refresh_envs_after_reset(refresh_env_ids)
+            refresh_required = dense_episode_stats or env_ids.numel() > 0 or bool(
+                getattr(self, "_reset_refresh_pending", False)
+            )
+            if refresh_required:
+                refresh_env_ids = self._select_post_reset_refresh_env_ids(
+                    env_ids,
+                    refresh_was_pending=refresh_was_pending,
+                    dense_episode_stats=dense_episode_stats,
+                )
+                if refresh_env_ids.numel() > 0:
+                    self._refresh_envs_after_reset(refresh_env_ids)
+                self._reset_refresh_pending = False
 
             # Advance task-specific state after termination/reset handling so managers
             # see the post-reset timestep on short clips when computing the next obs.
             self._update_tasks_callback()
             self._compute_observations()
 
-            if env_ids.numel() > 0 and final_obs_dict:
-                env_ids_long = self._ensure_long_tensor(env_ids)
-                self._store_final_observations(env_ids_long, final_obs_dict)
+            if final_obs_dict:
+                # WBT may reject an unsafe timeout preview while computing the
+                # final observation.  Store only rows that remain eligible for
+                # PPO timeout bootstrapping after that validation.
+                timeout_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
+                if timeout_env_ids.numel() > 0:
+                    timeout_env_ids = self._ensure_long_tensor(timeout_env_ids)
+                    self._store_final_observations(timeout_env_ids, final_obs_dict)
 
             self._post_compute_observations_callback()
             self._clip_observations()
@@ -607,18 +922,32 @@ class BaseTask:
 
         with timing.record("post/reset_select"):
             env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+            self.extras["reset_env_ids"] = env_ids
+            refresh_was_pending = bool(
+                getattr(self, "_reset_refresh_pending", False)
+            )
         final_obs_dict = {}
-        if env_ids.numel() > 0:
+        if env_ids.numel() > 0 and torch.any(self.time_out_buf[env_ids]):
             with timing.record("post/final_observations"):
                 final_obs_dict = self._compute_final_observations()
 
         with timing.record("post/reset_envs"):
-            self.reset_envs_idx(env_ids)
+            if env_ids.numel() > 0 or dense_episode_stats:
+                self.reset_envs_idx(env_ids)
 
         with timing.record("post/reset_refresh"):
-            refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
-            if refresh_env_ids.numel() > 0:
-                self._refresh_envs_after_reset(refresh_env_ids)
+            refresh_required = dense_episode_stats or env_ids.numel() > 0 or bool(
+                getattr(self, "_reset_refresh_pending", False)
+            )
+            if refresh_required:
+                refresh_env_ids = self._select_post_reset_refresh_env_ids(
+                    env_ids,
+                    refresh_was_pending=refresh_was_pending,
+                    dense_episode_stats=dense_episode_stats,
+                )
+                if refresh_env_ids.numel() > 0:
+                    self._refresh_envs_after_reset(refresh_env_ids)
+                self._reset_refresh_pending = False
 
         # Advance task-specific state after termination/reset handling so managers
         # see the post-reset timestep on short clips when computing the next obs.
@@ -627,10 +956,15 @@ class BaseTask:
         with timing.record("post/observations"):
             self._compute_observations()
 
-        if env_ids.numel() > 0 and final_obs_dict:
-            with timing.record("post/store_final_observations"):
-                env_ids_long = self._ensure_long_tensor(env_ids)
-                self._store_final_observations(env_ids_long, final_obs_dict)
+        if final_obs_dict:
+            # WBT may reject an unsafe timeout preview while computing the
+            # final observation.  Store only rows that remain eligible for
+            # PPO timeout bootstrapping after that validation.
+            timeout_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
+            if timeout_env_ids.numel() > 0:
+                with timing.record("post/store_final_observations"):
+                    timeout_env_ids = self._ensure_long_tensor(timeout_env_ids)
+                    self._store_final_observations(timeout_env_ids, final_obs_dict)
 
         with timing.record("post/post_observations"):
             self._post_compute_observations_callback()
@@ -816,6 +1150,42 @@ class BaseTask:
     def _get_envs_to_refresh(self):
         return torch.empty(0, device=self.device, dtype=torch.long)
 
+    def _select_post_reset_refresh_env_ids(
+        self,
+        reset_env_ids: torch.Tensor,
+        *,
+        refresh_was_pending: bool,
+        dense_episode_stats: bool,
+    ) -> torch.Tensor:
+        """Reuse the transition's reset IDs when they are the exact dirty set.
+
+        ``reset_buf.nonzero()`` already materializes the reset rows.  WBT and
+        locomotion reset hooks mark exactly those same rows dirty, so scanning
+        their device mask with a second dynamic-size ``nonzero()`` forces an
+        unnecessary CUDA-to-host synchronization.  Explicit/out-of-band
+        resets leave ``_reset_refresh_pending`` armed before this transition;
+        dense/legacy tasks may also have broader refresh semantics.  Both use
+        the mask-based fallback.
+
+        Every concrete subclass must opt in itself, and only when an in-loop
+        ``reset_envs_idx(ids)`` cannot dirty rows outside ``ids``.  Looking in
+        the concrete class dictionary deliberately prevents a third-party
+        subclass from inheriting this capability after overriding reset
+        semantics.
+        """
+
+        direct_ids_capability = bool(
+            type(self).__dict__.get("supports_direct_post_reset_refresh_ids", False)
+        )
+        if (
+            direct_ids_capability
+            and not refresh_was_pending
+            and not dense_episode_stats
+            and reset_env_ids.numel() > 0
+        ):
+            return self._ensure_long_tensor(reset_env_ids)
+        return self._ensure_long_tensor(self._get_envs_to_refresh())
+
     def _refresh_envs_after_reset(self, env_ids):
         """Hook for subclasses to synchronise simulator state after resets."""
         return
@@ -843,7 +1213,15 @@ class BaseTask:
         self.obs_buf_dict = self.observation_manager.compute()
 
     def _compute_final_observations(self):
-        return self.observation_manager.compute(modify_history=False)
+        final_observations = self.observation_manager.compute(modify_history=False)
+        # The regular next observation is clipped later in `_clip_observations`.
+        # Timeout values must be evaluated on the same critic input domain,
+        # rather than an unclipped terminal-only observation.
+        clip_limit = self.observation_manager.cfg.clip_observations
+        return {
+            obs_key: torch.clip(obs_value, -clip_limit, clip_limit)
+            for obs_key, obs_value in final_observations.items()
+        }
 
     def _update_tasks_callback(self):
         timing = self.step_timing if self.step_timing.enabled else None
@@ -876,33 +1254,68 @@ class BaseTask:
 
         reset_flags, timeout_flags = self.termination_manager.check()
         self.reset_buf |= reset_flags.to(dtype=self.reset_buf.dtype)
-        self.time_out_buf |= timeout_flags
+        # A transition can hit the time limit on the same control step as a
+        # genuine terminal condition (fall, bad tracking, motion end, ...).
+        # Such a transition is terminal and must not receive a value bootstrap;
+        # ``time_outs`` denotes truncation-only transitions for PPO.
+        self.time_out_buf |= timeout_flags & ~reset_flags
         self.reset_buf |= self.time_out_buf
         self._log_termination_masks(reset_flags, timeout_flags)
 
     def _log_termination_masks(self, reset_flags, timeout_flags) -> None:
         if self.termination_manager is None:
             return
-        self.log_dict["termination/reset_frac"] = reset_flags.float().mean().detach().cpu()
-        self.log_dict["termination/timeout_frac"] = timeout_flags.float().mean().detach().cpu()
+        timeout_only_flags = timeout_flags & ~reset_flags
+        done_flags = reset_flags | timeout_flags
+        # Keep these scalar reductions on their producing device.  The
+        # logging helper batches every environment metric into one device-to-
+        # host transfer at the iteration boundary; copying each term here
+        # serialized the CUDA stream once per termination statistic on every
+        # rollout step.
+        self.log_dict["termination/reset_frac"] = reset_flags.float().mean().detach()
+        # Keep the raw timeout term for diagnostics, and expose its mutually
+        # exclusive rollout meaning separately.  The latter is exactly the
+        # mask eligible for PPO value bootstrapping.
+        self.log_dict["termination/timeout_frac"] = timeout_flags.float().mean().detach()
+        self.log_dict["termination/timeout_only_frac"] = timeout_only_flags.float().mean().detach()
+        self.log_dict["termination/done_frac"] = done_flags.float().mean().detach()
         for term_name in getattr(self.termination_manager, "_term_names", []):
             term_result = self.termination_manager.get_last_term_result(term_name)
             if term_result is None:
                 continue
-            self.log_dict[f"termination/{term_name}_frac"] = term_result.float().mean().detach().cpu()
+            self.log_dict[f"termination/{term_name}_frac"] = term_result.float().mean().detach()
 
-    def _pre_compute_observations_callback(self):
-        """Hook invoked after physics but before observation terms compute (no-op by default)."""
-        if self.perception_manager is not None:
-            self.perception_manager.update()
-        if self.teacher_perception_manager is not None:
-            self.teacher_perception_manager.update()
-        if (
-            self.critic_perception_manager is not None
-            and self.critic_perception_manager is not self.perception_manager
-            and self.critic_perception_manager is not self.teacher_perception_manager
+    def _pre_compute_observations_callback(
+        self,
+        env_ids: torch.Tensor | None = None,
+    ):
+        """Refresh unique perception streams before computing observations.
+
+        ``env_ids=None`` denotes the one normal all-environment refresh for a
+        control step.  Reset synchronization passes only the environments whose
+        simulator state changed, so unrelated latency/history streams are not
+        advanced a second time merely because another environment terminated.
+        """
+
+        updated_perception_manager_ids: set[int] = set()
+        for perception_manager in (
+            self.perception_manager,
+            self.teacher_perception_manager,
+            self.critic_perception_manager,
         ):
-            self.critic_perception_manager.update()
+            if perception_manager is None or id(perception_manager) in updated_perception_manager_ids:
+                continue
+            updated_perception_manager_ids.add(id(perception_manager))
+            effective_env_ids = env_ids
+            if env_ids is not None:
+                uses_legacy_full_refresh = getattr(
+                    perception_manager,
+                    "uses_legacy_full_reset_refresh",
+                    None,
+                )
+                if callable(uses_legacy_full_refresh) and uses_legacy_full_refresh():
+                    effective_env_ids = None
+            perception_manager.update(effective_env_ids)
 
     def _post_compute_observations_callback(self):
         """Hook invoked after observation buffers are produced (no-op by default)."""
@@ -1078,7 +1491,13 @@ class BaseTask:
         if wandb.run is None:
             return
         caption = f"episode {self._depth_log_episode_id}" if self._depth_log_episode_id is not None else None
-        wandb.log({"Depth/frame0": wandb.Image(frame, caption=caption)})
+        # Media captured during rollout belongs to the next PPO metrics row.
+        # Buffer it without advancing W&B's implicit history cursor; the
+        # iteration-indexed scalar log commits the complete row.
+        wandb.log(
+            {"Depth/frame0": wandb.Image(frame, caption=caption)},
+            commit=False,
+        )
 
     def _log_startup_depth_if_needed(self) -> None:
         if self._depth_log_startup_done:
@@ -1108,7 +1527,13 @@ class BaseTask:
                 .numpy()
             )
         depth_frame = self._depth_to_rgb(depth_map)
-        wandb.log({"Depth/startup": wandb.Image(depth_frame, caption="startup")})
+        # The first PPO update is iteration 0.  Committing this startup image
+        # would move W&B's implicit cursor to 1 and make those scientific
+        # metrics stale, so leave it buffered for the iteration-0 scalar row.
+        wandb.log(
+            {"Depth/startup": wandb.Image(depth_frame, caption="startup")},
+            commit=False,
+        )
         self._depth_log_startup_done = True
 
     def _log_startup_depth_video(self) -> None:
@@ -1133,6 +1558,7 @@ class BaseTask:
             save_dir=save_dir,
             output_format=self.simulator.video_config.output_format,
             wandb_logging=True,
+            wandb_commit=False,
             episode_id=self._depth_log_startup_video_episode_id,
             wandb_key="Depth rollout (startup)",
         )
@@ -1159,6 +1585,7 @@ class BaseTask:
             save_dir=save_dir,
             output_format=self.simulator.video_config.output_format,
             wandb_logging=True,
+            wandb_commit=False,
             episode_id=self._depth_log_episode_id,
             wandb_key="Depth rollout",
         )
