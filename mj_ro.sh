@@ -49,7 +49,7 @@ if [[ -z "$inference_config" ]]; then
     36k1vwdf|zzv6vtkk)
       inference_config="g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1"
       ;;
-    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4)
+    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|34qv1qqp)
       inference_config="g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1"
       ;;
     1j98x3g1|6c7exbeq)
@@ -121,7 +121,7 @@ run_args=(
 
 external_root_pos_run=0
 case "$model_run_id" in
-  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|36k1vwdf|zzv6vtkk)
+  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|34qv1qqp|36k1vwdf|zzv6vtkk)
     external_root_pos_run=1
     ;;
 esac
