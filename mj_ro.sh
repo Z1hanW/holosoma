@@ -2,9 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_model_path="${ROOT_DIR}/_ckps/34qv1qqp_model_40000.onnx"
+if [[ ! -f "$default_model_path" ]]; then
+  default_model_path="wandb://zihanw22/carry-any/34qv1qqp/latest"
+fi
 clip="${1:-${HOLOSOMA_MJ_MOTION:-box_75}}"
-model_path="${2:-${HOLOSOMA_MJ_MODEL_PATH:-_ckps/gjiefd3c_model_06500.onnx}}"
-model_run_id="${HOLOSOMA_MJ_MODEL_RUN_ID:-gjiefd3c}"
+model_path="${2:-${HOLOSOMA_MJ_MODEL_PATH:-$default_model_path}}"
+model_run_id="${HOLOSOMA_MJ_MODEL_RUN_ID:-34qv1qqp}"
 model_base="$(basename "$model_path")"
 if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
   model_run_id="${BASH_REMATCH[1]}"
@@ -103,6 +107,8 @@ fi
 export PYTHONPATH="${ROOT_DIR}/src/holosoma_inference:${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 if [[ -n "${HOLOSOMA_INFERENCE_PYTHON:-}" ]]; then
   python_bin="$HOLOSOMA_INFERENCE_PYTHON"
+elif [[ -x "/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/bin/python3" ]]; then
+  python_bin="/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/bin/python3"
 elif [[ -x "/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3" ]]; then
   python_bin="/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3"
 else
