@@ -2323,9 +2323,10 @@ class MuJoCo(BaseSimulator):
             return False
 
         step = 0.025
+        forward_command = 0.15
         offset = self._current_policy_manual_offset()
         if keycode == 87:  # W
-            offset[0] += step
+            offset[0] = forward_command
         elif keycode == 83:  # S
             offset[0] -= step
         elif keycode == 65:  # A

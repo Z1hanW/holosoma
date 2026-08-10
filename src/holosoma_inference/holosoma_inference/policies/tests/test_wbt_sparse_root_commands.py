@@ -42,6 +42,16 @@ def test_forward_command_uses_point_zero_two_threshold() -> None:
     np.testing.assert_array_equal(policy._joystick_sparse_root_command_offset, np.zeros((1, 3)))
 
 
+def test_keyboard_w_sets_constant_point_fifteen_forward_command() -> None:
+    policy = _make_policy()
+
+    assert policy._handle_sparse_root_keyboard_command("w")
+    np.testing.assert_allclose(policy._manual_sparse_root_command_offset, [[0.15, 0.0, 0.0]])
+
+    assert policy._handle_sparse_root_keyboard_command("w")
+    np.testing.assert_allclose(policy._manual_sparse_root_command_offset, [[0.15, 0.0, 0.0]])
+
+
 def test_activating_drop_clears_and_suppresses_sparse_root_commands() -> None:
     policy = _make_policy()
     policy._manual_sparse_root_command_offset[:] = [[0.1, -0.1, 0.1]]

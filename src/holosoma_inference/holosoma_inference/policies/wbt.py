@@ -1317,8 +1317,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _handle_sparse_root_keyboard_command(self, keycode: str) -> bool:
         step = 0.025
+        forward_command = 0.15
         if keycode == "w":
-            self._manual_sparse_root_command_offset[0, 0] += step
+            self._manual_sparse_root_command_offset[0, 0] = forward_command
         elif keycode == "s":
             self._manual_sparse_root_command_offset[0, 0] -= step
         elif keycode == "a":
