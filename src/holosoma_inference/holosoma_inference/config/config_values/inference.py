@@ -132,7 +132,7 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = Inferenc
 )
 
 # Unitree's suspended L2+A diagnostic position is the G1 zero-joint posture.
-# Use the gains from Unitree's official G1 low-level zero-posture example.
+# Hold the straight/high standing body with the established WBT stiff gains.
 # Policy and motion activation are locked out by task.stiff_hold_only.
 g1_debug_diagnostic = replace(
     g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1,
@@ -146,18 +146,18 @@ g1_debug_diagnostic = replace(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right arm
         ),
         stiff_startup_kp=(
-            60.0, 60.0, 60.0, 100.0, 40.0, 40.0,  # left leg
-            60.0, 60.0, 60.0, 100.0, 40.0, 40.0,  # right leg
-            60.0, 40.0, 40.0,  # waist
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # left leg
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # right leg
+            200.0, 200.0, 200.0,  # waist
             40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # left arm
             40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # right arm
         ),
         stiff_startup_kd=(
-            1.0, 1.0, 1.0, 2.0, 1.0, 1.0,  # left leg
-            1.0, 1.0, 1.0, 2.0, 1.0, 1.0,  # right leg
-            1.0, 1.0, 1.0,  # waist
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # left arm
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # right arm
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # left leg
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # right leg
+            5.0, 5.0, 5.0,  # waist
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # left arm
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # right arm
         ),
     ),
     task=replace(
