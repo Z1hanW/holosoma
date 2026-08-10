@@ -720,7 +720,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     current_obs_buffer_dict["sparse_target_root_trajectory_command_contact_aware"] = (
                         self._get_sparse_target_root_trajectory_command_contact_aware(sparse_root_command)
                     )
-            self._write_sparse_root_command_status(current_obs_buffer_dict)
+            self._write_sparse_root_command_status(current_obs_buffer_dict, robot_state_data)
 
         if "motion_ref_ori_b" in required_terms:
             motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
@@ -836,7 +836,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     )
                 )
 
-    def _write_sparse_root_command_status(self, current_obs_buffer_dict: dict[str, np.ndarray]) -> None:
+    def _write_sparse_root_command_status(
+        self,
+        current_obs_buffer_dict: dict[str, np.ndarray],
+        robot_state_data: np.ndarray,
+    ) -> None:
         if self._policy_command_status_path is None:
             return
 
@@ -864,6 +868,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "force_zero_sparse_root_command": bool(self._force_zero_sparse_root_command),
             "motion_clip_progressing": bool(self.motion_clip_progressing),
             "motion_timestep": int(self.motion_timestep),
+            # This status file is also the low-overhead data source for the
+            # real-robot Viser process.  ``cmd_q`` is the last command sent to
+            # the robot, so it intentionally trails the observation by one
+            # control step instead of adding another telemetry write after
+            # inference.
+            "dof_names": list(self.dof_names),
+            "q_actual": np.asarray(
+                robot_state_data[0, 7 : 7 + self.num_dofs], dtype=np.float32
+            ).astype(float).tolist(),
+            "q_target": np.asarray(self.cmd_q, dtype=np.float32).astype(float).tolist(),
+            "base_position": np.asarray(robot_state_data[0, :3], dtype=np.float32).astype(float).tolist(),
+            "base_wxyz": np.asarray(robot_state_data[0, 3:7], dtype=np.float32).astype(float).tolist(),
+            "use_policy_action": bool(self.use_policy_action),
+            "get_ready_state": bool(self.get_ready_state),
         }
         if "pickup_button" in self.obs_dims:
             payload["pickup_button"] = float(self._pickup_button_command)

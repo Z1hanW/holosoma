@@ -45,6 +45,7 @@ setup(
         "termcolor",
         "pyyaml",
         "tyro>=0.10.0a4",
+        "viser[urdf]>=1.0.0,<2.0.0",
         "wandb",
         "zmq",
         "defusedxml",

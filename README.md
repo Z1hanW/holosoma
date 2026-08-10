@@ -89,6 +89,19 @@ After training, deploy your policies:
 
 Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
 
+### Real Depth Experiment Viewer
+
+For the two-terminal real depth experiment, start the camera and policy as usual:
+
+```bash
+bash real_depth.sh
+bash real_drop.sh
+```
+
+`real_drop.sh` now starts a Viser dashboard at `http://127.0.0.1:8080` and opens it automatically when a desktop display is available. The dashboard shows the measured G1 pose, the policy's target-pose overlay, sparse command and joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud. It can start before `real_depth.sh`; the depth panel connects when `depth_img_shm` appears.
+
+Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
+
 ### MuJoCo WBT Box Rollout Debug Log
 
 This section keeps the remaining MuJoCo WBT box-lifting notes. The solved items moved to `solved_readme.sh` are sections 1, 2, 4, 5, and 9.
