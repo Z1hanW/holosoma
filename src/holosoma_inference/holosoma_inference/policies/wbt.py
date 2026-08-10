@@ -1416,7 +1416,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        forward_scale = 0.15
+        forward_threshold = 0.02
+        forward_command = 0.15
         lateral_scale = 0.1
         yaw_scale = 0.1
 
@@ -1424,10 +1425,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return value if abs(value) > deadband else 0.0
 
         lx = apply_deadband(float(getattr(wc_msg, "lx", 0.0)))
-        ly = apply_deadband(float(getattr(wc_msg, "ly", 0.0)))
+        ly = float(getattr(wc_msg, "ly", 0.0))
         rx = apply_deadband(float(getattr(wc_msg, "rx", 0.0)))
 
-        self._joystick_sparse_root_command_offset[0, 0] = ly * forward_scale
+        self._joystick_sparse_root_command_offset[0, 0] = forward_command if ly > forward_threshold else 0.0
         self._joystick_sparse_root_command_offset[0, 1] = -lx * lateral_scale
         self._joystick_sparse_root_command_offset[0, 2] = -rx * yaw_scale
 

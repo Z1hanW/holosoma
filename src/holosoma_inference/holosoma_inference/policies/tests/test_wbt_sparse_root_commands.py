@@ -29,6 +29,19 @@ def test_full_forward_joystick_command_is_point_fifteen() -> None:
     np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.15, 0.0, 0.0]])
 
 
+def test_forward_command_uses_point_zero_two_threshold() -> None:
+    policy = _make_policy()
+    joystick = SimpleNamespace(keys=0, lx=0.0, ly=0.021, rx=0.0)
+    policy.interface = SimpleNamespace(get_joystick_msg=lambda: joystick)
+
+    policy._update_sparse_root_joystick_command()
+    np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.15, 0.0, 0.0]])
+
+    joystick.ly = 0.02
+    policy._update_sparse_root_joystick_command()
+    np.testing.assert_array_equal(policy._joystick_sparse_root_command_offset, np.zeros((1, 3)))
+
+
 def test_activating_drop_clears_and_suppresses_sparse_root_commands() -> None:
     policy = _make_policy()
     policy._manual_sparse_root_command_offset[:] = [[0.1, -0.1, 0.1]]
