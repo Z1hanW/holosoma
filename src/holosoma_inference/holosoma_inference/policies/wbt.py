@@ -881,7 +881,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._logged_policy_command_status_error = True
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data) -> np.ndarray:
-        if self._force_zero_sparse_root_command:
+        if self._force_zero_sparse_root_command or self._drop_button_active():
             if not self._logged_zero_sparse_root_command:
                 logger.info("Using zero sparse root command.")
                 self._logged_zero_sparse_root_command = True
@@ -1370,8 +1370,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return True
 
         self._drop_button_key_down = True
-        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
-        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+        self._toggle_drop_button_command()
         return True
 
     def _handle_drop_button_joystick_command(self, cur_key: str) -> bool:
@@ -1383,9 +1382,18 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._logged_missing_drop_button_key = True
             return True
 
-        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
-        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+        self._toggle_drop_button_command()
         return True
+
+    def _drop_button_active(self) -> bool:
+        return "drop_button" in self.obs_dims and self._drop_button_command >= 0.5
+
+    def _toggle_drop_button_command(self) -> None:
+        self._drop_button_command = 0.0 if self._drop_button_active() else 1.0
+        if self._drop_button_active():
+            self._manual_sparse_root_command_offset.fill(0.0)
+            self._joystick_sparse_root_command_offset.fill(0.0)
+        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
 
     def handle_keyboard_release(self, keycode):
         if keycode == "f":
@@ -1395,6 +1403,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super().handle_keyboard_release(keycode)
 
     def _update_sparse_root_joystick_command(self) -> None:
+        if self._drop_button_active():
+            self._joystick_sparse_root_command_offset.fill(0.0)
+            return
+
         wc_msg = self.interface.get_joystick_msg()
         if wc_msg is None:
             self._joystick_sparse_root_command_offset.fill(0.0)
@@ -1404,7 +1416,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        xy_scale = 0.1
+        forward_scale = 0.15
+        lateral_scale = 0.1
         yaw_scale = 0.1
 
         def apply_deadband(value: float) -> float:
@@ -1414,8 +1427,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         ly = apply_deadband(float(getattr(wc_msg, "ly", 0.0)))
         rx = apply_deadband(float(getattr(wc_msg, "rx", 0.0)))
 
-        self._joystick_sparse_root_command_offset[0, 0] = ly * xy_scale
-        self._joystick_sparse_root_command_offset[0, 1] = -lx * xy_scale
+        self._joystick_sparse_root_command_offset[0, 0] = ly * forward_scale
+        self._joystick_sparse_root_command_offset[0, 1] = -lx * lateral_scale
         self._joystick_sparse_root_command_offset[0, 2] = -rx * yaw_scale
 
     def process_joystick_input(self):
