@@ -110,6 +110,8 @@ To reproduce Unitree's suspended `L2+A` diagnostic position, keep the G1 support
 bash real_debug.sh
 ```
 
+`real_debug.sh` automatically starts `real_depth.sh`, connects its D435i stream to the Viser depth panel, and stops the depth server with the debug controller. Set `HOLOSOMA_REAL_DEBUG_DEPTH=0` only when a separate depth server is already running.
+
 After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the straight, high-standing all-zero 29-DOF diagnostic posture over five seconds, then holds the legs and waist with the established high WBT stiff gains. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
 
 ### MuJoCo WBT Box Rollout Debug Log

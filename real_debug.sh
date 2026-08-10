@@ -13,11 +13,21 @@ mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/run.log") 2>&1
 command_status_path="${log_dir}/latest_command.json"
 viser_pid=""
+depth_pid=""
+depth_process_group=""
 
 cleanup() {
   if [[ -n "$viser_pid" ]]; then
     kill "$viser_pid" 2>/dev/null || true
     wait "$viser_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$depth_process_group" ]]; then
+    kill -- "-$depth_process_group" 2>/dev/null || true
+  elif [[ -n "$depth_pid" ]]; then
+    kill "$depth_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$depth_pid" ]]; then
+    wait "$depth_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -32,6 +42,20 @@ echo "[real_debug] transition: smooth 5-second move from the measured joint pose
 echo "[real_debug] policy and motion activation are locked out"
 echo "[real_debug] keep the robot supported and press Enter only when the area is clear"
 
+if [[ "${HOLOSOMA_REAL_DEBUG_DEPTH:-1}" != "0" ]]; then
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash real_depth.sh &
+    depth_pid=$!
+    depth_process_group=$depth_pid
+  else
+    bash real_depth.sh &
+    depth_pid=$!
+  fi
+  echo "[real_debug] depth server started pid=${depth_pid}"
+else
+  echo "[real_debug] depth server disabled by HOLOSOMA_REAL_DEBUG_DEPTH=0"
+fi
+
 source scripts/source_inference_setup.sh
 
 if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
@@ -45,7 +69,6 @@ if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
     --state-path "$command_status_path" \
     --host "${HOLOSOMA_REAL_VISER_HOST:-127.0.0.1}" \
     --port "${HOLOSOMA_REAL_VISER_PORT:-8080}" \
-    --no-depth \
     "${viser_browser_args[@]}" &
   viser_pid=$!
   echo "[real_viser] debug viewer started pid=${viser_pid}"

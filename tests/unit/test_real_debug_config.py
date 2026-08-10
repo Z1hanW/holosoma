@@ -24,11 +24,13 @@ class _FakeLogger:
         self.messages.append(message)
 
 
-def test_real_debug_launches_pose_only_viser_dashboard() -> None:
+def test_real_debug_launches_depth_server_and_viser_dashboard() -> None:
     script = (REPO_ROOT / "real_debug.sh").read_text(encoding="utf-8")
 
+    assert "bash real_depth.sh" in script
+    assert "HOLOSOMA_REAL_DEBUG_DEPTH" in script
     assert "scripts/real_viser.py" in script
-    assert "--no-depth" in script
+    assert "--no-depth" not in script
     assert 'HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path"' in script
 
 
