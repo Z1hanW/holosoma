@@ -60,6 +60,20 @@ def test_sim_gt_uses_exact_policy_crop_resize_and_normalization() -> None:
     np.testing.assert_allclose(processed, 0.0, atol=1.0e-6)
 
 
+def test_robot_part_comparison_ignores_background_and_color_codes_error() -> None:
+    sim = np.array([[-0.5, 0.0, 0.0, 0.5]], dtype=np.float32)
+    real = np.array([[-0.5, 0.02, 0.2, 0.5]], dtype=np.float32)
+    comparison, stats = real_viser.robot_part_depth_comparison(real, sim, near=0.3, far=3.0)
+
+    np.testing.assert_array_equal(comparison[0, 0], [0, 220, 70])
+    np.testing.assert_array_equal(comparison[0, 1], [255, 200, 0])
+    np.testing.assert_array_equal(comparison[0, 2], [255, 45, 30])
+    np.testing.assert_array_equal(comparison[0, 3], [0, 0, 0])
+    assert stats["robot_pixels"] == 3
+    assert stats["compared_pixels"] == 3
+    assert stats["coverage_percent"] == 100.0
+
+
 def test_depth_point_cloud_drops_far_sentinel_and_uses_robot_axes() -> None:
     normalized = np.array([[-0.5, 0.5], [0.0, 0.5]], dtype=np.float32)
     points, colors = real_viser.depth_point_cloud(

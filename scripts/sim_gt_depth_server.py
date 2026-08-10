@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish static MuJoCo ground-truth depth for the real-debug Viser view."""
+"""Publish robot-only MuJoCo ground-truth depth for real-debug comparison."""
 
 from __future__ import annotations
 
@@ -26,14 +26,9 @@ DEFAULT_SCENE = (
     / "scenes"
     / "scene_g1_29dof_wbt_plane.xml"
 )
-DEFAULT_MOTION = REPO_ROOT / "data_demo" / "box_75.npz"
-
-
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
-    parser.add_argument("--motion-file", type=Path, default=DEFAULT_MOTION)
-    parser.add_argument("--motion-frame", type=int, default=0)
     parser.add_argument("--shm-name", default="sim_gt_depth_raw_shm")
     parser.add_argument("--width", type=int, default=106)
     parser.add_argument("--height", type=int, default=60)
@@ -84,26 +79,8 @@ def d435i_urdf_mujoco_quaternion() -> np.ndarray:
     return quaternion / np.linalg.norm(quaternion)
 
 
-def _motion_frame(path: Path, frame_index: int) -> dict[str, np.ndarray]:
-    with np.load(path, allow_pickle=True) as motion:
-        frame_count = int(motion["joint_pos"].shape[0])
-        frame_index = min(max(frame_index, 0), frame_count - 1)
-        root_qpos = np.asarray(motion["joint_pos"][frame_index, :7], dtype=np.float64).copy()
-        root_qpos[2] = 0.76
-        w, x, y, z = root_qpos[3:7]
-        yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-        root_qpos[3:7] = [math.cos(yaw * 0.5), 0.0, 0.0, math.sin(yaw * 0.5)]
-        return {
-            "root_qpos": root_qpos,
-            "object_pos": np.asarray(motion["object_pos_w"][frame_index], dtype=np.float64),
-            "object_quat": np.asarray(motion["object_quat_w"][frame_index], dtype=np.float64),
-            "object_size": np.asarray(motion["object_size"], dtype=np.float64),
-        }
-
-
-def build_scene(scene_path: Path, motion_path: Path, motion_frame: int, vertical_fov_deg: float):
-    """Build a static G1 zero-joint scene with the selected motion object."""
-    state = _motion_frame(motion_path, motion_frame)
+def build_scene(scene_path: Path, vertical_fov_deg: float):
+    """Build a static all-zero G1 scene; non-robot geoms are filtered at render time."""
     spec = mujoco.MjSpec.from_file(str(scene_path))
 
     existing_camera = spec.camera("cam_d435i_depth")
@@ -120,41 +97,24 @@ def build_scene(scene_path: Path, motion_path: Path, motion_frame: int, vertical
         fovy=vertical_fov_deg,
     )
 
-    object_body = spec.worldbody.add_body(
-        name="sim_gt_box",
-        pos=state["object_pos"].tolist(),
-        quat=state["object_quat"].tolist(),
-    )
-    object_body.add_geom(
-        name="sim_gt_box_visual",
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=(state["object_size"] * 0.5).tolist(),
-        rgba=[0.7, 0.8, 0.9, 1.0],
-        contype=0,
-        conaffinity=0,
-    )
-
     model = spec.compile()
     data = mujoco.MjData(model)
     data.qpos[:] = 0.0
-    data.qpos[:7] = state["root_qpos"]
+    data.qpos[:7] = [0.0, 0.0, 0.76, 1.0, 0.0, 0.0, 0.0]
     mujoco.mj_forward(model, data)
     return model, data, camera_name
 
 
 def run(args: argparse.Namespace) -> None:
     scene_path = args.scene.expanduser().resolve()
-    motion_path = args.motion_file.expanduser().resolve()
     if not scene_path.is_file():
         raise FileNotFoundError(f"MuJoCo scene not found: {scene_path}")
-    if not motion_path.is_file():
-        raise FileNotFoundError(f"Motion file not found: {motion_path}")
     if args.width <= 0 or args.height <= 0:
         raise ValueError("Depth dimensions must be positive")
     if not (0.0 < args.horizontal_fov_deg < 180.0 and 0.0 < args.vertical_fov_deg < 180.0):
         raise ValueError("Camera FOV must be between 0 and 180 degrees")
 
-    model, data, camera_name = build_scene(scene_path, motion_path, args.motion_frame, args.vertical_fov_deg)
+    model, data, camera_name = build_scene(scene_path, args.vertical_fov_deg)
     # MuJoCo stores vertical FOV. The configured 106x60 aspect and 58.6-degree
     # vertical FOV produce the requested horizontal field of view.
     implied_hfov = math.degrees(
@@ -173,10 +133,8 @@ def run(args: argparse.Namespace) -> None:
 
     shape = (1, 1, args.height, args.width)
     size_bytes = int(np.prod(shape)) * np.dtype(np.float32).itemsize
-    created = False
     try:
         shm = shared_memory.SharedMemory(name=args.shm_name, create=True, size=size_bytes)
-        created = True
     except FileExistsError:
         shm = shared_memory.SharedMemory(name=args.shm_name)
         if shm.size != size_bytes:
@@ -198,11 +156,11 @@ def run(args: argparse.Namespace) -> None:
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
     renderer.enable_depth_rendering()
     scene_option = mujoco.MjvOption()
-    scene_option.geomgroup[2] = 0
-    scene_option.geomgroup[3] = 0
+    scene_option.geomgroup[:] = 0
+    scene_option.geomgroup[1] = 1  # G1 visual meshes only: no floor, box, collision geoms, or head shell.
     print(
         f"[sim_gt_depth] MuJoCo GT ready: /dev/shm/{args.shm_name} "
-        f"shape={shape} motion={motion_path.name} frame={args.motion_frame}",
+        f"shape={shape} robot-only all-zero diagnostic pose",
         flush=True,
     )
 
@@ -216,11 +174,10 @@ def run(args: argparse.Namespace) -> None:
     finally:
         renderer.close()
         shm.close()
-        if created:
-            try:
-                shm.unlink()
-            except FileNotFoundError:
-                pass
+        try:
+            shm.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def main(argv: Sequence[str] | None = None) -> None:

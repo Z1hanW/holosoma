@@ -122,6 +122,48 @@ def depth_colors(depth_m: np.ndarray, near: float, far: float) -> np.ndarray:
     return np.rint(rgb * 255.0).astype(np.uint8)
 
 
+def robot_part_depth_comparison(
+    real_depth: np.ndarray,
+    sim_robot_depth: np.ndarray,
+    *,
+    near: float,
+    far: float,
+) -> tuple[np.ndarray, dict[str, float | int | None]]:
+    """Compare normalized depths only where sim GT predicts visible robot geometry."""
+    real_depth = np.asarray(real_depth, dtype=np.float32)
+    sim_robot_depth = np.asarray(sim_robot_depth, dtype=np.float32)
+    if real_depth.shape != sim_robot_depth.shape:
+        raise ValueError(f"Real/sim depth shapes differ: {real_depth.shape} != {sim_robot_depth.shape}")
+
+    robot_mask = np.isfinite(sim_robot_depth) & (sim_robot_depth >= -0.5) & (sim_robot_depth < 0.499)
+    real_valid = np.isfinite(real_depth) & (real_depth >= -0.5) & (real_depth < 0.499)
+    comparable = robot_mask & real_valid
+    missing = robot_mask & ~real_valid
+    comparison = np.zeros((*real_depth.shape, 3), dtype=np.uint8)
+
+    real_m = normalized_depth_to_meters(real_depth, near, far)
+    sim_m = normalized_depth_to_meters(sim_robot_depth, near, far)
+    error = np.abs(real_m - sim_m)
+    good = comparable & (error <= 0.05)
+    medium = comparable & (error > 0.05) & (error <= 0.15)
+    bad = comparable & (error > 0.15)
+    comparison[good] = (0, 220, 70)
+    comparison[medium] = (255, 200, 0)
+    comparison[bad] = (255, 45, 30)
+    comparison[missing] = (220, 0, 255)
+
+    robot_pixels = int(np.count_nonzero(robot_mask))
+    compared_pixels = int(np.count_nonzero(comparable))
+    compared_error = error[comparable]
+    stats: dict[str, float | int | None] = {
+        "robot_pixels": robot_pixels,
+        "compared_pixels": compared_pixels,
+        "coverage_percent": 100.0 * compared_pixels / robot_pixels if robot_pixels else 0.0,
+        "mae_m": float(np.mean(compared_error)) if compared_pixels else None,
+    }
+    return comparison, stats
+
+
 def depth_point_cloud(
     depth_normalized: np.ndarray,
     *,
@@ -311,6 +353,8 @@ def run(args: argparse.Namespace) -> None:
     sim_gt_image = None
     sim_gt_md = None
     sim_gt_reader = None
+    comparison_image = None
+    comparison_md = None
     if not args.no_depth:
         depth_root = server.scene.add_frame(
             "/depth_camera_view",
@@ -358,9 +402,14 @@ def run(args: argparse.Namespace) -> None:
             show_sim_gt = server.gui.add_checkbox("Show sim GT", initial_value=True)
             sim_gt_image = server.gui.add_image(
                 np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-                label="MuJoCo metric GT → exact 0mcqao8k policy preprocessing",
+                label="Robot parts only: MuJoCo metric GT → 0mcqao8k preprocessing",
             )
             sim_gt_md = server.gui.add_markdown("Waiting for MuJoCo GT shared memory...")
+            comparison_image = server.gui.add_image(
+                np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
+                label="Real vs sim robot parts: green ≤5cm · yellow ≤15cm · red >15cm · magenta missing",
+            )
+            comparison_md = server.gui.add_markdown("Waiting for both real and robot-only sim depth...")
 
         @show_sim_gt.on_update
         def _(_event) -> None:
@@ -455,6 +504,7 @@ def run(args: argparse.Namespace) -> None:
 
             sim_gt_raw = sim_gt_reader.read() if sim_gt_reader is not None else None
             sim_gt_depth = None
+            comparison_stats = None
             if sim_gt_raw is not None and sim_gt_image is not None and sim_gt_cloud is not None:
                 sim_gt_depth = prepare_sim_gt_policy_depth(
                     sim_gt_raw,
@@ -484,6 +534,14 @@ def run(args: argparse.Namespace) -> None:
                 )
                 sim_gt_cloud.points = points
                 sim_gt_cloud.colors = colors
+                if depth is not None and comparison_image is not None:
+                    comparison_rgb, comparison_stats = robot_part_depth_comparison(
+                        depth,
+                        sim_gt_depth,
+                        near=args.depth_near,
+                        far=args.depth_far,
+                    )
+                    comparison_image.image = comparison_rgb
 
             now = time.time()
             if now - last_status_text_update >= 0.2:
@@ -534,10 +592,22 @@ def run(args: argparse.Namespace) -> None:
                         valid = np.isfinite(sim_gt_depth) & (sim_gt_depth < 0.499)
                         valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(sim_gt_depth.size)
                         sim_gt_md.content = (
+                            "geometry `G1 visual meshes only` · "
                             f"raw metric buffer `{args.sim_gt_depth_shm_name}` · "
                             f"render `{args.sim_gt_depth_width}x{args.sim_gt_depth_height}` · "
                             f"policy input `{args.depth_width}x{args.depth_height}` · "
                             f"valid `{valid_percent:.1f}%`"
+                        )
+                if comparison_md is not None:
+                    if comparison_stats is None:
+                        comparison_md.content = "Waiting for both real and robot-only sim depth..."
+                    else:
+                        mae = comparison_stats["mae_m"]
+                        mae_text = "n/a" if mae is None else f"{float(mae) * 100.0:.1f} cm"
+                        comparison_md.content = (
+                            f"robot pixels `{comparison_stats['robot_pixels']}` · "
+                            f"real coverage `{float(comparison_stats['coverage_percent']):.1f}%` · "
+                            f"robot-only MAE `{mae_text}`"
                         )
 
             stop.wait(max(0.0, period - (time.monotonic() - started)))
