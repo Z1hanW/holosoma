@@ -20,7 +20,7 @@ class _FakeLogger:
         self.messages.append(message)
 
 
-def test_real_debug_pose_is_symmetric_ninety_degree_stiff_hold() -> None:
+def test_real_debug_pose_uses_g1_forward_elbow_zero() -> None:
     config = DEFAULTS["g1-debug-stiff-90"]
     pose = np.asarray(config.robot.stiff_startup_pos, dtype=np.float32)
     names = tuple(config.robot.dof_names)
@@ -28,10 +28,12 @@ def test_real_debug_pose_is_symmetric_ninety_degree_stiff_hold() -> None:
     assert pose.shape == (29,)
     assert config.task.stiff_hold_only is True
     assert config.task.stiff_hold_blend_seconds == 5.0
+    # G1's neutral elbow link points forward: zero joint angle is the physical
+    # forearm-to-upper-arm right angle. Positive angles fold it rearward/down.
     np.testing.assert_allclose(
         pose[[names.index("left_elbow_joint"), names.index("right_elbow_joint")]],
-        np.pi / 2.0,
-        atol=1.0e-4,
+        0.0,
+        atol=1.0e-6,
     )
     np.testing.assert_allclose(
         pose[names.index("left_shoulder_pitch_joint")],

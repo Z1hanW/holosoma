@@ -104,13 +104,13 @@ Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to
 
 ### Real Stiff-Pose Debug
 
-To hold a symmetric debug pose with both elbows at 90 degrees, keep the G1 supported on the gantry and run:
+To hold a symmetric debug pose with both forearms pointing forward at roughly 90 degrees to the upper arms, keep the G1 supported on the gantry and run:
 
 ```bash
 bash real_debug.sh
 ```
 
-After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the debug pose over five seconds, then holds it with the configured WBT stiff gains. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
+After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the debug pose over five seconds, then holds it with the configured WBT stiff gains. The G1 elbow command is `0 rad` for this physical forward pose; positive elbow angles fold the forearms rearward/downward. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
 
 ### MuJoCo WBT Box Rollout Debug Log
 
