@@ -15,6 +15,7 @@ from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 from typing import Any, Sequence
 
+import cv2
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--depth-crop-y-end", type=int, default=0)
     parser.add_argument("--depth-crop-x-start", type=int, default=0)
     parser.add_argument("--depth-crop-x-end", type=int, default=0)
+    parser.add_argument(
+        "--sim-gt-depth-shm-name",
+        default="",
+        help="Optional raw metric MuJoCo GT buffer to show beside real depth.",
+    )
+    parser.add_argument("--sim-gt-depth-height", type=int, default=60)
+    parser.add_argument("--sim-gt-depth-width", type=int, default=106)
     parser.add_argument("--urdf-path", type=Path, default=DEFAULT_URDF_PATH)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -66,6 +74,39 @@ def normalized_depth_to_meters(depth: np.ndarray, near: float, far: float) -> np
     """Undo the image server's [-0.5, 0.5] policy-depth normalization."""
     depth = np.asarray(depth, dtype=np.float32)
     return (np.clip(depth, -0.5, 0.5) + 0.5) * (far - near) + near
+
+
+def meters_to_normalized_depth(depth_m: np.ndarray, near: float, far: float) -> np.ndarray:
+    """Convert metric depth to the image server's [-0.5, 0.5] policy range."""
+    depth_m = np.asarray(depth_m, dtype=np.float32)
+    clipped = np.clip(depth_m, near, far)
+    return (clipped - near) / (far - near) - 0.5
+
+
+def prepare_sim_gt_policy_depth(
+    raw_depth_m: np.ndarray,
+    *,
+    near: float,
+    far: float,
+    output_height: int,
+    output_width: int,
+    crop_y_start: int = 0,
+    crop_y_end: int = 0,
+    crop_x_start: int = 0,
+    crop_x_end: int = 0,
+) -> np.ndarray:
+    """Apply the 0mcqao8k crop, cubic resize, clip, and normalization to sim GT."""
+    raw_depth_m = np.asarray(raw_depth_m, dtype=np.float32)
+    if raw_depth_m.ndim != 2:
+        raise ValueError(f"Expected a 2-D sim GT image, got shape {raw_depth_m.shape}")
+    height, width = raw_depth_m.shape
+    crop_y_stop = height if crop_y_end == 0 else crop_y_end
+    crop_x_stop = width if crop_x_end == 0 else crop_x_end
+    cropped = raw_depth_m[crop_y_start:crop_y_stop, crop_x_start:crop_x_stop]
+    if cropped.size == 0:
+        raise ValueError("Sim GT crop must leave a non-empty image")
+    resized = cv2.resize(cropped, (output_width, output_height), interpolation=cv2.INTER_CUBIC)
+    return meters_to_normalized_depth(resized, near, far)
 
 
 def depth_colors(depth_m: np.ndarray, near: float, far: float) -> np.ndarray:
@@ -163,9 +204,10 @@ def normalized_wxyz(value: Sequence[float]) -> tuple[float, float, float, float]
 class DepthSharedMemoryReader:
     """Best-effort reader that never owns or unlinks the image-server buffer."""
 
-    def __init__(self, name: str, height: int, width: int) -> None:
+    def __init__(self, name: str, height: int, width: int, source_hint: str = "start real_depth.sh") -> None:
         self.name = name
         self.shape = (1, 1, height, width)
+        self.source_hint = source_hint
         self._shm: shared_memory.SharedMemory | None = None
         self._array: np.ndarray | None = None
         self.last_error = "waiting for depth shared memory"
@@ -180,7 +222,7 @@ class DepthSharedMemoryReader:
         try:
             shm = shared_memory.SharedMemory(name=self.name)
         except FileNotFoundError:
-            self.last_error = f"waiting for /dev/shm/{self.name} (start real_depth.sh)"
+            self.last_error = f"waiting for /dev/shm/{self.name} ({self.source_hint})"
             return False
 
         # Python 3.10 has no SharedMemory(track=False). Unregister this
@@ -264,6 +306,11 @@ def run(args: argparse.Namespace) -> None:
     depth_image = None
     depth_md = None
     depth_reader = None
+    sim_gt_root = None
+    sim_gt_cloud = None
+    sim_gt_image = None
+    sim_gt_md = None
+    sim_gt_reader = None
     if not args.no_depth:
         depth_root = server.scene.add_frame(
             "/depth_camera_view",
@@ -293,6 +340,41 @@ def run(args: argparse.Namespace) -> None:
             depth_image.visible = visible
 
         depth_reader = DepthSharedMemoryReader(args.depth_shm_name, args.depth_height, args.depth_width)
+
+    if not args.no_depth and args.sim_gt_depth_shm_name:
+        sim_gt_root = server.scene.add_frame(
+            "/sim_gt_depth_camera_view",
+            position=(0.0, 1.35, 0.75),
+            show_axes=True,
+        )
+        sim_gt_cloud = server.scene.add_point_cloud(
+            "/sim_gt_depth_camera_view/ground_truth_depth",
+            points=np.zeros((1, 3), dtype=np.float32),
+            colors=np.zeros((1, 3), dtype=np.uint8),
+            point_size=0.012,
+            point_shape="circle",
+        )
+        with server.gui.add_folder("MuJoCo sim GT", order=30.0):
+            show_sim_gt = server.gui.add_checkbox("Show sim GT", initial_value=True)
+            sim_gt_image = server.gui.add_image(
+                np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
+                label="MuJoCo metric GT → exact 0mcqao8k policy preprocessing",
+            )
+            sim_gt_md = server.gui.add_markdown("Waiting for MuJoCo GT shared memory...")
+
+        @show_sim_gt.on_update
+        def _(_event) -> None:
+            visible = bool(show_sim_gt.value)
+            assert sim_gt_root is not None and sim_gt_image is not None
+            sim_gt_root.visible = visible
+            sim_gt_image.visible = visible
+
+        sim_gt_reader = DepthSharedMemoryReader(
+            args.sim_gt_depth_shm_name,
+            args.sim_gt_depth_height,
+            args.sim_gt_depth_width,
+            source_hint="start sim_gt_depth.sh",
+        )
 
     @show_actual.on_update
     def _(_event) -> None:
@@ -371,6 +453,38 @@ def run(args: argparse.Namespace) -> None:
                 depth_cloud.points = points
                 depth_cloud.colors = colors
 
+            sim_gt_raw = sim_gt_reader.read() if sim_gt_reader is not None else None
+            sim_gt_depth = None
+            if sim_gt_raw is not None and sim_gt_image is not None and sim_gt_cloud is not None:
+                sim_gt_depth = prepare_sim_gt_policy_depth(
+                    sim_gt_raw,
+                    near=args.depth_near,
+                    far=args.depth_far,
+                    output_height=args.depth_height,
+                    output_width=args.depth_width,
+                    crop_y_start=args.depth_crop_y_start,
+                    crop_y_end=args.depth_crop_y_end,
+                    crop_x_start=args.depth_crop_x_start,
+                    crop_x_end=args.depth_crop_x_end,
+                )
+                sim_gt_m = normalized_depth_to_meters(sim_gt_depth, args.depth_near, args.depth_far)
+                sim_gt_image.image = depth_colors(sim_gt_m, args.depth_near, args.depth_far)
+                points, colors = depth_point_cloud(
+                    sim_gt_depth,
+                    near=args.depth_near,
+                    far=args.depth_far,
+                    horizontal_fov_deg=args.horizontal_fov_deg,
+                    vertical_fov_deg=args.vertical_fov_deg,
+                    source_height=args.sim_gt_depth_height,
+                    source_width=args.sim_gt_depth_width,
+                    crop_y_start=args.depth_crop_y_start,
+                    crop_y_end=args.depth_crop_y_end,
+                    crop_x_start=args.depth_crop_x_start,
+                    crop_x_end=args.depth_crop_x_end,
+                )
+                sim_gt_cloud.points = points
+                sim_gt_cloud.colors = colors
+
             now = time.time()
             if now - last_status_text_update >= 0.2:
                 last_status_text_update = now
@@ -413,11 +527,25 @@ def run(args: argparse.Namespace) -> None:
                             f"policy input `{args.depth_width}x{args.depth_height}` · "
                             f"valid `{valid_percent:.1f}%`"
                         )
+                if sim_gt_reader is not None and sim_gt_md is not None:
+                    if sim_gt_depth is None:
+                        sim_gt_md.content = sim_gt_reader.last_error
+                    else:
+                        valid = np.isfinite(sim_gt_depth) & (sim_gt_depth < 0.499)
+                        valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(sim_gt_depth.size)
+                        sim_gt_md.content = (
+                            f"raw metric buffer `{args.sim_gt_depth_shm_name}` · "
+                            f"render `{args.sim_gt_depth_width}x{args.sim_gt_depth_height}` · "
+                            f"policy input `{args.depth_width}x{args.depth_height}` · "
+                            f"valid `{valid_percent:.1f}%`"
+                        )
 
             stop.wait(max(0.0, period - (time.monotonic() - started)))
     finally:
         if depth_reader is not None:
             depth_reader.close()
+        if sim_gt_reader is not None:
+            sim_gt_reader.close()
         try:
             server.stop()
         except AttributeError:

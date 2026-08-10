@@ -34,11 +34,26 @@ def test_real_debug_launches_depth_server_and_viser_dashboard() -> None:
     assert "real_d435i_urdf" in script
     assert 'HOLOSOMA_REAL_IMAGE_SERVER_CONFIG="$depth_server_config"' in script
     assert "scripts/real_viser.py" in script
+    assert "bash sim_gt_depth.sh" in script
+    assert "HOLOSOMA_REAL_DEBUG_SIM_GT" in script
     assert "--no-depth" not in script
-    assert '--depth-profile "0mcqao8k D435-URDF"' in script
+    assert '--depth-profile "Real D435: 0mcqao8k processing"' in script
     assert "--depth-source-height 60" in script
     assert "--depth-source-width 106" in script
+    assert "--sim-gt-depth-shm-name" in script
     assert 'HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path"' in script
+
+
+def test_sim_gt_renderer_is_isolated_from_real_robot_dds() -> None:
+    launcher = (REPO_ROOT / "sim_gt_depth.sh").read_text(encoding="utf-8")
+    renderer = (REPO_ROOT / "scripts" / "sim_gt_depth_server.py").read_text(encoding="utf-8")
+
+    assert "bridge=disabled (render-only, no DDS)" in launcher
+    assert "run_sim.py" not in launcher
+    assert "unitree" not in renderer.lower()
+    assert 'default="sim_gt_depth_raw_shm"' in renderer
+    assert "[0.0576235, 0.01753, 0.41987]" in renderer
+    assert "[0.0, 47.6, 0.0]" in renderer
 
 
 def test_real_debug_depth_server_matches_0mcqao8k_latency_profile() -> None:

@@ -19,10 +19,45 @@ def test_parse_args_can_disable_depth_panel(tmp_path) -> None:
     assert args.no_depth is True
 
 
+def test_parse_args_can_enable_sim_gt_panel(tmp_path) -> None:
+    args = real_viser._parse_args(
+        [
+            "--state-path",
+            str(tmp_path / "state.json"),
+            "--sim-gt-depth-shm-name",
+            "sim_gt_depth_raw_shm",
+        ]
+    )
+
+    assert args.sim_gt_depth_shm_name == "sim_gt_depth_raw_shm"
+    assert (args.sim_gt_depth_height, args.sim_gt_depth_width) == (60, 106)
+
+
 def test_normalized_depth_to_meters_maps_policy_range() -> None:
     normalized = np.array([-0.5, 0.0, 0.5], dtype=np.float32)
     meters = real_viser.normalized_depth_to_meters(normalized, 0.3, 3.0)
     np.testing.assert_allclose(meters, [0.3, 1.65, 3.0], atol=1.0e-6)
+
+
+def test_sim_gt_uses_exact_policy_crop_resize_and_normalization() -> None:
+    raw_meters = np.full((60, 106), 1.65, dtype=np.float32)
+    raw_meters[:2] = 0.3
+    raw_meters[:, :4] = 0.3
+    raw_meters[:, -4:] = 3.0
+
+    processed = real_viser.prepare_sim_gt_policy_depth(
+        raw_meters,
+        near=0.3,
+        far=3.0,
+        output_height=58,
+        output_width=87,
+        crop_y_start=2,
+        crop_x_start=4,
+        crop_x_end=-4,
+    )
+
+    assert processed.shape == (58, 87)
+    np.testing.assert_allclose(processed, 0.0, atol=1.0e-6)
 
 
 def test_depth_point_cloud_drops_far_sentinel_and_uses_robot_axes() -> None:

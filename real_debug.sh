@@ -16,6 +16,8 @@ command_status_path="${log_dir}/latest_command.json"
 viser_pid=""
 depth_pid=""
 depth_process_group=""
+sim_gt_pid=""
+sim_gt_process_group=""
 
 cleanup() {
   if [[ -n "$viser_pid" ]]; then
@@ -29,6 +31,14 @@ cleanup() {
   fi
   if [[ -n "$depth_pid" ]]; then
     wait "$depth_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$sim_gt_process_group" ]]; then
+    kill -- "-$sim_gt_process_group" 2>/dev/null || true
+  elif [[ -n "$sim_gt_pid" ]]; then
+    kill "$sim_gt_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$sim_gt_pid" ]]; then
+    wait "$sim_gt_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -58,6 +68,21 @@ else
   echo "[real_debug] depth server disabled by HOLOSOMA_REAL_DEBUG_DEPTH=0"
 fi
 
+if [[ "${HOLOSOMA_REAL_DEBUG_SIM_GT:-1}" != "0" ]]; then
+  sim_gt_log="${log_dir}/sim_gt_depth.log"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
+    sim_gt_pid=$!
+    sim_gt_process_group=$sim_gt_pid
+  else
+    bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
+    sim_gt_pid=$!
+  fi
+  echo "[real_debug] MuJoCo sim GT started pid=${sim_gt_pid} log=${sim_gt_log}"
+else
+  echo "[real_debug] MuJoCo sim GT disabled by HOLOSOMA_REAL_DEBUG_SIM_GT=0"
+fi
+
 source scripts/source_inference_setup.sh
 
 if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
@@ -71,12 +96,13 @@ if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
     --state-path "$command_status_path" \
     --host "${HOLOSOMA_REAL_VISER_HOST:-127.0.0.1}" \
     --port "${HOLOSOMA_REAL_VISER_PORT:-8080}" \
-    --depth-profile "0mcqao8k D435-URDF" \
+    --depth-profile "Real D435: 0mcqao8k processing" \
     --depth-source-height 60 \
     --depth-source-width 106 \
     --depth-crop-y-start 2 \
     --depth-crop-x-start 4 \
     --depth-crop-x-end -4 \
+    --sim-gt-depth-shm-name "${HOLOSOMA_REAL_DEBUG_SIM_GT_SHM_NAME:-sim_gt_depth_raw_shm}" \
     "${viser_browser_args[@]}" &
   viser_pid=$!
   echo "[real_viser] debug viewer started pid=${viser_pid}"
