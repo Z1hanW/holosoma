@@ -63,6 +63,12 @@ class TaskConfig:
     auto_start_motion_clip: bool = False
     """Start WBT motion clip immediately after policy start."""
 
+    stiff_hold_only: bool = False
+    """Keep a WBT controller in its configured stiff startup pose and reject policy/motion activation."""
+
+    stiff_hold_blend_seconds: float = 0.0
+    """Seconds used to smoothly move from measured joints to the WBT stiff pose; zero preserves immediate hold."""
+
     motion_file: str = ""
     """Optional motion file used by sparse-root WBT observations."""
 

@@ -131,6 +131,28 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = Inferenc
     camera=camera.single_d435i_urdf_depth,
 )
 
+# Fixed-pose hardware debug mode. Both elbow joints are +pi/2, placing each
+# forearm at 90 degrees to its upper arm. Policy and motion activation are
+# locked out by task.stiff_hold_only.
+g1_debug_stiff_90 = replace(
+    g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1,
+    robot=replace(
+        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.robot,
+        stiff_startup_pos=(
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # left leg
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # right leg
+            0.0, 0.0, 0.0,  # waist
+            0.2, 0.2, 0.0, 1.5708, 0.0, 0.0, 0.0,  # left arm
+            0.2, -0.2, 0.0, 1.5708, 0.0, 0.0, 0.0,  # right arm
+        ),
+    ),
+    task=replace(
+        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.task,
+        stiff_hold_only=True,
+        stiff_hold_blend_seconds=5.0,
+    ),
+)
+
 g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1 = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1,
@@ -206,6 +228,7 @@ DEFAULTS = {
     "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf": (
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf
     ),
+    "g1-debug-stiff-90": g1_debug_stiff_90,
     "g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1
     ),

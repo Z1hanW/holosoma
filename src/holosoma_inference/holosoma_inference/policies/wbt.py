@@ -191,6 +191,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_sim_time = config.task.use_sim_time
 
         self._stiff_hold_active = True
+        self._stiff_hold_only = bool(config.task.stiff_hold_only)
+        self._stiff_hold_blend_steps = max(
+            0,
+            int(round(float(config.task.stiff_hold_blend_seconds) * float(config.task.rl_rate))),
+        )
+        self._stiff_hold_blend_count = 0
+        self._stiff_hold_start_q: np.ndarray | None = None
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -220,6 +227,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self._stiff_hold_q.shape[1] != self.num_dofs:
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
+        if self._stiff_hold_only:
+            logger.warning(
+                colored(
+                    "STIFF-HOLD-ONLY mode: policy and motion activation are disabled.",
+                    "yellow",
+                    attrs=["bold"],
+                )
+            )
 
         # Prompt user before entering stiff mode (only if stdin is available)
         def _show_warning():
@@ -682,6 +697,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_clock_reading = None
         self._last_policy_inference_clock_ms = None
         self._stiff_hold_active = True
+        self._reset_stiff_hold_blend()
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -1254,17 +1270,43 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
         if not self._stiff_hold_active:
             return None
+        q_target = self._stiff_hold_q.copy()
+        if self._stiff_hold_blend_steps > 0:
+            if self._stiff_hold_start_q is None:
+                self._stiff_hold_start_q = robot_state_data[:, 7 : 7 + self.num_dofs].copy()
+            blend_t = min(self._stiff_hold_blend_count / self._stiff_hold_blend_steps, 1.0)
+            blend_alpha = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+            q_target = (1.0 - blend_alpha) * self._stiff_hold_start_q + blend_alpha * self._stiff_hold_q
+            self._stiff_hold_blend_count = min(self._stiff_hold_blend_count + 1, self._stiff_hold_blend_steps)
         return {
-            "q": self._stiff_hold_q.copy(),
+            "q": q_target,
             "kp": self._stiff_hold_kp,
             "kd": self._stiff_hold_kd,
         }
 
+    def _reset_stiff_hold_blend(self) -> None:
+        self._stiff_hold_blend_count = 0
+        self._stiff_hold_start_q = None
+
     def _handle_start_policy(self):
+        if self._stiff_hold_only:
+            self.use_policy_action = False
+            self.get_ready_state = False
+            self._stiff_hold_active = True
+            if hasattr(self.interface, "no_action"):
+                self.interface.no_action = 0
+            self.logger.warning("Policy activation ignored: stiff-hold-only mode is active")
+            return
         super()._handle_start_policy()
         self._stiff_hold_active = False
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
+
+    def _handle_init_state(self):
+        if self._stiff_hold_only:
+            self.logger.info("Already holding the configured stiff debug pose")
+            return
+        super()._handle_init_state()
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
@@ -1308,6 +1350,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
+        self._reset_stiff_hold_blend()
         self.logger.info("Actions set to stiff startup command")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
@@ -1324,6 +1367,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
+        if self._stiff_hold_only:
+            self.logger.warning("Motion activation ignored: stiff-hold-only mode is active")
+            return
         self.clock_sub.reset_origin()
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
