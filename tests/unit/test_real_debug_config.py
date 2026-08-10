@@ -44,6 +44,20 @@ def test_real_debug_launches_depth_server_and_viser_dashboard() -> None:
     assert 'HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path"' in script
 
 
+def test_real_drop_launches_pose_synced_flat_ground_sim_gt() -> None:
+    script = (REPO_ROOT / "real_drop.sh").read_text(encoding="utf-8")
+
+    assert "bash sim_gt_depth.sh" in script
+    assert "HOLOSOMA_REAL_DROP_SIM_GT" in script
+    assert 'HOLOSOMA_SIM_GT_STATE_PATH="$command_status_path"' in script
+    assert "--sim-gt-depth-shm-name" in script
+    assert "--depth-source-height 60" in script
+    assert "--depth-source-width 106" in script
+    assert "--depth-crop-y-start 2" in script
+    assert "--depth-crop-x-start 4" in script
+    assert "--depth-crop-x-end -4" in script
+
+
 def test_sim_gt_renderer_is_isolated_from_real_robot_dds() -> None:
     launcher = (REPO_ROOT / "sim_gt_depth.sh").read_text(encoding="utf-8")
     renderer = (REPO_ROOT / "scripts" / "sim_gt_depth_server.py").read_text(encoding="utf-8")
@@ -60,6 +74,7 @@ def test_sim_gt_renderer_is_isolated_from_real_robot_dds() -> None:
     assert "robot_option.geomgroup[1] = 1" in renderer
     assert 'floor = spec.geom("floor")' in renderer
     assert "sim_gt_box" not in renderer
+    assert 'positions = status.get("q_actual")' in renderer
 
 
 def test_real_debug_depth_server_matches_0mcqao8k_latency_profile() -> None:

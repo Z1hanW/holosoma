@@ -71,11 +71,11 @@ fi
 if [[ "${HOLOSOMA_REAL_DEBUG_SIM_GT:-1}" != "0" ]]; then
   sim_gt_log="${log_dir}/sim_gt_depth.log"
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
+    env HOLOSOMA_SIM_GT_STATE_PATH="$command_status_path" setsid bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
     sim_gt_pid=$!
     sim_gt_process_group=$sim_gt_pid
   else
-    bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
+    HOLOSOMA_SIM_GT_STATE_PATH="$command_status_path" bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
     sim_gt_pid=$!
   fi
   echo "[real_debug] MuJoCo sim GT started pid=${sim_gt_pid} log=${sim_gt_log}"

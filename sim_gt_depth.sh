@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-shm_name="${HOLOSOMA_REAL_DEBUG_SIM_GT_SHM_NAME:-sim_gt_depth_raw_shm}"
+shm_name="${HOLOSOMA_SIM_GT_SHM_NAME:-${HOLOSOMA_REAL_DEBUG_SIM_GT_SHM_NAME:-sim_gt_depth_raw_shm}}"
+state_path="${HOLOSOMA_SIM_GT_STATE_PATH:-}"
 
 if [[ -n "${HOLOSOMA_MUJOCO_PYTHON:-}" ]]; then
   python_bin="$HOLOSOMA_MUJOCO_PYTHON"
@@ -20,6 +21,12 @@ echo "[sim_gt_depth] python=${python_bin}"
 echo "[sim_gt_depth] geometry=robot+flat-ground comparison=robot-parts-only pose=all-zero"
 echo "[sim_gt_depth] bridge=disabled (render-only, no DDS)"
 
-MUJOCO_GL="${HOLOSOMA_SIM_GT_MUJOCO_GL:-egl}" \
-"$python_bin" scripts/sim_gt_depth_server.py \
-  --shm-name "$shm_name"
+state_args=()
+if [[ -n "$state_path" ]]; then
+  state_args+=(--state-path "$state_path")
+fi
+
+exec env MUJOCO_GL="${HOLOSOMA_SIM_GT_MUJOCO_GL:-egl}" \
+  "$python_bin" scripts/sim_gt_depth_server.py \
+  --shm-name "$shm_name" \
+  "${state_args[@]}"

@@ -98,7 +98,7 @@ bash real_depth.sh
 bash real_drop.sh
 ```
 
-`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud.
+`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud. Both launch the flat-ground MuJoCo GT view and robot-only comparison; during `real_drop.sh`, the GT renderer follows the measured robot joints and base orientation from live telemetry.
 
 Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
 

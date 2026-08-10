@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Publish robot-only MuJoCo ground-truth depth for real-debug comparison."""
+"""Publish flat-ground MuJoCo GT plus a robot-only comparison channel."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import signal
 import time
@@ -29,6 +30,7 @@ DEFAULT_SCENE = (
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
+    parser.add_argument("--state-path", type=Path)
     parser.add_argument("--shm-name", default="sim_gt_depth_raw_shm")
     parser.add_argument("--width", type=int, default=106)
     parser.add_argument("--height", type=int, default=60)
@@ -109,6 +111,47 @@ def build_scene(scene_path: Path, vertical_fov_deg: float):
     return model, data, camera_name
 
 
+def read_robot_status(path: Path | None) -> dict:
+    """Read one atomic real-robot telemetry snapshot."""
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def apply_robot_status(model: mujoco.MjModel, data: mujoco.MjData, status: dict) -> bool:
+    """Update MuJoCo with measured joints/base pose from Viser telemetry."""
+    names = status.get("dof_names")
+    positions = status.get("q_actual")
+    if not isinstance(names, list) or not isinstance(positions, list) or len(names) != len(positions):
+        return False
+
+    updated = 0
+    for name, position in zip(names, positions):
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, str(name))
+        if joint_id < 0 or not np.isfinite(position):
+            continue
+        data.qpos[model.jnt_qposadr[joint_id]] = float(position)
+        updated += 1
+    if updated == 0:
+        return False
+
+    base_position = np.asarray(status.get("base_position", ()), dtype=np.float64).reshape(-1)
+    if base_position.size == 3 and np.isfinite(base_position).all() and abs(float(base_position[2])) > 0.1:
+        data.qpos[2] = float(base_position[2])
+    base_wxyz = np.asarray(status.get("base_wxyz", ()), dtype=np.float64).reshape(-1)
+    if base_wxyz.size == 4 and np.isfinite(base_wxyz).all():
+        norm = float(np.linalg.norm(base_wxyz))
+        if norm > 1.0e-6:
+            data.qpos[3:7] = base_wxyz / norm
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+    return True
+
+
 def run(args: argparse.Namespace) -> None:
     scene_path = args.scene.expanduser().resolve()
     if not scene_path.is_file():
@@ -180,9 +223,15 @@ def run(args: argparse.Namespace) -> None:
     )
 
     period = 1.0 / max(float(args.rate_hz), 1.0)
+    telemetry_live = False
     try:
         while not stop:
             started = time.monotonic()
+            status = read_robot_status(args.state_path)
+            status_applied = apply_robot_status(model, data, status)
+            if status_applied and not telemetry_live:
+                print(f"[sim_gt_depth] following measured robot pose from {args.state_path}", flush=True)
+            telemetry_live = status_applied
             renderer.update_scene(data, camera=camera_name, scene_option=scene_option)
             output[0, 0] = np.asarray(renderer.render(), dtype=np.float32)
             renderer.update_scene(data, camera=camera_name, scene_option=robot_option)
