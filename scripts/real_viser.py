@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live Viser dashboard for the real G1 depth-policy experiment."""
+"""Live Viser dashboard for real G1 policy and fixed-pose experiments."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rate-hz", type=float, default=20.0)
     parser.add_argument("--root-height", type=float, default=0.78)
     parser.add_argument("--open-browser", action="store_true")
+    parser.add_argument("--no-depth", action="store_true", help="Hide the policy-depth panel and point cloud.")
     return parser.parse_args(argv)
 
 
@@ -202,7 +203,6 @@ def run(args: argparse.Namespace) -> None:
     actual_root = server.scene.add_frame("/robot_actual", show_axes=False)
     target_root = server.scene.add_frame("/robot_target", show_axes=False)
     server.scene.add_grid("/grid", width=4.0, height=4.0, position=(0.0, 0.0, 0.0))
-    depth_root = server.scene.add_frame("/depth_camera_view", position=(0.0, -1.35, 0.75), show_axes=True)
 
     actual_urdf = ViserUrdf(server, urdf_or_path=urdf_path, root_node_name="/robot_actual")
     target_urdf = ViserUrdf(
@@ -213,28 +213,46 @@ def run(args: argparse.Namespace) -> None:
     )
     viser_joint_names = tuple(actual_urdf.get_actuated_joint_names())
 
-    zero_points = np.zeros((1, 3), dtype=np.float32)
-    zero_colors = np.zeros((1, 3), dtype=np.uint8)
-    depth_cloud = server.scene.add_point_cloud(
-        "/depth_camera_view/policy_depth",
-        points=zero_points,
-        colors=zero_colors,
-        point_size=0.012,
-        point_shape="circle",
-    )
-
     with server.gui.add_folder("Live experiment", order=10.0):
         status_md = server.gui.add_markdown("Waiting for policy telemetry...")
         show_actual = server.gui.add_checkbox("Measured robot", initial_value=True)
         show_target = server.gui.add_checkbox("Target overlay", initial_value=True)
         apply_imu = server.gui.add_checkbox("Apply IMU orientation", initial_value=True)
-    with server.gui.add_folder("Policy depth", order=20.0):
-        show_depth = server.gui.add_checkbox("Show depth", initial_value=True)
-        depth_image = server.gui.add_image(
-            np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-            label="Exact normalized policy input",
+
+    depth_root = None
+    depth_cloud = None
+    depth_image = None
+    depth_md = None
+    depth_reader = None
+    if not args.no_depth:
+        depth_root = server.scene.add_frame(
+            "/depth_camera_view",
+            position=(0.0, -1.35, 0.75),
+            show_axes=True,
         )
-        depth_md = server.gui.add_markdown("Waiting for depth shared memory...")
+        depth_cloud = server.scene.add_point_cloud(
+            "/depth_camera_view/policy_depth",
+            points=np.zeros((1, 3), dtype=np.float32),
+            colors=np.zeros((1, 3), dtype=np.uint8),
+            point_size=0.012,
+            point_shape="circle",
+        )
+        with server.gui.add_folder("Policy depth", order=20.0):
+            show_depth = server.gui.add_checkbox("Show depth", initial_value=True)
+            depth_image = server.gui.add_image(
+                np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
+                label="Exact normalized policy input",
+            )
+            depth_md = server.gui.add_markdown("Waiting for depth shared memory...")
+
+        @show_depth.on_update
+        def _(_event) -> None:
+            visible = bool(show_depth.value)
+            assert depth_root is not None and depth_image is not None
+            depth_root.visible = visible
+            depth_image.visible = visible
+
+        depth_reader = DepthSharedMemoryReader(args.depth_shm_name, args.depth_height, args.depth_width)
 
     @show_actual.on_update
     def _(_event) -> None:
@@ -244,13 +262,6 @@ def run(args: argparse.Namespace) -> None:
     def _(_event) -> None:
         target_root.visible = bool(show_target.value)
 
-    @show_depth.on_update
-    def _(_event) -> None:
-        visible = bool(show_depth.value)
-        depth_root.visible = visible
-        depth_image.visible = visible
-
-    depth_reader = DepthSharedMemoryReader(args.depth_shm_name, args.depth_height, args.depth_width)
     stop = threading.Event()
 
     def _stop(_signum=None, _frame=None) -> None:
@@ -299,8 +310,8 @@ def run(args: argparse.Namespace) -> None:
                 target_root.position = actual_root.position
                 target_root.wxyz = root_wxyz
 
-            depth = depth_reader.read()
-            if depth is not None:
+            depth = depth_reader.read() if depth_reader is not None else None
+            if depth is not None and depth_image is not None and depth_cloud is not None:
                 depth_m = normalized_depth_to_meters(depth, args.depth_near, args.depth_far)
                 rgb = depth_colors(depth_m, args.depth_near, args.depth_far)
                 depth_image.image = rgb
@@ -335,27 +346,30 @@ def run(args: argparse.Namespace) -> None:
                     error_rms = float(np.sqrt(np.mean(error**2)))
                     error_text = f"max={error_absmax:.3f} rad, rms={error_rms:.3f} rad"
                 state_label = "LIVE" if age < 0.5 else ("STALE" if math.isfinite(age) else "WAITING")
+                mode_label = "STIFF HOLD" if bool(status.get("stiff_hold_active", False)) else "POLICY"
                 status_md.content = (
-                    f"**{state_label}** · telemetry age `{age:.2f}s`  \n"
+                    f"**{state_label} · {mode_label}** · telemetry age `{age:.2f}s`  \n"
                     f"policy active `{bool(status.get('use_policy_action', False))}` · "
                     f"motion frame `{int(status.get('motion_timestep', 0) or 0)}`  \n"
                     f"command `{command_text}`  \n"
                     f"joint error `{error_text}`"
                 )
-                if depth is None:
-                    depth_md.content = depth_reader.last_error
-                else:
-                    finite = np.isfinite(depth)
-                    valid = finite & (depth < 0.499)
-                    valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(depth.size)
-                    depth_md.content = (
-                        f"buffer `{args.depth_shm_name}` · `{args.depth_width}x{args.depth_height}` · "
-                        f"valid `{valid_percent:.1f}%`"
-                    )
+                if depth_reader is not None and depth_md is not None:
+                    if depth is None:
+                        depth_md.content = depth_reader.last_error
+                    else:
+                        finite = np.isfinite(depth)
+                        valid = finite & (depth < 0.499)
+                        valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(depth.size)
+                        depth_md.content = (
+                            f"buffer `{args.depth_shm_name}` · `{args.depth_width}x{args.depth_height}` · "
+                            f"valid `{valid_percent:.1f}%`"
+                        )
 
             stop.wait(max(0.0, period - (time.monotonic() - started)))
     finally:
-        depth_reader.close()
+        if depth_reader is not None:
+            depth_reader.close()
         try:
             server.stop()
         except AttributeError:

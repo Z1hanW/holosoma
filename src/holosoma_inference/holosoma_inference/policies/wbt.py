@@ -898,6 +898,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "base_wxyz": np.asarray(robot_state_data[0, 3:7], dtype=np.float32).astype(float).tolist(),
             "use_policy_action": bool(self.use_policy_action),
             "get_ready_state": bool(self.get_ready_state),
+            "stiff_hold_active": bool(self._stiff_hold_active),
+            "stiff_hold_only": bool(self._stiff_hold_only),
         }
         if "pickup_button" in self.obs_dims:
             payload["pickup_button"] = float(self._pickup_button_command)

@@ -23,6 +23,8 @@ def test_sparse_command_status_includes_live_robot_pose(tmp_path) -> None:
     policy.cmd_q = np.array([0.4, -0.2], dtype=np.float32)
     policy.use_policy_action = True
     policy.get_ready_state = False
+    policy._stiff_hold_active = True
+    policy._stiff_hold_only = True
     policy.obs_dims = {}
 
     robot_state = np.zeros((1, 9), dtype=np.float32)
@@ -41,3 +43,5 @@ def test_sparse_command_status_includes_live_robot_pose(tmp_path) -> None:
     assert payload["base_wxyz"] == [1.0, 0.0, 0.0, 0.0]
     assert payload["motion_timestep"] == 12
     assert payload["use_policy_action"] is True
+    assert payload["stiff_hold_active"] is True
+    assert payload["stiff_hold_only"] is True

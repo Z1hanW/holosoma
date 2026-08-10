@@ -11,6 +11,16 @@ model_path="${HOLOSOMA_REAL_DEBUG_MODEL_PATH:-${HOLOSOMA_REAL_MODEL_PATH:-$defau
 log_dir="${ROOT_DIR}/logs/real_debug_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/run.log") 2>&1
+command_status_path="${log_dir}/latest_command.json"
+viser_pid=""
+
+cleanup() {
+  if [[ -n "$viser_pid" ]]; then
+    kill "$viser_pid" 2>/dev/null || true
+    wait "$viser_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 echo "[real_debug] log_dir=${log_dir}"
 echo "[real_debug] model_path=${model_path}"
@@ -23,6 +33,27 @@ echo "[real_debug] policy and motion activation are locked out"
 echo "[real_debug] keep the robot supported and press Enter only when the area is clear"
 
 source scripts/source_inference_setup.sh
+
+if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
+  viser_browser_args=()
+  if [[ "${HOLOSOMA_REAL_VISER_OPEN_BROWSER:-1}" != "0" ]] \
+      && { [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; }; then
+    viser_browser_args+=(--open-browser)
+  fi
+  PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
+  python3 scripts/real_viser.py \
+    --state-path "$command_status_path" \
+    --host "${HOLOSOMA_REAL_VISER_HOST:-127.0.0.1}" \
+    --port "${HOLOSOMA_REAL_VISER_PORT:-8080}" \
+    --no-depth \
+    "${viser_browser_args[@]}" &
+  viser_pid=$!
+  echo "[real_viser] debug viewer started pid=${viser_pid}"
+else
+  echo "[real_viser] disabled by HOLOSOMA_REAL_VISER=0"
+fi
+
+HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path" \
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   inference:g1-debug-diagnostic \

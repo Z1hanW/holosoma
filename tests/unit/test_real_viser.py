@@ -13,6 +13,12 @@ real_viser = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(real_viser)
 
 
+def test_parse_args_can_disable_depth_panel(tmp_path) -> None:
+    args = real_viser._parse_args(["--state-path", str(tmp_path / "state.json"), "--no-depth"])
+
+    assert args.no_depth is True
+
+
 def test_normalized_depth_to_meters_maps_policy_range() -> None:
     normalized = np.array([-0.5, 0.0, 0.5], dtype=np.float32)
     meters = real_viser.normalized_depth_to_meters(normalized, 0.3, 3.0)

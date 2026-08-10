@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from holosoma_inference.config.config_values.inference import DEFAULTS
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeInterface:
@@ -18,6 +22,14 @@ class _FakeLogger:
 
     def warning(self, message: str) -> None:
         self.messages.append(message)
+
+
+def test_real_debug_launches_pose_only_viser_dashboard() -> None:
+    script = (REPO_ROOT / "real_debug.sh").read_text(encoding="utf-8")
+
+    assert "scripts/real_viser.py" in script
+    assert "--no-depth" in script
+    assert 'HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path"' in script
 
 
 def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:

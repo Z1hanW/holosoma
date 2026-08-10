@@ -98,7 +98,7 @@ bash real_depth.sh
 bash real_drop.sh
 ```
 
-`real_drop.sh` now starts a Viser dashboard at `http://127.0.0.1:8080` and opens it automatically when a desktop display is available. The dashboard shows the measured G1 pose, the policy's target-pose overlay, sparse command and joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud. It can start before `real_depth.sh`; the depth panel connects when `depth_img_shm` appears.
+`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, and joint-error telemetry. The drop-policy viewer also includes the exact normalized D435i policy input and a depth point cloud; the debug viewer hides that unused depth panel.
 
 Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
 
