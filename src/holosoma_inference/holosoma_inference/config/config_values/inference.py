@@ -124,6 +124,13 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1 = InferenceConfig(
     camera=camera.single_d435i_depth,
 )
 
+g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_contact_aware_drop_button_actions_no_linvel_h1_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_urdf_depth,
+)
+
 g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1 = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1,
@@ -195,6 +202,9 @@ DEFAULTS = {
     "g1-root_pos-contact-aware-actions-no-linvel-h1": g1_root_pos_contact_aware_actions_no_linvel_h1,
     "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1
+    ),
+    "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf": (
+        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf
     ),
     "g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1

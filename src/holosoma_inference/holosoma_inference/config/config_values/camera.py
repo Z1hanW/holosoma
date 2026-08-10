@@ -77,6 +77,35 @@ single_d435i_depth = CameraConfig(
     ),
 )
 
+# D435i URDF-mounted depth camera used by newer carry-any depth runs.
+# Training warp renders 106x60, crops top=2 and left/right=4, then resizes to 58x87.
+single_d435i_urdf_depth = CameraConfig(
+    poses={
+        "cam_d435i_urdf_depth": CameraPose(
+            parent_link="robot/torso_link",
+            camera_offset=(0.0576235, 0.01753, 0.41987),
+            camera_rotation=(0.0, 47.6, 0.0),
+        ),
+    },
+    props=CameraProps(
+        image_type="depth",
+        width=106,
+        height=60,
+        resized_width=87,
+        resized_height=58,
+        horizontal_fov=89.5,
+        vertical_fov=58.6,
+        near_clip=0.3,
+        far_clip=3.0,
+        frame_rate=30,
+        image_show=False,
+        depth_delay=0,
+        crop_y_start=2,
+        crop_x_start=4,
+        crop_x_end=-4,
+    ),
+)
+
 
 # Single ZED 2i depth camera setup (for far-tracking G1FlatZed2iConfig distillation)
 # Native: 1280x720, warp raycast: 240x135, policy resize: (58, 87)
@@ -113,6 +142,7 @@ single_zed2i_depth = CameraConfig(
 DEFAULTS = {
     "dual-depth": dual_depth_cameras,
     "single-d435i-depth": single_d435i_depth,
+    "single-d435i-urdf-depth": single_d435i_urdf_depth,
     "single-zed2i-depth": single_zed2i_depth,
 }
 """Dictionary of all available camera configurations.

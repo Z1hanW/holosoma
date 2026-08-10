@@ -99,6 +99,12 @@ real_d435i = dataclasses.replace(
     buffer_len=4,
 )
 
+real_d435i_urdf = dataclasses.replace(
+    real_d435i,
+    latency_frame=(3, 4),
+    buffer_len=6,
+)
+
 # Debug-friendly D435i profile with visualization and both depth sources enabled.
 real_verbose_d435i = dataclasses.replace(
     real_d435i,
@@ -196,6 +202,7 @@ DEFAULTS = {
     "real_enable_gum": real_enable_gum,
     "real_depth_gum": real_depth_gum,
     "real_d435i": real_d435i,
+    "real_d435i_urdf": real_d435i_urdf,
     "real_verbose_d435i": real_verbose_d435i,
     "real_enable_gum_d435i": real_enable_gum_d435i,
     "real_depth_gum_d435i": real_depth_gum_d435i,

@@ -6,6 +6,8 @@ clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
 object_xy_offset="${HOLOSOMA_MJ_OBJECT_XY_OFFSET:-0,-0.0}"
 object_mass="${HOLOSOMA_MJ_OBJECT_MASS:-2.0}"
+camera_config="${HOLOSOMA_MJ_CAMERA_CONFIG:-single_d435i_depth}"
+image_server_config="${HOLOSOMA_MJ_IMAGE_SERVER_CONFIG:-mujoco_d435i}"
 explicit_motion_mode=0
 clip_arg_seen=0
 if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
@@ -119,8 +121,8 @@ fi
 PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
   python "${ROOT_DIR}/src/holosoma/holosoma/run_sim.py" \
     robot:g1-29dof-w-object \
-    camera:single_d435i_depth \
-    image_server:mujoco_d435i \
+    "camera:${camera_config}" \
+    "image_server:${image_server_config}" \
     --simulator.config.virtual-gantry.enabled=False \
     "${bridge_args[@]}" \
     "${robot_args[@]}" \

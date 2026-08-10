@@ -41,6 +41,42 @@ single_d435i_depth = CameraManagerCfg(terms={
     ),
 })
 
+# D435i URDF-mounted depth camera used by newer carry-any depth runs.
+# Training warp renders 106x60, crops top=2 and left/right=4, then resizes to 58x87.
+d435i_urdf_depth_props = CameraProps(
+    image_type="depth",
+    width=106,
+    height=60,
+    resized_width=87,
+    resized_height=58,
+    horizontal_fov=89.5,
+    vertical_fov=58.6,
+    near_clip=0.3,
+    far_clip=3.0,
+    image_show=True,
+    frame_rate=30,
+    depth_delay=0,
+    crop_y_start=2,
+    crop_x_start=4,
+    crop_x_end=-4,
+    latency_frame=(3, 4),
+    buffer_len=6,
+)
+
+single_d435i_urdf_depth = CameraManagerCfg(terms={
+    "d435i_urdf_depth": CameraTermCfg(
+        func="holosoma.managers.camera.terms.depth:DepthCamera",
+        params={
+            "pose": CameraPose(
+                camera_body_link="torso_link",
+                camera_offset=(0.0576235, 0.01753, 0.41987),
+                camera_rotation=(0.0, 47.6, 0.0),
+            ),
+            "props": d435i_urdf_depth_props,
+        },
+    ),
+})
+
 # ZED 2i depth camera props for far-tracking distillation (G1FlatZed2iConfig)
 # Native: 1280x720, warp raycast: 240x135, policy resize: (58, 87)
 # Training uses "resize": (58, 87) in distillation_env_cfg.py WarpObservationsCfg
@@ -76,7 +112,8 @@ DEFAULTS = {
     "none": none,
     "dual_depth_cameras": dual_depth_cameras,
     "single_d435i_depth": single_d435i_depth,
+    "single_d435i_urdf_depth": single_d435i_urdf_depth,
     "single_zed2i_depth": single_zed2i_depth,
 }
 
-__all__ = ["dual_depth_cameras", "single_d435i_depth", "single_zed2i_depth"]
+__all__ = ["dual_depth_cameras", "single_d435i_depth", "single_d435i_urdf_depth", "single_zed2i_depth"]
