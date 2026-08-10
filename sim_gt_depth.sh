@@ -17,7 +17,7 @@ else
 fi
 
 echo "[sim_gt_depth] python=${python_bin}"
-echo "[sim_gt_depth] geometry=robot-parts-only pose=all-zero"
+echo "[sim_gt_depth] geometry=robot+flat-ground comparison=robot-parts-only pose=all-zero"
 echo "[sim_gt_depth] bridge=disabled (render-only, no DDS)"
 
 MUJOCO_GL="${HOLOSOMA_SIM_GT_MUJOCO_GL:-egl}" \

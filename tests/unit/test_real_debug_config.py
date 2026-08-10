@@ -55,7 +55,10 @@ def test_sim_gt_renderer_is_isolated_from_real_robot_dds() -> None:
     assert "[0.0576235, 0.01753, 0.41987]" in renderer
     assert "[0.0, 47.6, 0.0]" in renderer
     assert "scene_option.geomgroup[:] = 0" in renderer
+    assert "scene_option.geomgroup[0] = 1" in renderer
     assert "scene_option.geomgroup[1] = 1" in renderer
+    assert "robot_option.geomgroup[1] = 1" in renderer
+    assert 'floor = spec.geom("floor")' in renderer
     assert "sim_gt_box" not in renderer
 
 

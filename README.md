@@ -110,7 +110,7 @@ To reproduce Unitree's suspended `L2+A` diagnostic position, keep the G1 support
 bash real_debug.sh
 ```
 
-`real_debug.sh` automatically starts `real_depth.sh` with the `real_d435i_urdf` latency preset used for `0mcqao8k`, plus an isolated render-only MuJoCo server for robot-part ground-truth depth. Viser shows separate **Real D435** and **MuJoCo sim GT** panels and a robot-only comparison image. The GT renderer includes only G1 visual meshes—no box, floor, environment, or collision geometry—and holds the all-zero diagnostic pose. The comparison evaluates only pixels where simulated robot parts are visible: green is within 5cm, yellow within 15cm, red over 15cm, and magenta means the real depth is missing there. It has no Unitree/DDS bridge and cannot command the real robot.
+`real_debug.sh` automatically starts `real_depth.sh` with the `real_d435i_urdf` latency preset used for `0mcqao8k`, plus an isolated render-only MuJoCo server for ground-truth depth. The **MuJoCo sim GT** image and point cloud include the G1 and a flat ground plane, and use the exact same depth colormap as the **Real D435** panel. A synchronized second GT channel contains only G1 visual meshes, so the comparison still evaluates only pixels where robot parts are visible: green is within 5cm, yellow within 15cm, red over 15cm, and magenta means the real depth is missing there. Boxes, other environment geometry, and collision meshes remain excluded. The renderer has no Unitree/DDS bridge and cannot command the real robot.
 
 Set `HOLOSOMA_REAL_DEBUG_SIM_GT=0` to disable robot-part GT, `HOLOSOMA_REAL_DEBUG_IMAGE_SERVER_CONFIG` to override the real image-server preset, or `HOLOSOMA_REAL_DEBUG_DEPTH=0` when a separate real depth server is already running.
 

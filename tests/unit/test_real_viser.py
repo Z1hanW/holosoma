@@ -31,6 +31,7 @@ def test_parse_args_can_enable_sim_gt_panel(tmp_path) -> None:
 
     assert args.sim_gt_depth_shm_name == "sim_gt_depth_raw_shm"
     assert (args.sim_gt_depth_height, args.sim_gt_depth_width) == (60, 106)
+    assert args.sim_gt_depth_channels == 2
 
 
 def test_normalized_depth_to_meters_maps_policy_range() -> None:

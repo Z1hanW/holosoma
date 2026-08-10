@@ -96,6 +96,10 @@ def build_scene(scene_path: Path, vertical_fov_deg: float):
         quat=d435i_urdf_mujoco_quaternion().tolist(),
         fovy=vertical_fov_deg,
     )
+    floor = spec.geom("floor")
+    if floor is None:
+        raise RuntimeError("flat-ground geom 'floor' is missing from the MuJoCo scene")
+    floor.group = 0
 
     model = spec.compile()
     data = mujoco.MjData(model)
@@ -131,17 +135,24 @@ def run(args: argparse.Namespace) -> None:
             flush=True,
         )
 
-    shape = (1, 1, args.height, args.width)
+    # Channel 0 is the visible robot + flat-ground scene. Channel 1 is the
+    # robot-only depth used to keep comparison metrics off the background.
+    shape = (1, 2, args.height, args.width)
     size_bytes = int(np.prod(shape)) * np.dtype(np.float32).itemsize
     try:
         shm = shared_memory.SharedMemory(name=args.shm_name, create=True, size=size_bytes)
     except FileExistsError:
         shm = shared_memory.SharedMemory(name=args.shm_name)
         if shm.size != size_bytes:
+            stale_size = shm.size
             shm.close()
-            raise RuntimeError(
-                f"Existing /dev/shm/{args.shm_name} has {shm.size} bytes; expected {size_bytes}"
+            shm.unlink()
+            print(
+                f"[sim_gt_depth] replaced stale {stale_size}-byte /dev/shm/{args.shm_name} "
+                f"with {size_bytes}-byte two-channel buffer",
+                flush=True,
             )
+            shm = shared_memory.SharedMemory(name=args.shm_name, create=True, size=size_bytes)
     output = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
 
     stop = False
@@ -157,10 +168,14 @@ def run(args: argparse.Namespace) -> None:
     renderer.enable_depth_rendering()
     scene_option = mujoco.MjvOption()
     scene_option.geomgroup[:] = 0
-    scene_option.geomgroup[1] = 1  # G1 visual meshes only: no floor, box, collision geoms, or head shell.
+    scene_option.geomgroup[0] = 1  # Flat ground.
+    scene_option.geomgroup[1] = 1  # G1 visual meshes.
+    robot_option = mujoco.MjvOption()
+    robot_option.geomgroup[:] = 0
+    robot_option.geomgroup[1] = 1
     print(
         f"[sim_gt_depth] MuJoCo GT ready: /dev/shm/{args.shm_name} "
-        f"shape={shape} robot-only all-zero diagnostic pose",
+        f"shape={shape} flat-ground scene + robot-only comparison mask",
         flush=True,
     )
 
@@ -170,6 +185,8 @@ def run(args: argparse.Namespace) -> None:
             started = time.monotonic()
             renderer.update_scene(data, camera=camera_name, scene_option=scene_option)
             output[0, 0] = np.asarray(renderer.render(), dtype=np.float32)
+            renderer.update_scene(data, camera=camera_name, scene_option=robot_option)
+            output[0, 1] = np.asarray(renderer.render(), dtype=np.float32)
             time.sleep(max(0.0, period - (time.monotonic() - started)))
     finally:
         renderer.close()

@@ -51,6 +51,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--sim-gt-depth-height", type=int, default=60)
     parser.add_argument("--sim-gt-depth-width", type=int, default=106)
+    parser.add_argument("--sim-gt-depth-channels", type=int, default=2)
     parser.add_argument("--urdf-path", type=Path, default=DEFAULT_URDF_PATH)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -246,19 +247,34 @@ def normalized_wxyz(value: Sequence[float]) -> tuple[float, float, float, float]
 class DepthSharedMemoryReader:
     """Best-effort reader that never owns or unlinks the image-server buffer."""
 
-    def __init__(self, name: str, height: int, width: int, source_hint: str = "start real_depth.sh") -> None:
+    def __init__(
+        self,
+        name: str,
+        height: int,
+        width: int,
+        source_hint: str = "start real_depth.sh",
+        channels: int = 1,
+    ) -> None:
         self.name = name
-        self.shape = (1, 1, height, width)
+        self.shape = (1, channels, height, width)
         self.source_hint = source_hint
         self._shm: shared_memory.SharedMemory | None = None
         self._array: np.ndarray | None = None
         self.last_error = "waiting for depth shared memory"
 
-    def read(self) -> np.ndarray | None:
+    def read_all(self) -> np.ndarray | None:
         if self._array is None and not self._attach():
             return None
         assert self._array is not None
-        return np.array(self._array[0, 0], dtype=np.float32, copy=True)
+        return np.array(self._array[0], dtype=np.float32, copy=True)
+
+    def read(self, channel: int = 0) -> np.ndarray | None:
+        frames = self.read_all()
+        if frames is None:
+            return None
+        if not 0 <= channel < frames.shape[0]:
+            raise IndexError(f"Depth channel {channel} is outside [0, {frames.shape[0]})")
+        return frames[channel]
 
     def _attach(self) -> bool:
         try:
@@ -402,7 +418,7 @@ def run(args: argparse.Namespace) -> None:
             show_sim_gt = server.gui.add_checkbox("Show sim GT", initial_value=True)
             sim_gt_image = server.gui.add_image(
                 np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-                label="Robot parts only: MuJoCo metric GT → 0mcqao8k preprocessing",
+                label="Robot + flat-ground MuJoCo GT (same colormap as Real D435)",
             )
             sim_gt_md = server.gui.add_markdown("Waiting for MuJoCo GT shared memory...")
             comparison_image = server.gui.add_image(
@@ -423,6 +439,7 @@ def run(args: argparse.Namespace) -> None:
             args.sim_gt_depth_height,
             args.sim_gt_depth_width,
             source_hint="start sim_gt_depth.sh",
+            channels=args.sim_gt_depth_channels,
         )
 
     @show_actual.on_update
@@ -502,8 +519,11 @@ def run(args: argparse.Namespace) -> None:
                 depth_cloud.points = points
                 depth_cloud.colors = colors
 
-            sim_gt_raw = sim_gt_reader.read() if sim_gt_reader is not None else None
+            sim_gt_frames = sim_gt_reader.read_all() if sim_gt_reader is not None else None
+            sim_gt_raw = sim_gt_frames[0] if sim_gt_frames is not None else None
+            sim_robot_raw = sim_gt_frames[1] if sim_gt_frames is not None and sim_gt_frames.shape[0] > 1 else None
             sim_gt_depth = None
+            sim_robot_depth = None
             comparison_stats = None
             if sim_gt_raw is not None and sim_gt_image is not None and sim_gt_cloud is not None:
                 sim_gt_depth = prepare_sim_gt_policy_depth(
@@ -534,10 +554,22 @@ def run(args: argparse.Namespace) -> None:
                 )
                 sim_gt_cloud.points = points
                 sim_gt_cloud.colors = colors
-                if depth is not None and comparison_image is not None:
+                if sim_robot_raw is not None:
+                    sim_robot_depth = prepare_sim_gt_policy_depth(
+                        sim_robot_raw,
+                        near=args.depth_near,
+                        far=args.depth_far,
+                        output_height=args.depth_height,
+                        output_width=args.depth_width,
+                        crop_y_start=args.depth_crop_y_start,
+                        crop_y_end=args.depth_crop_y_end,
+                        crop_x_start=args.depth_crop_x_start,
+                        crop_x_end=args.depth_crop_x_end,
+                    )
+                if depth is not None and sim_robot_depth is not None and comparison_image is not None:
                     comparison_rgb, comparison_stats = robot_part_depth_comparison(
                         depth,
-                        sim_gt_depth,
+                        sim_robot_depth,
                         near=args.depth_near,
                         far=args.depth_far,
                     )
@@ -592,7 +624,7 @@ def run(args: argparse.Namespace) -> None:
                         valid = np.isfinite(sim_gt_depth) & (sim_gt_depth < 0.499)
                         valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(sim_gt_depth.size)
                         sim_gt_md.content = (
-                            "geometry `G1 visual meshes only` · "
+                            "geometry `G1 + flat ground` · colormap `same as Real D435` · "
                             f"raw metric buffer `{args.sim_gt_depth_shm_name}` · "
                             f"render `{args.sim_gt_depth_width}x{args.sim_gt_depth_height}` · "
                             f"policy input `{args.depth_width}x{args.depth_height}` · "
