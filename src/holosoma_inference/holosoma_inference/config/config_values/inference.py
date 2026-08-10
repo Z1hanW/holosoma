@@ -131,20 +131,33 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = Inferenc
     camera=camera.single_d435i_urdf_depth,
 )
 
-# Fixed-pose hardware debug mode. On the G1, elbow joint zero is the physical
-# forward-forearm pose (roughly 90 degrees to the upper arm); +pi/2 folds the
-# forearm rearward/downward. Policy and motion activation are locked out by
-# task.stiff_hold_only.
-g1_debug_stiff_90 = replace(
+# Unitree's suspended L2+A diagnostic position is the G1 zero-joint posture.
+# Use the gains from Unitree's official G1 low-level zero-posture example.
+# Policy and motion activation are locked out by task.stiff_hold_only.
+g1_debug_diagnostic = replace(
     g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1,
     robot=replace(
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.robot,
         stiff_startup_pos=(
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # left leg
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # right leg
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left leg
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right leg
             0.0, 0.0, 0.0,  # waist
-            0.2, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0,  # left arm: forearm forward
-            0.2, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0,  # right arm: forearm forward
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left arm
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right arm
+        ),
+        stiff_startup_kp=(
+            60.0, 60.0, 60.0, 100.0, 40.0, 40.0,  # left leg
+            60.0, 60.0, 60.0, 100.0, 40.0, 40.0,  # right leg
+            60.0, 40.0, 40.0,  # waist
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # left arm
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # right arm
+        ),
+        stiff_startup_kd=(
+            1.0, 1.0, 1.0, 2.0, 1.0, 1.0,  # left leg
+            1.0, 1.0, 1.0, 2.0, 1.0, 1.0,  # right leg
+            1.0, 1.0, 1.0,  # waist
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # left arm
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # right arm
         ),
     ),
     task=replace(
@@ -229,7 +242,7 @@ DEFAULTS = {
     "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf": (
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf
     ),
-    "g1-debug-stiff-90": g1_debug_stiff_90,
+    "g1-debug-diagnostic": g1_debug_diagnostic,
     "g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1
     ),

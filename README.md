@@ -102,15 +102,15 @@ bash real_drop.sh
 
 Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
 
-### Real Stiff-Pose Debug
+### Real Unitree Diagnostic-Pose Debug
 
-To hold a symmetric debug pose with both forearms pointing forward at roughly 90 degrees to the upper arms, keep the G1 supported on the gantry and run:
+To reproduce Unitree's suspended `L2+A` diagnostic position, keep the G1 supported on the gantry, put it in damping/develop mode with `L2+R2`, and run:
 
 ```bash
 bash real_debug.sh
 ```
 
-After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the debug pose over five seconds, then holds it with the configured WBT stiff gains. The G1 elbow command is `0 rad` for this physical forward pose; positive elbow angles fold the forearms rearward/downward. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
+After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the all-zero 29-DOF diagnostic posture over five seconds, then holds it with the position gains from Unitree's G1 low-level zero-posture example. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
 
 ### MuJoCo WBT Box Rollout Debug Log
 

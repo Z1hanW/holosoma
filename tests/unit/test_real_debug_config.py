@@ -20,28 +20,54 @@ class _FakeLogger:
         self.messages.append(message)
 
 
-def test_real_debug_pose_uses_g1_forward_elbow_zero() -> None:
-    config = DEFAULTS["g1-debug-stiff-90"]
+def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
+    config = DEFAULTS["g1-debug-diagnostic"]
     pose = np.asarray(config.robot.stiff_startup_pos, dtype=np.float32)
-    names = tuple(config.robot.dof_names)
+    kp = np.asarray(config.robot.stiff_startup_kp, dtype=np.float32)
+    kd = np.asarray(config.robot.stiff_startup_kd, dtype=np.float32)
 
     assert pose.shape == (29,)
     assert config.task.stiff_hold_only is True
     assert config.task.stiff_hold_blend_seconds == 5.0
-    # G1's neutral elbow link points forward: zero joint angle is the physical
-    # forearm-to-upper-arm right angle. Positive angles fold it rearward/down.
-    np.testing.assert_allclose(
-        pose[[names.index("left_elbow_joint"), names.index("right_elbow_joint")]],
-        0.0,
-        atol=1.0e-6,
+    np.testing.assert_array_equal(pose, np.zeros(29, dtype=np.float32))
+    np.testing.assert_array_equal(
+        kp,
+        [
+            60,
+            60,
+            60,
+            100,
+            40,
+            40,
+            60,
+            60,
+            60,
+            100,
+            40,
+            40,
+            60,
+            40,
+            40,
+            *([40] * 14),
+        ],
     )
-    np.testing.assert_allclose(
-        pose[names.index("left_shoulder_pitch_joint")],
-        pose[names.index("right_shoulder_pitch_joint")],
-    )
-    np.testing.assert_allclose(
-        pose[names.index("left_shoulder_roll_joint")],
-        -pose[names.index("right_shoulder_roll_joint")],
+    np.testing.assert_array_equal(
+        kd,
+        [
+            1,
+            1,
+            1,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            2,
+            1,
+            1,
+            *([1] * 17),
+        ],
     )
 
 

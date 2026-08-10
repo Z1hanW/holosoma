@@ -15,8 +15,8 @@ exec > >(tee -a "${log_dir}/run.log") 2>&1
 echo "[real_debug] log_dir=${log_dir}"
 echo "[real_debug] model_path=${model_path}"
 echo "[real_debug] interface=${interface}"
-echo "[real_debug] fixed pose: standing body, both forearms forward"
-echo "[real_debug] elbow command: 0 rad (G1 physical pose is about 90 deg to upper arm)"
+echo "[real_debug] target: Unitree L2+A suspended diagnostic position"
+echo "[real_debug] joint target: all 29 G1 joints at 0 rad (zero-joint posture)"
 echo "[real_debug] transition: smooth 5-second move from the measured joint pose"
 echo "[real_debug] policy and motion activation are locked out"
 echo "[real_debug] keep the robot supported and press Enter only when the area is clear"
@@ -24,7 +24,7 @@ echo "[real_debug] keep the robot supported and press Enter only when the area i
 source scripts/source_inference_setup.sh
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
-  inference:g1-debug-stiff-90 \
+  inference:g1-debug-diagnostic \
   --task.model-path "$model_path" \
   --task.use-joystick \
   --task.rl-rate 50 \
