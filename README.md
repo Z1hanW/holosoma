@@ -98,7 +98,7 @@ bash real_depth.sh
 bash real_drop.sh
 ```
 
-`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, and joint-error telemetry. The drop-policy viewer also includes the exact normalized D435i policy input and a depth point cloud; the debug viewer hides that unused depth panel.
+`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud.
 
 Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
 
@@ -110,7 +110,7 @@ To reproduce Unitree's suspended `L2+A` diagnostic position, keep the G1 support
 bash real_debug.sh
 ```
 
-`real_debug.sh` automatically starts `real_depth.sh`, connects its D435i stream to the Viser depth panel, and stops the depth server with the debug controller. Set `HOLOSOMA_REAL_DEBUG_DEPTH=0` only when a separate depth server is already running.
+`real_debug.sh` automatically starts `real_depth.sh` with the `real_d435i_urdf` latency preset used for `0mcqao8k`, connects its processed 58x87 policy input to the Viser depth panel, and stops the depth server with the debug controller. The debug inference config uses the same simulated 106x60 D435-URDF mount, FOV, crop, and depth range; Viser uses those training intrinsics when reconstructing the depth point cloud. Set `HOLOSOMA_REAL_DEBUG_IMAGE_SERVER_CONFIG` to override the image-server preset, or set `HOLOSOMA_REAL_DEBUG_DEPTH=0` only when a separate depth server is already running.
 
 After the controller loads, verify the area is clear and press Enter to confirm stiff mode. It transitions from the measured joint positions to the straight, high-standing all-zero 29-DOF diagnostic posture over five seconds, then holds the legs and waist with the established high WBT stiff gains. Policy and motion activation are locked out in this configuration; joystick A/Start cannot leave the hold. Use `L1+R1` or `Ctrl+C` to exit. `HOLOSOMA_REAL_INTERFACE` and `HOLOSOMA_REAL_DEBUG_MODEL_PATH` override the default interface and initialization checkpoint.
 

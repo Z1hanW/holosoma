@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from holosoma.config_values.image_server import DEFAULTS as IMAGE_SERVER_DEFAULTS
+from holosoma_inference.config.config_values import camera
 from holosoma_inference.config.config_values.inference import DEFAULTS
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
 
@@ -29,9 +31,25 @@ def test_real_debug_launches_depth_server_and_viser_dashboard() -> None:
 
     assert "bash real_depth.sh" in script
     assert "HOLOSOMA_REAL_DEBUG_DEPTH" in script
+    assert "real_d435i_urdf" in script
+    assert 'HOLOSOMA_REAL_IMAGE_SERVER_CONFIG="$depth_server_config"' in script
     assert "scripts/real_viser.py" in script
     assert "--no-depth" not in script
+    assert '--depth-profile "0mcqao8k D435-URDF"' in script
+    assert "--depth-source-height 60" in script
+    assert "--depth-source-width 106" in script
     assert 'HOLOSOMA_POLICY_COMMAND_STATUS_PATH="$command_status_path"' in script
+
+
+def test_real_debug_depth_server_matches_0mcqao8k_latency_profile() -> None:
+    config = IMAGE_SERVER_DEFAULTS["real_d435i_urdf"]
+
+    assert config.latency_frame == (3, 4)
+    assert config.buffer_len == 6
+    assert config.resized_width == 87
+    assert config.resized_height == 58
+    assert config.near_clip == 0.3
+    assert config.far_clip == 3.0
 
 
 def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
@@ -40,6 +58,14 @@ def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
     kp = np.asarray(config.robot.stiff_startup_kp, dtype=np.float32)
     kd = np.asarray(config.robot.stiff_startup_kd, dtype=np.float32)
 
+    assert config.camera == camera.single_d435i_urdf_depth
+    assert config.camera.props.width == 106
+    assert config.camera.props.height == 60
+    assert config.camera.props.resized_width == 87
+    assert config.camera.props.resized_height == 58
+    assert config.camera.props.crop_y_start == 2
+    assert config.camera.props.crop_x_start == 4
+    assert config.camera.props.crop_x_end == -4
     assert pose.shape == (29,)
     assert config.task.stiff_hold_only is True
     assert config.task.stiff_hold_blend_seconds == 5.0

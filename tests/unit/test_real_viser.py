@@ -41,6 +41,27 @@ def test_depth_point_cloud_drops_far_sentinel_and_uses_robot_axes() -> None:
     assert points[0, 2] > 0.0  # top image pixel -> robot-up z
 
 
+def test_depth_point_cloud_uses_urdf_render_crop_intrinsics() -> None:
+    normalized = np.full((58, 87), -0.5, dtype=np.float32)
+    points, _ = real_viser.depth_point_cloud(
+        normalized,
+        near=1.0,
+        far=2.0,
+        horizontal_fov_deg=89.5,
+        vertical_fov_deg=58.6,
+        source_height=60,
+        source_width=106,
+        crop_y_start=2,
+        crop_x_start=4,
+        crop_x_end=-4,
+    )
+
+    # Cropping the source narrows the horizontal ray spread; cropping only
+    # from the top also shifts the processed image slightly downward.
+    assert float(points[:, 1].max() - points[:, 1].min()) < 2.0
+    assert float(points[:, 2].mean()) < 0.0
+
+
 def test_joint_values_are_reordered_by_name() -> None:
     actual = real_viser.joint_values_in_viser_order(
         [1.0, 2.0, 3.0],

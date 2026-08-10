@@ -35,6 +35,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--depth-near", type=float, default=0.3)
     parser.add_argument("--depth-far", type=float, default=3.0)
     parser.add_argument("--horizontal-fov-deg", type=float, default=89.5)
+    parser.add_argument("--vertical-fov-deg", type=float, default=58.6)
+    parser.add_argument("--depth-profile", default="D435i")
+    parser.add_argument("--depth-source-height", type=int)
+    parser.add_argument("--depth-source-width", type=int)
+    parser.add_argument("--depth-crop-y-start", type=int, default=0)
+    parser.add_argument("--depth-crop-y-end", type=int, default=0)
+    parser.add_argument("--depth-crop-x-start", type=int, default=0)
+    parser.add_argument("--depth-crop-x-end", type=int, default=0)
     parser.add_argument("--urdf-path", type=Path, default=DEFAULT_URDF_PATH)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -79,6 +87,13 @@ def depth_point_cloud(
     near: float,
     far: float,
     horizontal_fov_deg: float,
+    vertical_fov_deg: float | None = None,
+    source_height: int | None = None,
+    source_width: int | None = None,
+    crop_y_start: int = 0,
+    crop_y_end: int = 0,
+    crop_x_start: int = 0,
+    crop_x_end: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Create an x-forward, y-left, z-up point cloud in camera coordinates."""
     depth_normalized = np.asarray(depth_normalized, dtype=np.float32)
@@ -87,10 +102,35 @@ def depth_point_cloud(
 
     height, width = depth_normalized.shape
     depth_m = normalized_depth_to_meters(depth_normalized, near, far)
-    focal = (0.5 * width) / math.tan(math.radians(horizontal_fov_deg) * 0.5)
     u, v = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-    x_optical = (u - (width - 1) * 0.5) * depth_m / focal
-    y_optical = (v - (height - 1) * 0.5) * depth_m / focal
+    if source_height is None or source_width is None:
+        focal = (0.5 * width) / math.tan(math.radians(horizontal_fov_deg) * 0.5)
+        x_ray = (u - (width - 1) * 0.5) / focal
+        y_ray = (v - (height - 1) * 0.5) / focal
+    else:
+        vertical_fov_deg = horizontal_fov_deg if vertical_fov_deg is None else vertical_fov_deg
+        crop_x_stop = source_width if crop_x_end == 0 else crop_x_end
+        crop_y_stop = source_height if crop_y_end == 0 else crop_y_end
+        if crop_x_stop < 0:
+            crop_x_stop += source_width
+        if crop_y_stop < 0:
+            crop_y_stop += source_height
+        cropped_width = crop_x_stop - crop_x_start
+        cropped_height = crop_y_stop - crop_y_start
+        if cropped_width <= 0 or cropped_height <= 0:
+            raise ValueError("Depth crop must leave a positive image size")
+
+        # Map output pixel centers back through crop+resize to the rendered
+        # camera image, then use the original 0mcqao8k render intrinsics.
+        source_u = (u + 0.5) * (cropped_width / width) - 0.5 + crop_x_start
+        source_v = (v + 0.5) * (cropped_height / height) - 0.5 + crop_y_start
+        focal_x = (0.5 * source_width) / math.tan(math.radians(horizontal_fov_deg) * 0.5)
+        focal_y = (0.5 * source_height) / math.tan(math.radians(vertical_fov_deg) * 0.5)
+        x_ray = (source_u - (source_width - 1) * 0.5) / focal_x
+        y_ray = (source_v - (source_height - 1) * 0.5) / focal_y
+
+    x_optical = x_ray * depth_m
+    y_optical = y_ray * depth_m
 
     valid = np.isfinite(depth_normalized)
     valid &= depth_normalized < 0.499
@@ -241,7 +281,7 @@ def run(args: argparse.Namespace) -> None:
             show_depth = server.gui.add_checkbox("Show depth", initial_value=True)
             depth_image = server.gui.add_image(
                 np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-                label="Exact normalized policy input",
+                label=f"{args.depth_profile}: exact normalized policy input",
             )
             depth_md = server.gui.add_markdown("Waiting for depth shared memory...")
 
@@ -320,6 +360,13 @@ def run(args: argparse.Namespace) -> None:
                     near=args.depth_near,
                     far=args.depth_far,
                     horizontal_fov_deg=args.horizontal_fov_deg,
+                    vertical_fov_deg=args.vertical_fov_deg,
+                    source_height=args.depth_source_height,
+                    source_width=args.depth_source_width,
+                    crop_y_start=args.depth_crop_y_start,
+                    crop_y_end=args.depth_crop_y_end,
+                    crop_x_start=args.depth_crop_x_start,
+                    crop_x_end=args.depth_crop_x_end,
                 )
                 depth_cloud.points = points
                 depth_cloud.colors = colors
@@ -362,7 +409,8 @@ def run(args: argparse.Namespace) -> None:
                         valid = finite & (depth < 0.499)
                         valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(depth.size)
                         depth_md.content = (
-                            f"buffer `{args.depth_shm_name}` · `{args.depth_width}x{args.depth_height}` · "
+                            f"profile `{args.depth_profile}` · buffer `{args.depth_shm_name}` · "
+                            f"policy input `{args.depth_width}x{args.depth_height}` · "
                             f"valid `{valid_percent:.1f}%`"
                         )
 

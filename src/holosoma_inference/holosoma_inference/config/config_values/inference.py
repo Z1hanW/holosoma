@@ -136,6 +136,7 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = Inferenc
 # Policy and motion activation are locked out by task.stiff_hold_only.
 g1_debug_diagnostic = replace(
     g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1,
+    camera=camera.single_d435i_urdf_depth,
     robot=replace(
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.robot,
         stiff_startup_pos=(

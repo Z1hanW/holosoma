@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
 default_model_path="${ROOT_DIR}/_ckps/sx9wctkd_model_40000.onnx"
 model_path="${HOLOSOMA_REAL_DEBUG_MODEL_PATH:-${HOLOSOMA_REAL_MODEL_PATH:-$default_model_path}}"
+depth_server_config="${HOLOSOMA_REAL_DEBUG_IMAGE_SERVER_CONFIG:-${HOLOSOMA_REAL_IMAGE_SERVER_CONFIG:-real_d435i_urdf}}"
 
 log_dir="${ROOT_DIR}/logs/real_debug_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
@@ -43,12 +44,13 @@ echo "[real_debug] policy and motion activation are locked out"
 echo "[real_debug] keep the robot supported and press Enter only when the area is clear"
 
 if [[ "${HOLOSOMA_REAL_DEBUG_DEPTH:-1}" != "0" ]]; then
+  echo "[real_debug] depth config: ${depth_server_config} (0mcqao8k D435-URDF profile)"
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash real_depth.sh &
+    env HOLOSOMA_REAL_IMAGE_SERVER_CONFIG="$depth_server_config" setsid bash real_depth.sh &
     depth_pid=$!
     depth_process_group=$depth_pid
   else
-    bash real_depth.sh &
+    HOLOSOMA_REAL_IMAGE_SERVER_CONFIG="$depth_server_config" bash real_depth.sh &
     depth_pid=$!
   fi
   echo "[real_debug] depth server started pid=${depth_pid}"
@@ -69,6 +71,12 @@ if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
     --state-path "$command_status_path" \
     --host "${HOLOSOMA_REAL_VISER_HOST:-127.0.0.1}" \
     --port "${HOLOSOMA_REAL_VISER_PORT:-8080}" \
+    --depth-profile "0mcqao8k D435-URDF" \
+    --depth-source-height 60 \
+    --depth-source-width 106 \
+    --depth-crop-y-start 2 \
+    --depth-crop-x-start 4 \
+    --depth-crop-x-end -4 \
     "${viser_browser_args[@]}" &
   viser_pid=$!
   echo "[real_viser] debug viewer started pid=${viser_pid}"
