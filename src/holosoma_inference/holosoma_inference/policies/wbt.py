@@ -1484,7 +1484,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         deadband = 0.1
         forward_threshold = 0.02
-        forward_command = 0.15
+        forward_command = 0.5
         lateral_scale = 0.1
         yaw_scale = 0.1
 
