@@ -18,7 +18,7 @@ def _make_policy(*, drop_button_command: float = 0.0) -> WholeBodyTrackingPolicy
     return policy
 
 
-def test_full_forward_joystick_command_is_point_five() -> None:
+def test_full_forward_joystick_command_is_point_eleven() -> None:
     policy = _make_policy()
     policy.interface = SimpleNamespace(
         get_joystick_msg=lambda: SimpleNamespace(keys=0, lx=0.0, ly=1.0, rx=0.0)
@@ -26,7 +26,7 @@ def test_full_forward_joystick_command_is_point_five() -> None:
 
     policy._update_sparse_root_joystick_command()
 
-    np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.5, 0.0, 0.0]])
+    np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.11, 0.0, 0.0]])
 
 
 def test_forward_command_uses_point_zero_two_threshold() -> None:
@@ -35,7 +35,7 @@ def test_forward_command_uses_point_zero_two_threshold() -> None:
     policy.interface = SimpleNamespace(get_joystick_msg=lambda: joystick)
 
     policy._update_sparse_root_joystick_command()
-    np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.5, 0.0, 0.0]])
+    np.testing.assert_allclose(policy._joystick_sparse_root_command_offset, [[0.11, 0.0, 0.0]])
 
     joystick.ly = 0.02
     policy._update_sparse_root_joystick_command()
@@ -55,7 +55,7 @@ def test_keyboard_w_sets_constant_point_fifteen_forward_command() -> None:
 def test_activating_drop_clears_and_suppresses_sparse_root_commands() -> None:
     policy = _make_policy()
     policy._manual_sparse_root_command_offset[:] = [[0.1, -0.1, 0.1]]
-    policy._joystick_sparse_root_command_offset[:] = [[0.5, -0.1, -0.1]]
+    policy._joystick_sparse_root_command_offset[:] = [[0.11, -0.1, -0.1]]
 
     policy._toggle_drop_button_command()
 
