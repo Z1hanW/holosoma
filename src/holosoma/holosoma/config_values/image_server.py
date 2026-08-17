@@ -95,10 +95,11 @@ real_d435i = dataclasses.replace(
     visualize_images=False,
     camera_type="realsense",
     enable_rgb=False,
-    # One 30 Hz frame plus the measured ~39 ms hardware latency is ~72 ms,
-    # matching the policy's 60-80 ms training delay.
-    latency_frame=1,
-    buffer_len=4,
+    # Training sampled 3-4 frames back at 30 Hz (~100-133 ms). The D435i
+    # frames already arrive ~39 ms old, so 2-3 additional frames reproduce
+    # the trained effective age instead of adding the hardware delay twice.
+    latency_frame=(2, 3),
+    buffer_len=6,
 )
 
 real_d435i_urdf = dataclasses.replace(

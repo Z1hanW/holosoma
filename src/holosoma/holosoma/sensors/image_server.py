@@ -473,13 +473,15 @@ class ImageServer:
         print("ImageServer initialized")
 
     def _resize_clip_expand_transpose(self, frame):
-        # Depth cameras encode invalid returns as zero/non-finite values. Map
-        # those to the far plane before interpolation so they cannot bleed into
-        # the resized image as near-plane obstacles.
-        invalid_depth = ~np.isfinite(frame) | (frame <= 0.0)
-        if np.any(invalid_depth):
-            frame = frame.copy()
-            frame[invalid_depth] = self.cfg.far_clip
+        # Match the training snapshot's _clamp_camera_depth_to_sensor_range:
+        # non-finite and over-range samples become far depth, while finite
+        # under-range samples (including RealSense invalid zeros) clamp near.
+        frame = np.where(
+            np.isfinite(frame) & (frame <= self.cfg.far_clip),
+            frame,
+            self.cfg.far_clip,
+        )
+        frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
 
         # crop
         if any(v is not None for v in (self.cfg.crop_y_start, self.cfg.crop_y_end,

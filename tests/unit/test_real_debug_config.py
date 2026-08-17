@@ -93,11 +93,12 @@ def test_real_debug_depth_server_matches_0mcqao8k_latency_profile() -> None:
 def test_real_drop_depth_server_matches_policy_latency() -> None:
     config = IMAGE_SERVER_DEFAULTS["real_d435i"]
 
-    assert config.latency_frame == 1
+    assert config.latency_frame == (2, 3)
+    assert config.buffer_len == 6
     assert config.frame_rate == 30
 
 
-def test_image_server_maps_invalid_depth_to_far_plane_before_normalization() -> None:
+def test_image_server_clamps_depth_like_training_before_normalization() -> None:
     server = ImageServer.__new__(ImageServer)
     server.cfg = ImageServerConfig(
         near_clip=0.3,
@@ -109,7 +110,7 @@ def test_image_server_maps_invalid_depth_to_far_plane_before_normalization() -> 
 
     result = server._resize_clip_expand_transpose(frame)
 
-    np.testing.assert_allclose(result, [[[0.5, 0.5, -0.5, 0.5]]])
+    np.testing.assert_allclose(result, [[[-0.5, 0.5, -0.5, 0.5]]])
 
 
 def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
