@@ -95,7 +95,9 @@ real_d435i = dataclasses.replace(
     visualize_images=False,
     camera_type="realsense",
     enable_rgb=False,
-    latency_frame=(3, 3),  # 80-100ms RealSense latency, training uses (7,8)*20ms
+    # One 30 Hz frame plus the measured ~39 ms hardware latency is ~72 ms,
+    # matching the policy's 60-80 ms training delay.
+    latency_frame=1,
     buffer_len=4,
 )
 

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 from holosoma.config_values.image_server import DEFAULTS as IMAGE_SERVER_DEFAULTS
+from holosoma.config_types.image_server import ImageServerConfig
+from holosoma.sensors.image_server import ImageServer
 from holosoma_inference.config.config_values import camera
 from holosoma_inference.config.config_values.inference import DEFAULTS
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
@@ -86,6 +88,28 @@ def test_real_debug_depth_server_matches_0mcqao8k_latency_profile() -> None:
     assert config.resized_height == 58
     assert config.near_clip == 0.3
     assert config.far_clip == 3.0
+
+
+def test_real_drop_depth_server_matches_policy_latency() -> None:
+    config = IMAGE_SERVER_DEFAULTS["real_d435i"]
+
+    assert config.latency_frame == 1
+    assert config.frame_rate == 30
+
+
+def test_image_server_maps_invalid_depth_to_far_plane_before_normalization() -> None:
+    server = ImageServer.__new__(ImageServer)
+    server.cfg = ImageServerConfig(
+        near_clip=0.3,
+        far_clip=3.0,
+        resized_height=1,
+        resized_width=4,
+    )
+    frame = np.array([[0.0, np.nan, 0.3, 3.0]], dtype=np.float32)
+
+    result = server._resize_clip_expand_transpose(frame)
+
+    np.testing.assert_allclose(result, [[[0.5, 0.5, -0.5, 0.5]]])
 
 
 def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
