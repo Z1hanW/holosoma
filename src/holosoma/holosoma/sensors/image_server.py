@@ -473,9 +473,16 @@ class ImageServer:
         print("ImageServer initialized")
 
     def _resize_clip_expand_transpose(self, frame):
-        # Match the training snapshot's _clamp_camera_depth_to_sensor_range:
-        # non-finite and over-range samples become far depth, while finite
-        # under-range samples (including RealSense invalid zeros) clamp near.
+        # RealSense uses a finite zero for a missing return. Training never
+        # represented a miss with zero: Warp ray misses and every synthetic
+        # dropout/hole were written as max depth. Translate the sensor-specific
+        # sentinel before applying the training clamp so missing returns become
+        # +0.5 (far/empty), not -0.5 (a near-plane obstacle).
+        frame = np.where(frame == 0.0, self.cfg.far_clip, frame)
+
+        # Match the training snapshot's _clamp_camera_depth_to_sensor_range for
+        # all remaining samples: non-finite and over-range values become far,
+        # while finite nonzero under-range measurements clamp near.
         frame = np.where(
             np.isfinite(frame) & (frame <= self.cfg.far_clip),
             frame,

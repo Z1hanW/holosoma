@@ -96,21 +96,28 @@ def test_real_drop_depth_server_matches_policy_latency() -> None:
     assert config.latency_frame == (2, 3)
     assert config.buffer_len == 6
     assert config.frame_rate == 30
+    assert config.near_clip == 0.3
+    assert config.far_clip == 3.0
+    assert config.resized_height == 58
+    assert config.resized_width == 87
+    assert config.crop_y_start == 16
+    assert config.crop_x_start == 32
+    assert config.crop_x_end == -32
 
 
-def test_image_server_clamps_depth_like_training_before_normalization() -> None:
+def test_image_server_maps_sensor_misses_like_training_before_normalization() -> None:
     server = ImageServer.__new__(ImageServer)
     server.cfg = ImageServerConfig(
         near_clip=0.3,
         far_clip=3.0,
         resized_height=1,
-        resized_width=4,
+        resized_width=6,
     )
-    frame = np.array([[0.0, np.nan, 0.3, 3.0]], dtype=np.float32)
+    frame = np.array([[0.0, np.nan, 0.1, 0.3, 3.0, 4.0]], dtype=np.float32)
 
     result = server._resize_clip_expand_transpose(frame)
 
-    np.testing.assert_allclose(result, [[[-0.5, 0.5, -0.5, 0.5]]])
+    np.testing.assert_allclose(result, [[[0.5, 0.5, -0.5, -0.5, 0.5, 0.5]]])
 
 
 def test_real_debug_uses_unitree_zero_joint_diagnostic_posture() -> None:
