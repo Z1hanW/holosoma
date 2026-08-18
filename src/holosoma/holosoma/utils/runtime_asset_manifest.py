@@ -1506,12 +1506,15 @@ def _perception_manifest(
     policy_init = bool(
         training is not None and getattr(training, "policy_init_checkpoint", None) is not None
     )
+    stage4_init = bool(
+        training is not None and getattr(training, "stage4_init_checkpoint", None) is not None
+    )
     policy_encoder_roles = {
         "actor": (
             _defm_runtime_manifest(
                 actor_defm,
                 environ=environ,
-                consume_pretrained_checkpoint=not full_resume and not policy_init,
+                consume_pretrained_checkpoint=not full_resume and not policy_init and not stage4_init,
                 source_files=defm_source_files,
                 python_dependencies=defm_python_dependencies,
             )
@@ -1522,7 +1525,7 @@ def _perception_manifest(
             _defm_runtime_manifest(
                 critic_defm,
                 environ=environ,
-                consume_pretrained_checkpoint=not full_resume,
+                consume_pretrained_checkpoint=not full_resume and not stage4_init,
                 source_files=defm_source_files,
                 python_dependencies=defm_python_dependencies,
             )

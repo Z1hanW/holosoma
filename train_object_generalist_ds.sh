@@ -24,6 +24,7 @@ reject_generalist_owned_cli_overrides() {
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg|\
+      --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active|\
       --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation|\
       *.rollout-reference-root|\
       command:*|\
@@ -77,6 +78,20 @@ case "${EXPORT_ONNX,,}" in
     ;;
   *)
     echo "[ERROR] EXPORT_ONNX must be a boolean. Got: ${EXPORT_ONNX}" >&2
+    exit 2
+    ;;
+esac
+
+ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE:-False}
+case "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE,,}" in
+  1|true|yes|on)
+    ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True
+    ;;
+  0|false|no|off)
+    ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False
+    ;;
+  *)
+    echo "[ERROR] ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE must be a boolean. Got: ${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}" >&2
     exit 2
     ;;
 esac
@@ -2594,6 +2609,7 @@ echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] contact_interval_runtime_prepend_compensation=${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
+echo "[INFO] zero_root_command_when_drop_active=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
 if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
   echo "[INFO] contact_aware_sparse_root_command_mode=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
 fi
@@ -2666,6 +2682,7 @@ train_cmd=(
   --observation-overrides.disable-critic-history "${DISABLE_CRITIC_HISTORY}"
   --algo.config.save-interval="${SAVE_INTERVAL}"
   --training.export-onnx="${EXPORT_ONNX}"
+  --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active="${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"

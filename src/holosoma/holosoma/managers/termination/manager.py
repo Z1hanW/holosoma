@@ -113,6 +113,20 @@ class TerminationManager:
             return None
         return result
 
+    def get_last_term_components(self, term_name: str) -> dict[str, torch.Tensor]:
+        """Return optional condition-level masks emitted by a stateful term."""
+
+        instance = self._term_instances.get(term_name)
+        getter = getattr(instance, "get_last_component_results", None)
+        if not callable(getter):
+            return {}
+        components = getter()
+        if not isinstance(components, dict):
+            raise TypeError(
+                f"Termination term '{term_name}' component results must be a dictionary."
+            )
+        return components
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         """Reset stateful terms.
 

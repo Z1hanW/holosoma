@@ -22,6 +22,9 @@ from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.button_window_contract import (
+    KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+    KINEMATIC_LIFT_HEIGHT_THRESHOLD,
+    KINEMATIC_LIFT_RATIO_THRESHOLD,
     embedded_button_window_contract_from_metadata,
     kinematic_lift_window_from_rel_z_np,
     validated_contact_aware_button_window_mode,
@@ -66,6 +69,78 @@ def _truthy_env(name: str) -> bool:
 _ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS_ENV = (
     "HOLOSOMA_ALLOW_UNAPPLIED_TRAINING_MOTION_TRANSITIONS"
 )
+_PRECOMPUTED_ROOT_COMMAND_KEY = "policy_command_xy_yaw"
+_PRECOMPUTED_ROOT_COMMAND_PHASE_KEY = "policy_command_phase"
+
+
+def _normalized_sparse_root_command_mode(motion_config: Mapping[str, object]) -> str:
+    raw_mode = motion_config.get(
+        "contact_aware_sparse_root_command_mode",
+        "tracking_error",
+    )
+    if not isinstance(raw_mode, str):
+        raise ValueError(
+            "motion_config.contact_aware_sparse_root_command_mode must be a string, "
+            f"got {raw_mode!r}."
+        )
+    mode = raw_mode.strip().lower().replace("-", "_")
+    if mode in {"tracking", "default", "robot_tracking_error"}:
+        return "tracking_error"
+    return mode
+
+
+def _validated_zero_root_command_when_drop_active(
+    motion_config: Mapping[str, object],
+) -> bool:
+    value = motion_config.get("zero_root_command_when_drop_active", False)
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            "motion_config.zero_root_command_when_drop_active must be a boolean, "
+            f"got {value!r}."
+        )
+    return bool(value)
+
+
+def _pickup_step_and_threshold_from_rel_z_np(
+    rel_z: np.ndarray,
+) -> tuple[int, np.float32]:
+    """Mirror MotionCommand's float32 clip pickup detector exactly."""
+
+    values = np.asarray(rel_z, dtype=np.float32)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(
+            "Precomputed command pickup detection requires a non-empty rank-1 rel-z trace."
+        )
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Precomputed command pickup rel-z trace contains non-finite values.")
+    z_min = np.min(values).astype(np.float32)
+    z_range = np.maximum(
+        np.max(values).astype(np.float32) - z_min,
+        np.float32(0.0),
+    ).astype(np.float32)
+    threshold = (
+        z_min
+        + np.maximum(
+            np.float32(KINEMATIC_LIFT_HEIGHT_THRESHOLD),
+            z_range * np.float32(KINEMATIC_LIFT_RATIO_THRESHOLD),
+        ).astype(np.float32)
+    ).astype(np.float32)
+    lifted = values >= threshold
+    run_length = 0
+    pickup_step: int | None = None
+    for idx, flag in enumerate(lifted.tolist()):
+        run_length = run_length + 1 if flag else 0
+        if run_length >= KINEMATIC_LIFT_CONSECUTIVE_STEPS:
+            pickup_step = idx - KINEMATIC_LIFT_CONSECUTIVE_STEPS + 1
+            break
+    if pickup_step is None:
+        lifted_indices = np.flatnonzero(lifted)
+        pickup_step = (
+            int(lifted_indices[0])
+            if lifted_indices.size
+            else int(np.argmax(values))
+        )
+    return pickup_step, threshold
 
 
 def _validated_runtime_motion_transition_settings(
@@ -408,6 +483,11 @@ class MotionData:
                 if object_pos_w is not None
                 else np.ones((joint_pos.shape[0], 3), dtype=np.float32)
             )
+            precomputed_root_command = self._extract_precomputed_root_command_np(
+                data,
+                int(joint_pos.shape[0]),
+                source=motion_path,
+            )
 
         frame_count = int(joint_pos.shape[0])
         if frame_count <= 0:
@@ -500,6 +580,13 @@ class MotionData:
         self.has_object = object_pos_w is not None and object_quat_w is not None
         self.object_pos_w = object_pos_w
         self.object_quat_w = object_quat_w
+        self.precomputed_root_command = (
+            None if precomputed_root_command is None else precomputed_root_command[0]
+        )
+        self.precomputed_root_command_phase = (
+            None if precomputed_root_command is None else precomputed_root_command[1]
+        )
+        self.has_precomputed_root_command = precomputed_root_command is not None
 
     @classmethod
     def _normalize_object_size_array(cls, raw: np.ndarray, length: int, *, source: str) -> np.ndarray:
@@ -542,6 +629,67 @@ class MotionData:
                 "object_size/box_size extents; scale and size are not interchangeable."
             )
         return np.ones((length, 3), dtype=np.float32)
+
+    @staticmethod
+    def _extract_precomputed_root_command_np(
+        data: object,
+        length: int,
+        *,
+        source: Path,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        command_present = _PRECOMPUTED_ROOT_COMMAND_KEY in data
+        phase_present = _PRECOMPUTED_ROOT_COMMAND_PHASE_KEY in data
+        if command_present != phase_present:
+            raise ValueError(
+                f"Motion file {source} must contain both {_PRECOMPUTED_ROOT_COMMAND_KEY!r} "
+                f"and {_PRECOMPUTED_ROOT_COMMAND_PHASE_KEY!r}."
+            )
+        if not command_present:
+            return None
+
+        command = np.asarray(data[_PRECOMPUTED_ROOT_COMMAND_KEY])
+        phase = np.asarray(data[_PRECOMPUTED_ROOT_COMMAND_PHASE_KEY])
+        if command.dtype.kind != "f" or command.shape != (length, 3):
+            raise ValueError(
+                f"Motion field {_PRECOMPUTED_ROOT_COMMAND_KEY} in {source} must be a floating "
+                f"array with shape ({length}, 3), got {command.dtype} {command.shape}."
+            )
+        if phase.dtype.kind not in "iu" or phase.shape != (length,):
+            raise ValueError(
+                f"Motion field {_PRECOMPUTED_ROOT_COMMAND_PHASE_KEY} in {source} must be an integer "
+                f"array with shape ({length},), got {phase.dtype} {phase.shape}."
+            )
+        if not np.all(np.isfinite(command)):
+            raise ValueError(f"Precomputed root command in {source} contains non-finite values.")
+
+        phase_i64 = phase.astype(np.int64, copy=False)
+        valid_phase = np.isin(phase_i64, (0, 1, 2))
+        if not np.all(valid_phase):
+            raise ValueError(
+                f"Precomputed root command phase in {source} contains invalid values: "
+                f"{np.unique(phase_i64[~valid_phase]).tolist()}"
+            )
+        zero_phase = phase_i64 == 0
+        forward_phase = phase_i64 == 1
+        yaw_phase = phase_i64 == 2
+        if np.any(command[:, 1] != 0.0):
+            raise ValueError(f"Precomputed turn-then-forward command in {source} must keep dy exactly zero.")
+        if np.any((command[:, 0] != 0.0) & (command[:, 2] != 0.0)):
+            raise ValueError(f"Precomputed turn-then-forward command in {source} couples dx and dyaw.")
+        if np.any(command[zero_phase] != 0.0):
+            raise ValueError(f"Zero-phase precomputed command rows in {source} must be zero.")
+        if np.any(command[forward_phase, 0] <= 0.0) or np.any(command[forward_phase, 2] != 0.0):
+            raise ValueError(f"Forward-phase precomputed command rows in {source} are inconsistent.")
+        if np.any(command[yaw_phase, 0] != 0.0) or np.any(command[yaw_phase, 2] == 0.0):
+            raise ValueError(f"Yaw-phase precomputed command rows in {source} are inconsistent.")
+        if np.any(command[:, 0] < 0.0) or np.any(command[:, 0] > 10.0):
+            raise ValueError(f"Precomputed forward command in {source} must lie in [0, 10] metres.")
+        if np.any(np.abs(command[:, 2]) > math.pi):
+            raise ValueError(f"Precomputed yaw command in {source} must lie in [-pi, pi].")
+        return (
+            command.astype(np.float32, copy=False),
+            phase_i64.astype(np.uint8, copy=False),
+        )
 
     @staticmethod
     def _load_float_array(data, field: str, *, source: Path) -> np.ndarray:
@@ -936,6 +1084,15 @@ def _apply_transition_segment_np(
         segments["object_pos_w"] = _lerp(start_state["object_pos"], target_state["object_pos"])
         segments["object_quat_w"] = _slerp_quat_wxyz_np(start_state["object_quat"], target_state["object_quat"], alphas)
         segments["object_size"] = _lerp(start_state["object_size"], target_state["object_size"])
+    if "precomputed_root_command" in motion:
+        segments["precomputed_root_command"] = np.zeros(
+            (alphas.size, 3),
+            dtype=np.float32,
+        )
+        segments["precomputed_root_command_phase"] = np.zeros(
+            (alphas.size,),
+            dtype=np.uint8,
+        )
 
     for key, segment in segments.items():
         if prepend:
@@ -960,6 +1117,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._contact_aware_contact_window: tuple[int, int] | None = None
         self._contact_aware_button_window: tuple[int, int] | None = None
         self._motion_transition_prepend_steps = 0
+        self._precomputed_turn_then_forward_enabled = False
+        self._runtime_pickup_latched = False
+        self._runtime_pickup_consecutive_counter = 0
+        self._runtime_pickup_threshold_rel_z: np.float32 | None = None
+        self._runtime_reference_pickup_step: int | None = None
+        self._runtime_pickup_last_tick: tuple[int | None, float] | None = None
+        self._runtime_pickup_episode_generation: int | None = None
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -1583,6 +1747,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     embedded_timeline_contract["materialization"],
                 )
         self._motion_cfg = motion_cfg or {}
+        self._configure_precomputed_turn_then_forward_runtime()
         self._contact_aware_carry_window = None
         self._contact_aware_button_window = self._load_contact_aware_button_window(onnx_path)
         if validated_contact_aware_button_window_mode(self._motion_cfg) == "contact_interval":
@@ -1645,11 +1810,109 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._training_freeze_zero_prob = 0.0
         self._training_freeze_zero_extra_holds = 0
         self._motion_alignment_enabled = False
+        self._precomputed_turn_then_forward_enabled = False
+        self._runtime_pickup_threshold_rel_z = None
+        self._runtime_reference_pickup_step = None
+        self._reset_runtime_pickup_latch()
         self.motion_command_0 = None
         self.motion_command_t = None
         self.ref_quat_xyzw_0 = None
         self.ref_quat_xyzw_t = None
         self.ref_pos_xyz_t = None
+
+    def _configure_precomputed_turn_then_forward_runtime(self) -> None:
+        motion_cfg = self._motion_cfg or {}
+        mode = _normalized_sparse_root_command_mode(motion_cfg)
+        self._precomputed_turn_then_forward_enabled = (
+            mode == "precomputed_turn_then_forward"
+        )
+        if not self._precomputed_turn_then_forward_enabled:
+            self._runtime_pickup_threshold_rel_z = None
+            self._runtime_reference_pickup_step = None
+            self._reset_runtime_pickup_latch()
+            return
+
+        conflicting_modes = {
+            "pure_rl_policy_command_after_lift": bool(
+                motion_cfg.get("pure_rl_policy_command_after_lift_enabled", False)
+            ),
+            "hybrid_stage2": bool(motion_cfg.get("hybrid_stage2_enabled", False)),
+            "hybrid_velocity": bool(motion_cfg.get("hybrid_velocity_enabled", False)),
+        }
+        conflicts = [name for name, enabled in conflicting_modes.items() if enabled]
+        if conflicts:
+            raise ValueError(
+                "precomputed_turn_then_forward is an exclusive actor-command mode; "
+                f"disable {conflicts}."
+            )
+        motion = self._motion_data
+        if motion is None or not motion.has_object:
+            raise ValueError(
+                "precomputed_turn_then_forward deployment requires external motion data "
+                "with object_pos_w/object_quat_w."
+            )
+        if not motion.has_precomputed_root_command:
+            raise ValueError(
+                "precomputed_turn_then_forward deployment requires both "
+                "policy_command_xy_yaw and policy_command_phase in the selected motion NPZ."
+            )
+        if motion.precomputed_root_command.shape != (motion.frame_count, 3):
+            raise ValueError(
+                "Materialized precomputed root command does not match the runtime motion timeline: "
+                f"command={motion.precomputed_root_command.shape}, frames={motion.frame_count}."
+            )
+        if motion.precomputed_root_command_phase.shape != (motion.frame_count,):
+            raise ValueError(
+                "Materialized precomputed root command phase does not match the runtime motion timeline: "
+                f"phase={motion.precomputed_root_command_phase.shape}, frames={motion.frame_count}."
+            )
+
+        settings = self._effective_motion_transition_settings or {}
+        source_semantics = str(settings.get("source_semantics", "single_clip_static"))
+        source_offset = (
+            int(self._motion_transition_prepend_steps)
+            if source_semantics == "global_multi_clip_runtime"
+            else 0
+        )
+        source_end = (
+            source_offset + int(motion.source_frame_count)
+            if source_semantics == "global_multi_clip_runtime"
+            else int(motion.frame_count)
+        )
+        if not 0 <= source_offset < source_end <= int(motion.frame_count):
+            raise ValueError(
+                "Authenticated transition does not leave a valid source trace for runtime pickup "
+                f"detection: source=[{source_offset}, {source_end}), frames={motion.frame_count}."
+            )
+        rel_z = (
+            motion.object_pos_w[source_offset:source_end, 2]
+            - motion.root_pos_w[source_offset:source_end, 2]
+        ).astype(np.float32, copy=False)
+        source_pickup_step, pickup_threshold = _pickup_step_and_threshold_from_rel_z_np(
+            rel_z
+        )
+        runtime_pickup_step = (
+            0
+            if source_semantics == "global_multi_clip_runtime" and source_pickup_step == 0
+            else source_offset + source_pickup_step
+        )
+        self._runtime_pickup_threshold_rel_z = pickup_threshold
+        self._runtime_reference_pickup_step = int(runtime_pickup_step)
+        self._reset_runtime_pickup_latch()
+        phase_counts = np.bincount(
+            motion.precomputed_root_command_phase.astype(np.int64, copy=False),
+            minlength=3,
+        )
+        logger.info(
+            "Enabled deployment-equivalent precomputed turn-then-forward command: "
+            "zero_frames={} forward_frames={} yaw_frames={} pickup_threshold_rel_z={:.6f} "
+            "pickup_consecutive_steps={} runtime_pickup_latch=True.",
+            int(phase_counts[0]),
+            int(phase_counts[1]),
+            int(phase_counts[2]),
+            float(pickup_threshold),
+            KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+        )
 
     def _has_embedded_motion_outputs(self) -> bool:
         required_motion_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"}
@@ -1802,6 +2065,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             )
 
         motion_data = self._motion_data
+        has_precomputed_root_command = bool(
+            getattr(motion_data, "has_precomputed_root_command", False)
+        )
         robot_dof_names = list(metadata.get("dof_names") or self.config.robot.dof_names)
         default_dof = np.zeros((len(robot_dof_names),), dtype=np.float32)
         default_joint_angles = init_state.get("default_joint_angles")
@@ -1871,6 +2137,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             motion["object_pos_w"] = motion_data.object_pos_w.astype(np.float32, copy=True)
             motion["object_quat_w"] = motion_data.object_quat_w.astype(np.float32, copy=True)
             motion["object_size"] = motion_data.object_size.astype(np.float32, copy=True)
+        if has_precomputed_root_command:
+            motion["precomputed_root_command"] = motion_data.precomputed_root_command.astype(
+                np.float32,
+                copy=True,
+            )
+            motion["precomputed_root_command_phase"] = (
+                motion_data.precomputed_root_command_phase.astype(np.uint8, copy=True)
+            )
 
         applied_prepend_steps = 0
         if needs_prepend:
@@ -1908,6 +2182,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
             motion_data.object_pos_w = motion["object_pos_w"]
             motion_data.object_quat_w = motion["object_quat_w"]
             motion_data.object_size = motion["object_size"]
+        if has_precomputed_root_command:
+            motion_data.precomputed_root_command = motion["precomputed_root_command"]
+            motion_data.precomputed_root_command_phase = motion[
+                "precomputed_root_command_phase"
+            ]
         motion_data.frame_count = motion_data.joint_pos.shape[0]
         logger.info(
             "Applied authenticated training motion transitions to inference motion data for '{}': "
@@ -2404,7 +2683,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             runtime_motor_effort_limits=self.robot_config.motor_effort_limit,
             runtime_joint2motor=self.robot_config.joint2motor,
         )
-        self._perception_contract_sha256 = perception_observation_contract_sha256_from_metadata(metadata)
+        self._perception_contract_sha256 = self._effective_perception_contract_sha256(metadata)
         self._has_policy_contract = bool(has_policy_contract)
         if not has_policy_contract:
             self._maybe_force_sparse_depth_distill_obs_config()
@@ -2821,6 +3100,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
         self._motion_end_reset_episode_generation = None
+        self._reset_runtime_pickup_latch()
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -2991,7 +3271,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
         target = self._get_current_motion_target_body_positions()
         if target is None or self._motion_data is None:
-            payload: dict[str, object] = {"clip_active": bool(self.motion_clip_progressing)}
+            payload: dict[str, object] = {
+                "clip_active": bool(self.motion_clip_progressing),
+                "policy_step_count": int(self._policy_debug_count),
+            }
             payload.update(self._sparse_root_command_overlay_fields())
             pub.publish(payload)
             return
@@ -2999,6 +3282,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         body_pos_w, root_pos_w, root_quat_wxyz, idx = target
         payload: dict[str, object] = {
             "clip_active": bool(self.motion_clip_progressing),
+            "policy_step_count": int(self._policy_debug_count),
             "motion_timestep": int(self.motion_timestep),
             "frame_idx": int(idx),
             "motion_path": str(self._motion_data.motion_path),
@@ -3460,6 +3744,115 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return effective_command
 
+    def _reset_runtime_pickup_latch(self) -> None:
+        self._runtime_pickup_latched = False
+        self._runtime_pickup_consecutive_counter = 0
+        self._runtime_pickup_last_tick = None
+        self._runtime_pickup_episode_generation = None
+        pickup_step = getattr(self, "_runtime_reference_pickup_step", None)
+        if (
+            bool(getattr(self, "_precomputed_turn_then_forward_enabled", False))
+            and pickup_step is not None
+            and getattr(self, "_motion_data", None) is not None
+            and self._get_motion_index() >= int(pickup_step)
+        ):
+            # Training's reset path treats a deliberately late-started clip as
+            # already picked. Canonical deployment starts at frame zero.
+            self._runtime_pickup_latched = True
+            self._runtime_pickup_consecutive_counter = (
+                KINEMATIC_LIFT_CONSECUTIVE_STEPS
+            )
+
+    def _update_runtime_pickup_latch(self, robot_state_data: np.ndarray) -> None:
+        if not self._precomputed_turn_then_forward_enabled:
+            return
+        threshold = self._runtime_pickup_threshold_rel_z
+        if threshold is None:
+            raise RuntimeError(
+                "Precomputed turn-then-forward deployment is missing its clip pickup threshold."
+            )
+
+        sim_time_ms = self._get_control_tick_sim_time_ms()
+        if sim_time_ms is None:
+            raise RuntimeError(
+                "Precomputed turn-then-forward pickup latch requires an authenticated simulator "
+                "tick timestamp so one physics step cannot be counted more than once."
+            )
+        episode_generation = self._get_control_tick_episode_generation()
+        if (
+            self._runtime_pickup_episode_generation is not None
+            and episode_generation is not None
+            and episode_generation != self._runtime_pickup_episode_generation
+        ):
+            self._reset_runtime_pickup_latch()
+        self._runtime_pickup_episode_generation = episode_generation
+        tick = (episode_generation, float(sim_time_ms))
+        if tick == self._runtime_pickup_last_tick:
+            return
+        self._runtime_pickup_last_tick = tick
+        if self._runtime_pickup_latched:
+            return
+
+        object_state = self._get_sim_actor_state(self.config.task.sim_object_name)
+        if object_state is None:
+            raise RuntimeError(
+                "Precomputed turn-then-forward pickup latch requires the live simulator object "
+                "state; reference-motion object pose is not a valid fallback."
+            )
+        robot_root_pos_w = np.asarray(robot_state_data[:, :3], dtype=np.float32)
+        current_rel_z = np.asarray(
+            object_state[:, 2] - robot_root_pos_w[:, 2],
+            dtype=np.float32,
+        )
+        if current_rel_z.shape != (1,) or not np.all(np.isfinite(current_rel_z)):
+            raise RuntimeError(
+                "Precomputed turn-then-forward pickup latch received an invalid simulator rel-z."
+            )
+        if bool(current_rel_z[0] >= threshold):
+            self._runtime_pickup_consecutive_counter += 1
+        else:
+            self._runtime_pickup_consecutive_counter = 0
+        if (
+            self._runtime_pickup_consecutive_counter
+            >= KINEMATIC_LIFT_CONSECUTIVE_STEPS
+        ):
+            self._runtime_pickup_latched = True
+
+    def _get_precomputed_turn_then_forward_command(
+        self,
+        robot_state_data: np.ndarray,
+    ) -> np.ndarray:
+        motion = self._motion_data
+        if (
+            not self._precomputed_turn_then_forward_enabled
+            or motion is None
+            or not motion.has_precomputed_root_command
+        ):
+            raise RuntimeError(
+                "Precomputed turn-then-forward command was requested without its runtime contract."
+            )
+        self._update_runtime_pickup_latch(robot_state_data)
+        idx = self._get_motion_index()
+        raw_command = motion.precomputed_root_command[idx : idx + 1].astype(
+            np.float32,
+            copy=True,
+        )
+        motion_command = (
+            raw_command
+            if self._runtime_pickup_latched
+            else np.zeros_like(raw_command, dtype=np.float32)
+        )
+        effective_command = self._apply_external_sparse_root_command(motion_command)
+        if not self._last_sparse_manual_enabled:
+            self._record_sparse_root_command(
+                motion_command,
+                effective_command,
+                source="auto_precomputed_turn_then_forward",
+                mode="motion",
+                manual_enabled=False,
+            )
+        return effective_command
+
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
         if self._motion_data is None:
             raise ValueError("Motion data is required for sparse root trajectory observations.")
@@ -3484,6 +3877,85 @@ class WholeBodyTrackingPolicy(BasePolicy):
         rel_yaw = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
         motion_command = np.concatenate([rel_xy, rel_yaw], axis=1).astype(np.float32, copy=False)
         return self._apply_external_sparse_root_command(motion_command)
+
+    def _get_rolling_reference_delta_command(self) -> np.ndarray:
+        """Mirror training's per-step rolling reference-to-reference delta."""
+
+        motion = self._motion_data
+        if motion is None or not motion.has_object:
+            raise ValueError(
+                "rolling_reference_delta requires authenticated object motion data."
+            )
+        motion_cfg = self._motion_cfg or {}
+        raw_lookahead = motion_cfg.get(
+            "contact_aware_sparse_root_segment_steps",
+            30,
+        )
+        if (
+            isinstance(raw_lookahead, (bool, np.bool_))
+            or not isinstance(raw_lookahead, (int, np.integer))
+            or int(raw_lookahead) < 1
+        ):
+            raise ValueError(
+                "motion_config.contact_aware_sparse_root_segment_steps must be a "
+                f"positive integer, got {raw_lookahead!r}."
+            )
+        raw_yaw_threshold_deg = motion_cfg.get(
+            "contact_aware_sparse_root_zero_yaw_threshold_deg",
+            0.0,
+        )
+        if (
+            isinstance(raw_yaw_threshold_deg, (bool, np.bool_))
+            or not isinstance(raw_yaw_threshold_deg, (int, float, np.integer, np.floating))
+            or not np.isfinite(float(raw_yaw_threshold_deg))
+            or not 0.0 <= float(raw_yaw_threshold_deg) <= 180.0
+        ):
+            raise ValueError(
+                "motion_config.contact_aware_sparse_root_zero_yaw_threshold_deg "
+                f"must be a finite real in [0, 180], got {raw_yaw_threshold_deg!r}."
+            )
+
+        idx = self._get_motion_index()
+        lookahead = int(raw_lookahead)
+        endpoint = idx + lookahead
+        carry_start, carry_end = self._get_contact_aware_carry_window()
+        valid = (
+            carry_start <= idx < carry_end
+            and endpoint < carry_end
+            and endpoint < int(motion.frame_count)
+        )
+        if not valid:
+            command = np.zeros((1, 3), dtype=np.float32)
+            return self._apply_external_sparse_root_command(command)
+
+        start_pos_w = motion.root_pos_w[idx : idx + 1]
+        endpoint_pos_w = motion.root_pos_w[endpoint : endpoint + 1]
+        start_quat_wxyz = motion.root_quat_w[idx : idx + 1]
+        endpoint_quat_wxyz = motion.root_quat_w[endpoint : endpoint + 1]
+        rel_pos_w = endpoint_pos_w - start_pos_w
+        rel_pos_b = quat_apply(
+            self._calc_heading_quat_inv(start_quat_wxyz),
+            rel_pos_w,
+        )
+        rel_yaw_value = self._normalize_angle(
+            self._quat_yaw(endpoint_quat_wxyz)
+            - self._quat_yaw(start_quat_wxyz)
+        )
+        yaw_threshold_rad = np.deg2rad(
+            np.float32(float(raw_yaw_threshold_deg))
+        )
+        if abs(float(rel_yaw_value)) <= float(yaw_threshold_rad):
+            rel_yaw_value = 0.0
+        rel_yaw = np.asarray([[rel_yaw_value]], dtype=np.float32)
+        command = np.concatenate([rel_pos_b[:, :2], rel_yaw], axis=1).astype(
+            np.float32,
+            copy=False,
+        )
+        if not np.all(np.isfinite(command)):
+            raise RuntimeError(
+                "rolling_reference_delta produced a non-finite actor command."
+            )
+        return self._apply_external_sparse_root_command(command)
 
     def _get_contact_aware_carry_window(self) -> tuple[int, int]:
         if self._contact_aware_carry_window is not None:
@@ -3592,6 +4064,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_state_data: np.ndarray,
         base_command: np.ndarray | None = None,
     ) -> np.ndarray:
+        if self._precomputed_turn_then_forward_enabled:
+            return self._get_precomputed_turn_then_forward_command(robot_state_data)
+        if _normalized_sparse_root_command_mode(
+            self._motion_cfg or {}
+        ) == "rolling_reference_delta":
+            return self._get_rolling_reference_delta_command()
         if base_command is None:
             base_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
         if self._last_sparse_manual_enabled or self._motion_data is None or not self._motion_data.has_object:
@@ -3673,6 +4151,46 @@ class WholeBodyTrackingPolicy(BasePolicy):
         carry_start, _ = self._get_contact_aware_button_window()
         return np.array([[1.0 if self._get_motion_index() < carry_start else 0.0]], dtype=np.float32)
 
+    def _apply_drop_exclusive_root_command(
+        self,
+        command: np.ndarray,
+        drop_button: np.ndarray,
+    ) -> np.ndarray:
+        """Mirror the training-side final actor command/drop gate exactly."""
+
+        if not _validated_zero_root_command_when_drop_active(
+            self._motion_cfg or {}
+        ):
+            return command
+        command_array = np.asarray(command)
+        drop_array = np.asarray(drop_button)
+        if command_array.shape != (1, 3):
+            raise RuntimeError(
+                "Drop-exclusive root command must have shape (1, 3), "
+                f"got {command_array.shape}."
+            )
+        if drop_array.shape != (1, 1):
+            raise RuntimeError(
+                "Drop-exclusive button must have shape (1, 1), "
+                f"got {drop_array.shape}."
+            )
+        if not np.issubdtype(command_array.dtype, np.floating):
+            raise RuntimeError(
+                "Drop-exclusive root command must use a floating dtype, "
+                f"got {command_array.dtype}."
+            )
+        if not np.all(np.isfinite(command_array)) or not np.all(
+            np.isfinite(drop_array)
+        ):
+            raise RuntimeError(
+                "Drop-exclusive actor command and button must contain only finite values."
+            )
+        return np.where(
+            drop_array >= np.float32(0.5),
+            np.zeros_like(command_array),
+            command_array,
+        ).astype(np.float32, copy=False)
+
     def _get_contact_aware_button_window(self) -> tuple[int, int]:
         if self._contact_aware_button_window is not None:
             return self._contact_aware_button_window
@@ -3685,11 +4203,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if self._uses_sparse_root_command_contact_aware
             else sparse_command
         )
+        drop_button = self._get_drop_button()
+        sparse_command = self._apply_drop_exclusive_root_command(
+            sparse_command,
+            drop_button,
+        )
+        contact_aware_sparse_command = self._apply_drop_exclusive_root_command(
+            contact_aware_sparse_command,
+            drop_button,
+        )
         return {
             "sparse_target_root_trajectory_command": sparse_command,
             "sparse_target_root_trajectory_command_contact_aware": contact_aware_sparse_command,
             "pickup_button": self._get_pickup_button(),
-            "drop_button": self._get_drop_button(),
+            "drop_button": drop_button,
             "base_lin_vel": self._get_base_lin_vel_obs(robot_state_data),
             "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
@@ -4227,7 +4754,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             idx = self._get_motion_index()
             record["motion_root"] = self._motion_data.root_pos_w[idx].astype(float).tolist()
             record["motion_q_first"] = self._motion_data.joint_pos[idx, :8].astype(float).tolist()
-        for key in ("sparse_target_root_trajectory_command", "base_ang_vel", "dof_pos", "dof_vel"):
+        for key in (
+            "sparse_target_root_trajectory_command",
+            "sparse_target_root_trajectory_command_contact_aware",
+            "pickup_button",
+            "drop_button",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+        ):
             if key in current_obs:
                 record[key] = self._policy_debug_stats(current_obs[key])
         if self._policy_debug_include_values:
@@ -4572,6 +5107,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_align_pos = None
         self._motion_end_reset_requested = False
         self._motion_end_reset_episode_generation = None
+        self._reset_runtime_pickup_latch()
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
@@ -4592,6 +5128,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # Capture motion-specific start timestep for policy-level timing control
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
+        self._reset_runtime_pickup_latch()
         self._last_motion_output_timestep = None
         if self.motion_command_0 is not None:
             self.motion_command_t = self.motion_command_0.copy()

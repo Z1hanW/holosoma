@@ -49,6 +49,7 @@ PROTECTED_TAIL_OPTIONS=(
   --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode
   --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps
   --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg
+  --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active
 )
 for launcher in \
   distill_box_perception.sh \
@@ -161,7 +162,7 @@ expect_failure \
   bash distill_box_perception.sh
 expect_failure \
   "${TMP_DIR}/unknown_sparse_mode.out" \
-  'CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error or t1_aligned_segment' \
+  'CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error, t1_aligned_segment, or precomputed_turn_then_forward' \
   env PYTHON_BIN="${TMP_DIR}/must-not-run" CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=target_delta \
   bash distill_box_perception.sh
 expect_failure \
@@ -186,6 +187,11 @@ expect_failure \
   'CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS must be an integer in [1, 4096]' \
   env PYTHON_BIN="${TMP_DIR}/must-not-run" CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=0 \
   bash distill_box_button.sh
+expect_failure \
+  "${TMP_DIR}/invalid_drop_exclusive_bool.out" \
+  'ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE must be a boolean' \
+  env PYTHON_BIN="${TMP_DIR}/must-not-run" ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=maybe \
+  bash distill_box_perception.sh
 
 # The drop-button launcher does not expose or forward the t1-aligned command
 # mode, so it has no equivalent ONNX-incompatible path today.
@@ -216,14 +222,36 @@ BASE_ENV=(
 assert_exact_cli_mode "${TMP_DIR}/perception_default.out" peak_height
 [[ "$(grep -o -- '--training.export-onnx=True' "${TMP_DIR}/perception_default.out" | wc -l)" -eq 1 ]] ||
   fail 'perception default canonical EXPORT_ONNX=True must reach the final CLI exactly once'
+[[ "$(grep -o -- '--command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active=False' \
+  "${TMP_DIR}/perception_default.out" | wc -l)" -eq 1 ]] ||
+  fail 'perception legacy-safe drop exclusivity default must reach the final CLI exactly once'
 grep -F 'uses peak-height carry-window detection' "${TMP_DIR}/perception_default.out" >/dev/null ||
   fail 'perception default schedule metadata does not describe peak_height semantics'
+
+"${BASE_ENV[@]}" ROOT_COMMAND_MODE=contact-aware \
+  CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed-turn-then-forward \
+  bash distill_box_perception.sh >"${TMP_DIR}/perception_precomputed_turn_then_forward.out"
+grep -F '[INFO] contact_aware_sparse_root_command_mode=precomputed_turn_then_forward' \
+  "${TMP_DIR}/perception_precomputed_turn_then_forward.out" >/dev/null ||
+  fail 'precomputed turn-then-forward mode was not preserved in audit output'
+[[ "$(grep -o -- '--command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=precomputed_turn_then_forward' \
+  "${TMP_DIR}/perception_precomputed_turn_then_forward.out" | wc -l)" -eq 1 ]] ||
+  fail 'precomputed turn-then-forward mode must reach the final CLI exactly once'
+[[ "$(grep -o -- '--training.export-onnx=True' \
+  "${TMP_DIR}/perception_precomputed_turn_then_forward.out" | wc -l)" -eq 1 ]] ||
+  fail 'precomputed turn-then-forward mode must remain deployable with ONNX export enabled'
 
 "${BASE_ENV[@]}" ROOT_COMMAND_MODE=contact-aware CONTACT_AWARE_CARRY_WINDOW_MODE=rel_z \
   bash distill_box_perception.sh >"${TMP_DIR}/perception_rel_z.out"
 assert_exact_cli_mode "${TMP_DIR}/perception_rel_z.out" rel_z
 grep -F 'uses object-root relative-height carry-window detection' "${TMP_DIR}/perception_rel_z.out" >/dev/null ||
   fail 'perception rel_z schedule metadata still claims peak_height semantics'
+
+"${BASE_ENV[@]}" ROOT_COMMAND_MODE=contact-aware ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=true \
+  bash distill_box_perception.sh >"${TMP_DIR}/perception_drop_exclusive.out"
+[[ "$(grep -o -- '--command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active=True' \
+  "${TMP_DIR}/perception_drop_exclusive.out" | wc -l)" -eq 1 ]] ||
+  fail 'drop-exclusive actor command must canonicalize to True exactly once'
 
 "${BASE_ENV[@]}" CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=0005 \
   bash distill_box_button.sh >"${TMP_DIR}/button_default.out"

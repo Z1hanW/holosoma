@@ -15,7 +15,12 @@ import pytest
 from onnx import TensorProto, helper
 
 import holosoma_inference.policies.wbt as inference_wbt_module
+import holosoma_inference.utils.policy_contract as inference_policy_contract_module
 
+from holosoma.agents.ppo.ppo import (
+    _precomputed_turn_then_forward_deployment_contract,
+    _rolling_reference_delta_deployment_contract,
+)
 from holosoma.eval_agent import _infer_inference_config
 from holosoma.managers.command.terms.wbt import (
     motion_transition_contract_sha256 as training_motion_transition_contract_sha256,
@@ -162,6 +167,112 @@ def _drop_button_metadata(
             },
         },
     }
+
+
+def _precomputed_turn_then_forward_metadata(
+    *,
+    zero_root_command_when_drop_active: bool = False,
+) -> dict:
+    metadata = _drop_button_metadata()
+    motion_config = {
+        "contact_aware_sparse_root_command_mode": (
+            "precomputed_turn_then_forward"
+        )
+    }
+    if zero_root_command_when_drop_active:
+        motion_config["zero_root_command_when_drop_active"] = True
+    metadata["experiment_config"]["command"] = {
+        "setup_terms": {
+            "motion_command": {
+                "params": {
+                    "motion_config": motion_config
+                }
+            }
+        }
+    }
+    contract = (
+        inference_policy_contract_module._expected_precomputed_turn_then_forward_contract(
+            zero_root_command_when_drop_active=(
+                zero_root_command_when_drop_active
+            )
+        )
+    )
+    contract_payload = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    contract_sha256 = hashlib.sha256(contract_payload).hexdigest()
+    metadata["precomputed_turn_then_forward_deployment_contract"] = contract
+    metadata["precomputed_turn_then_forward_deployment_contract_sha256"] = (
+        contract_sha256
+    )
+    metadata["iteration"] = 9
+    metadata["onnx_validation_contract"] = {
+        "version": 1,
+        "checker": "onnx.checker.check_model",
+        "runtime": "onnxruntime_cpu",
+        "pytorch_vs_ort": True,
+        "input_names": ["actor_obs", "perception_obs"],
+        "output_names": ["action"],
+        "probe_rows": 6,
+        "rtol": 1.0e-4,
+        "atol": 1.0e-5,
+        "max_abs_error": 1.0e-7,
+        "max_rel_error": 2.0e-6,
+        "completed_iteration": 9,
+        "actor_graph_semantics": (
+            "raw_actor_observation_plus_authenticated_external_observation_adapter"
+        ),
+        "precomputed_command_contract_sha256": contract_sha256,
+        "rolling_reference_delta_contract_sha256": None,
+    }
+    return metadata
+
+
+def _rolling_reference_delta_metadata(
+    *,
+    lookahead_motion_frames: int = 30,
+    zero_yaw_threshold_deg: float = 0.0,
+    zero_root_command_when_drop_active: bool = True,
+) -> dict:
+    metadata = _precomputed_turn_then_forward_metadata(
+        zero_root_command_when_drop_active=zero_root_command_when_drop_active
+    )
+    motion_config = metadata["experiment_config"]["command"]["setup_terms"][
+        "motion_command"
+    ]["params"]["motion_config"]
+    motion_config["contact_aware_sparse_root_command_mode"] = (
+        "rolling_reference_delta"
+    )
+    motion_config["contact_aware_sparse_root_segment_steps"] = (
+        lookahead_motion_frames
+    )
+    motion_config["contact_aware_sparse_root_zero_yaw_threshold_deg"] = (
+        zero_yaw_threshold_deg
+    )
+    metadata.pop("precomputed_turn_then_forward_deployment_contract")
+    metadata.pop("precomputed_turn_then_forward_deployment_contract_sha256")
+    contract, contract_sha256 = _rolling_reference_delta_deployment_contract(
+        lookahead_motion_frames=lookahead_motion_frames,
+        zero_yaw_threshold_deg=zero_yaw_threshold_deg,
+        zero_root_command_when_drop_active=(
+            zero_root_command_when_drop_active
+        ),
+    )
+    metadata["rolling_reference_delta_deployment_contract"] = contract
+    metadata["rolling_reference_delta_deployment_contract_sha256"] = (
+        contract_sha256
+    )
+    metadata["onnx_validation_contract"][
+        "precomputed_command_contract_sha256"
+    ] = None
+    metadata["onnx_validation_contract"][
+        "rolling_reference_delta_contract_sha256"
+    ] = contract_sha256
+    return metadata
 
 
 def _motion_transition_contract_metadata(
@@ -366,6 +477,208 @@ def test_drop_button_onnx_contract_accepts_exact_94_plus_5046_layout() -> None:
         runtime_dof_names=cfg.robot.dof_names,
         runtime_default_dof_angles=cfg.robot.default_dof_angles,
     )
+
+
+def test_precomputed_policy_requires_and_accepts_exact_export_parity_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+
+    assert validate_onnx_policy_contract(
+        metadata=_precomputed_turn_then_forward_metadata(),
+        input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+        output_shapes={"action": [1, 29]},
+        observation=cfg.observation,
+        runtime_dof_names=cfg.robot.dof_names,
+        runtime_default_dof_angles=cfg.robot.default_dof_angles,
+    )
+
+
+def test_rolling_reference_delta_policy_requires_and_accepts_exact_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+
+    assert validate_onnx_policy_contract(
+        metadata=_rolling_reference_delta_metadata(),
+        input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+        output_shapes={"action": [1, 29]},
+        observation=cfg.observation,
+        runtime_dof_names=cfg.robot.dof_names,
+        runtime_default_dof_angles=cfg.robot.default_dof_angles,
+    )
+
+
+@pytest.mark.parametrize("zero_root_command_when_drop_active", [False, True])
+def test_training_and_inference_rolling_reference_delta_contracts_are_byte_exact(
+    zero_root_command_when_drop_active: bool,
+) -> None:
+    training_contract, training_digest = (
+        _rolling_reference_delta_deployment_contract(
+            lookahead_motion_frames=30,
+            zero_yaw_threshold_deg=0.0,
+            zero_root_command_when_drop_active=(
+                zero_root_command_when_drop_active
+            ),
+        )
+    )
+    inference_contract = (
+        inference_policy_contract_module._expected_rolling_reference_delta_contract(
+            lookahead_motion_frames=30,
+            zero_yaw_threshold_deg=0.0,
+            zero_root_command_when_drop_active=(
+                zero_root_command_when_drop_active
+            ),
+        )
+    )
+    payload = json.dumps(
+        inference_contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+    assert training_contract == inference_contract
+    assert training_digest == hashlib.sha256(payload).hexdigest()
+
+
+def test_rolling_reference_delta_policy_rejects_missing_adapter_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+    metadata = _rolling_reference_delta_metadata()
+    metadata.pop("rolling_reference_delta_deployment_contract")
+    metadata.pop("rolling_reference_delta_deployment_contract_sha256")
+
+    with pytest.raises(PolicyContractError, match="missing its deployment adapter"):
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+            output_shapes={"action": [1, 29]},
+            observation=cfg.observation,
+            runtime_dof_names=cfg.robot.dof_names,
+            runtime_default_dof_angles=cfg.robot.default_dof_angles,
+        )
+
+
+@pytest.mark.parametrize("zero_root_command_when_drop_active", [False, True])
+def test_training_and_inference_precomputed_deployment_contracts_are_byte_exact(
+    zero_root_command_when_drop_active: bool,
+) -> None:
+    training_contract, training_digest = (
+        _precomputed_turn_then_forward_deployment_contract(
+            zero_root_command_when_drop_active=(
+                zero_root_command_when_drop_active
+            )
+        )
+    )
+    inference_contract = (
+        inference_policy_contract_module._expected_precomputed_turn_then_forward_contract(
+            zero_root_command_when_drop_active=(
+                zero_root_command_when_drop_active
+            )
+        )
+    )
+    payload = json.dumps(
+        inference_contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+    assert training_contract == inference_contract
+    assert training_digest == hashlib.sha256(payload).hexdigest()
+    assert training_contract["version"] == (
+        2 if zero_root_command_when_drop_active else 1
+    )
+
+
+def test_precomputed_drop_exclusive_policy_accepts_exact_v2_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+
+    assert validate_onnx_policy_contract(
+        metadata=_precomputed_turn_then_forward_metadata(
+            zero_root_command_when_drop_active=True
+        ),
+        input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+        output_shapes={"action": [1, 29]},
+        observation=cfg.observation,
+        runtime_dof_names=cfg.robot.dof_names,
+        runtime_default_dof_angles=cfg.robot.default_dof_angles,
+    )
+
+
+def test_precomputed_drop_exclusive_policy_rejects_v1_adapter_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+    metadata = _precomputed_turn_then_forward_metadata(
+        zero_root_command_when_drop_active=True
+    )
+    legacy_contract = (
+        inference_policy_contract_module._expected_precomputed_turn_then_forward_contract()
+    )
+    payload = json.dumps(
+        legacy_contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    metadata["precomputed_turn_then_forward_deployment_contract"] = legacy_contract
+    metadata["precomputed_turn_then_forward_deployment_contract_sha256"] = (
+        hashlib.sha256(payload).hexdigest()
+    )
+
+    with pytest.raises(PolicyContractError, match="does not match"):
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+            output_shapes={"action": [1, 29]},
+            observation=cfg.observation,
+            runtime_dof_names=cfg.robot.dof_names,
+            runtime_default_dof_angles=cfg.robot.default_dof_angles,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("runtime", "unverified", "field 'runtime'"),
+        ("pytorch_vs_ort", False, "field 'pytorch_vs_ort'"),
+        ("probe_rows", 5, "probe_rows must be exactly 6"),
+        ("completed_iteration", 8, "must equal the policy metadata iteration"),
+        ("input_names", ["actor_obs"], "input names do not match"),
+    ],
+)
+def test_precomputed_policy_rejects_mutated_export_parity_contract(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+    metadata = _precomputed_turn_then_forward_metadata()
+    metadata["onnx_validation_contract"][field] = value
+
+    with pytest.raises(PolicyContractError, match=message):
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+            output_shapes={"action": [1, 29]},
+            observation=cfg.observation,
+            runtime_dof_names=cfg.robot.dof_names,
+            runtime_default_dof_angles=cfg.robot.default_dof_angles,
+        )
+
+
+def test_precomputed_policy_rejects_missing_export_parity_contract() -> None:
+    cfg = g1_29dof_wbt_object_contact_aware_drop_button_depth_distill
+    metadata = _precomputed_turn_then_forward_metadata()
+    del metadata["onnx_validation_contract"]
+
+    with pytest.raises(PolicyContractError, match="onnx_validation_contract must be a mapping"):
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={"actor_obs": [1, 94], "perception_obs": [1, 58 * 87]},
+            output_shapes={"action": [1, 29]},
+            observation=cfg.observation,
+            runtime_dof_names=cfg.robot.dof_names,
+            runtime_default_dof_angles=cfg.robot.default_dof_angles,
+        )
 
 
 @pytest.mark.parametrize(

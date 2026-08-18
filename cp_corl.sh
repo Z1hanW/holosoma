@@ -21,6 +21,8 @@ set -euo pipefail
 #   EXPECTED_CLIP_COUNT=126
 #   DRY_RUN=1
 #   KEEP_BACKUP=0
+#   CONTACT_EXPORT_NAME=contact_export_from_teacher_success133_final0p5
+#   CONTACT_SIDECAR_MODE=full-sidecars  full-sidecars or runtime-intervals
 #   SEED_LOCAL_EXISTING=0
 #     Default 1. If the same local bank already exists, seed staging from it
 #     with symlinks dereferenced before overlaying the NFS package. This avoids
@@ -63,6 +65,21 @@ KEEP_BACKUP=${KEEP_BACKUP:-1}
 SEED_LOCAL_EXISTING=${SEED_LOCAL_EXISTING:-1}
 SEED_LOCAL_OBJECT_ASSETS=${SEED_LOCAL_OBJECT_ASSETS:-1}
 RSYNC_INFO=${RSYNC_INFO:-stats2}
+CONTACT_EXPORT_NAME=${CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
+CONTACT_SIDECAR_MODE=${CONTACT_SIDECAR_MODE:-full-sidecars}
+
+if [[ -z "${CONTACT_EXPORT_NAME}" || "${CONTACT_EXPORT_NAME}" == */* || "${CONTACT_EXPORT_NAME}" == "." || "${CONTACT_EXPORT_NAME}" == ".." ]]; then
+  echo "[ERROR] CONTACT_EXPORT_NAME must be one safe path component: ${CONTACT_EXPORT_NAME}" >&2
+  exit 2
+fi
+case "${CONTACT_SIDECAR_MODE}" in
+  full-sidecars|runtime-intervals)
+    ;;
+  *)
+    echo "[ERROR] CONTACT_SIDECAR_MODE must be full-sidecars or runtime-intervals. Got: ${CONTACT_SIDECAR_MODE}" >&2
+    exit 2
+    ;;
+esac
 
 if ! command -v rsync >/dev/null 2>&1; then
   echo "[ERROR] rsync not found in PATH." >&2
@@ -262,7 +279,7 @@ else
 fi
 
 echo "[INFO] Rewriting object paths to repo-local data dir..."
-"${PYTHON_BIN}" - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" "${EXPECTED_CLIP_COUNT}" <<'PY'
+"${PYTHON_BIN}" - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" "${EXPECTED_CLIP_COUNT}" "${CONTACT_EXPORT_NAME}" "${CONTACT_SIDECAR_MODE}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -301,8 +318,11 @@ def write_npz_atomic(path: Path, payload: dict[str, np.ndarray]) -> None:
 staging_bank = Path(sys.argv[1]).expanduser().resolve()
 installed_bank = Path(sys.argv[2]).expanduser().resolve()
 expected_count_raw = sys.argv[3].strip()
+contact_export_name = sys.argv[4].strip()
+contact_sidecar_mode = sys.argv[5].strip()
 map_path = staging_bank / "_clip_object_urdf_map.json"
-contact_dir = staging_bank / "contact_export_from_teacher_success133_final0p5" / "clips"
+contact_root = staging_bank / contact_export_name
+contact_dir = contact_root / "clips" if (contact_root / "clips").is_dir() else contact_root
 slot_bank = staging_bank / "_single_slot_motion_bank"
 slot_map_path = slot_bank / "_clip_object_urdf_map.json"
 
@@ -456,6 +476,7 @@ slot_npz_count = len(list(slot_bank.glob("*.npz"))) if slot_bank.is_dir() else 0
 ref_count = len(list(contact_dir.glob("*/teacher_rollout_reference.npz")))
 left_count = len(list(contact_dir.glob("*/left_wrist_contact_points.npy")))
 right_count = len(list(contact_dir.glob("*/right_wrist_contact_points.npy")))
+interval_count = len(list(contact_dir.glob("*/contact_intervals.json")))
 urdf_count = len(list(staging_bank.rglob("*.urdf")))
 if slot_map_path.is_file():
     slot_map_path.write_text(json.dumps(out_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -508,6 +529,9 @@ summary = {
     "teacher_rollout_reference": ref_count,
     "left_wrist_contact_points": left_count,
     "right_wrist_contact_points": right_count,
+    "runtime_contact_intervals": interval_count,
+    "contact_export_name": contact_export_name,
+    "contact_sidecar_mode": contact_sidecar_mode,
     "rewritten_npz": rewritten_npz,
     "symlinks": symlink_count,
 }
@@ -521,13 +545,21 @@ expected = {
     "clips": len(updated_clips),
     "motion_npz": npz_count,
     "urdfs": urdf_count,
-    "teacher_rollout_reference": ref_count,
-    "left_wrist_contact_points": left_count,
-    "right_wrist_contact_points": right_count,
 }
+if contact_sidecar_mode == "full-sidecars":
+    expected.update({
+        "teacher_rollout_reference": ref_count,
+        "left_wrist_contact_points": left_count,
+        "right_wrist_contact_points": right_count,
+    })
+elif contact_sidecar_mode == "runtime-intervals":
+    expected["runtime_contact_intervals"] = interval_count
+else:
+    errors.append(f"unsupported contact_sidecar_mode={contact_sidecar_mode}")
 for key, value in expected.items():
     if key == "urdfs":
-        if value < expected_count:
+        minimum_urdfs = expected_count if contact_sidecar_mode == "full-sidecars" else 1
+        if value < minimum_urdfs:
             errors.append(f"{key}={value}")
     elif value != expected_count:
         errors.append(f"{key}={value}")

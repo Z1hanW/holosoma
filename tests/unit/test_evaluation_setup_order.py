@@ -51,3 +51,22 @@ def test_evaluation_metadata_is_attached_before_setup_and_load(
             "load_evaluation",
         )
     ]
+
+
+def test_recording_finalizes_video_before_reporting_failed_lift() -> None:
+    source = Path("scripts/record_checkpoint_inference.py").read_text(
+        encoding="utf-8"
+    )
+    finalization_comment = source.index(
+        "Failed pickup is a valid evaluation outcome."
+    )
+    stop_recording = source.index(
+        "recorder.stop_recording()",
+        finalization_comment,
+    )
+    failed_lift = source.index(
+        "Object never satisfied the configured stable-lift trigger",
+        stop_recording,
+    )
+
+    assert finalization_comment < stop_recording < failed_lift

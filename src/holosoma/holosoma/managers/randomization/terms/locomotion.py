@@ -1515,11 +1515,33 @@ def _resolve_asset_body_ids(asset: Any, asset_cfg: Any) -> torch.Tensor:
     return torch.tensor(asset_cfg.body_ids, dtype=torch.long, device="cpu")
 
 
+def _map_unit_samples_to_positive_scale(
+    unit_samples: torch.Tensor,
+    *,
+    lower: float,
+    upper: float,
+    distribution: str,
+) -> torch.Tensor:
+    """Map samples from ``[0, 1]`` to a positive linear or log interval."""
+
+    if distribution == "uniform":
+        return lower + (upper - lower) * unit_samples
+    if distribution == "log_uniform":
+        return torch.exp(
+            math.log(lower) + (math.log(upper) - math.log(lower)) * unit_samples
+        )
+    raise ValueError(
+        "mass_scale_distribution must be 'uniform' or 'log_uniform', "
+        f"got {distribution!r}"
+    )
+
+
 def randomize_object_rigid_body_mass_inertia_scale_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
     *,
     mass_scale_distribution_params: Sequence[float],
+    mass_scale_distribution: str = "uniform",
     enabled: bool = True,
     **_,
 ) -> None:
@@ -1527,7 +1549,8 @@ def randomize_object_rigid_body_mass_inertia_scale_startup(
 
     This preserves physical consistency for fixed geometry: changing density by
     ``s`` scales both total mass and the inertia tensor by ``s`` while keeping
-    the center of mass fixed.
+    the center of mass fixed. ``mass_scale_distribution='log_uniform'`` samples
+    uniformly in log space so reciprocal density changes receive equal weight.
     """
     if not enabled:
         return
@@ -1558,6 +1581,11 @@ def randomize_object_rigid_body_mass_inertia_scale_startup(
             "mass_scale_distribution_params must be positive with upper >= lower, "
             f"got {mass_scale_distribution_params!r}"
         )
+    if mass_scale_distribution not in {"uniform", "log_uniform"}:
+        raise ValueError(
+            "mass_scale_distribution must be 'uniform' or 'log_uniform', "
+            f"got {mass_scale_distribution!r}"
+        )
 
     for asset_cfg in _resolve_object_asset_cfgs(simulator):
         if not _object_physx_view_has_env_rows(
@@ -1576,10 +1604,16 @@ def randomize_object_rigid_body_mass_inertia_scale_startup(
         masses_original = asset.root_physx_view.get_masses()
         inertias_original = asset.root_physx_view.get_inertias()
 
-        mass_scales = lower + (upper - lower) * torch.rand(
+        unit_samples = torch.rand(
             (env_ids_cpu.shape[0], 1),
             device="cpu",
             dtype=masses_original.dtype,
+        )
+        mass_scales = _map_unit_samples_to_positive_scale(
+            unit_samples,
+            lower=lower,
+            upper=upper,
+            distribution=mass_scale_distribution,
         )
 
         masses = masses_original.clone()

@@ -191,13 +191,13 @@ def _mesh_entries(root: ET.Element, src_urdf: Path, tag_name: str) -> list[tuple
 
 
 def _combined_geometry(root: ET.Element, src_urdf: Path) -> tuple[trimesh.Trimesh, list[Path], str]:
-    entries = _mesh_entries(root, src_urdf, "collision")
-    source = "collision"
+    # Inertial properties follow the object's rendered/perceived geometry.
+    # Collision geometry may be a simplified proxy and must not silently alter
+    # the nominal COM or inertia contract.
+    entries = _mesh_entries(root, src_urdf, "visual")
+    source = "visual"
     if not entries:
-        entries = _mesh_entries(root, src_urdf, "visual")
-        source = "visual"
-    if not entries:
-        raise ValueError(f"No mesh collision or visual geometry found: {src_urdf}")
+        raise ValueError(f"No visual mesh geometry found for inertia computation: {src_urdf}")
     mesh = entries[0][0] if len(entries) == 1 else trimesh.util.concatenate([item[0] for item in entries])
     if mesh.volume < 0:
         mesh.invert()
@@ -358,11 +358,20 @@ def _materialize_bank_assets(input_bank: Path, output_bank: Path, mode: str) -> 
         "_mesh_physics_urdfs",
         "nfs_package_manifest.json",
     }
+    # This manifest is a provenance snapshot consumed by
+    # prepare_immutable_solid_bank.py.  It must remain a regular file even
+    # when the bulk motion/object payload is materialized with symlinks;
+    # otherwise the immutable publication gate correctly rejects the bank.
+    copy_names = {"realmesh_rollout_manifest.json"}
     skip_prefixes = ("_scientific_", "_single_slot_")
     for child in sorted(input_bank.iterdir()):
         if child.name in skip_names or child.name.startswith(skip_prefixes):
             continue
-        _link_or_copy(child, output_bank / child.name, mode)
+        _link_or_copy(
+            child,
+            output_bank / child.name,
+            "copy" if child.name in copy_names else mode,
+        )
 
 
 def _resolve_object_urdf(raw: str, object_map: Path) -> Path:

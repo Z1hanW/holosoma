@@ -182,6 +182,46 @@ def test_prepare_rank_shards_splits_by_clip_when_world_size_exceeds_unique_urdfs
     assert _clip_counts(output_root, 4) == {f"clip_{idx:03d}": 1 for idx in range(5)}
 
 
+def test_rank_shards_can_require_clip_counts_that_divide_envs_per_rank(
+    tmp_path: Path,
+) -> None:
+    module = _load_prepare_module()
+    motion_dir, object_map = _write_motion_bank(
+        tmp_path,
+        clip_count=15,
+        unique_urdfs=15,
+    )
+    output_root = tmp_path / "rank_shards" / "ws6_e8"
+
+    manifest = module.prepare_rank_shards(
+        motion_dir=motion_dir,
+        object_map=object_map,
+        output_root=output_root,
+        world_size=6,
+        environments_per_rank=8,
+    )
+
+    clip_counts = [shard["clip_count"] for shard in manifest["shards"]]
+    assert sorted(clip_counts) == [1, 2, 2, 2, 4, 4]
+    assert all(8 % count == 0 for count in clip_counts)
+    assert manifest["environments_per_rank"] == 8
+    assert manifest["rank_clip_counts_divide_environments_per_rank"] is True
+    assert manifest["exact_clip_partition"] is True
+    assert _clip_counts(output_root, 6) == {
+        f"clip_{idx:03d}": 1 for idx in range(15)
+    }
+
+    verified = module.validate_published_rank_shards(
+        motion_dir=motion_dir,
+        object_map=object_map,
+        output_root=output_root,
+        world_size=6,
+        environments_per_rank=8,
+        expected_source_digest=manifest["source_digest"],
+    )
+    assert verified == manifest
+
+
 def test_rank_shard_inverse_cover_weights_restore_global_uniform_clip_mass(tmp_path: Path) -> None:
     module = _load_prepare_module()
     motion_dir, object_map = _write_motion_bank(tmp_path, clip_count=5, unique_urdfs=2)
@@ -214,6 +254,62 @@ def test_rank_shard_inverse_cover_weights_restore_global_uniform_clip_mass(tmp_p
             global_contributions[clip_id] += expected_rank_scale * local_probability / 8.0
 
     assert all(math.isclose(value, 1.0 / 5.0) for value in global_contributions.values())
+
+
+def test_rank_shards_duplicate_to_environment_compatible_nonempty_ranks(
+    tmp_path: Path,
+) -> None:
+    module = _load_prepare_module()
+    motion_dir, object_map = _write_motion_bank(
+        tmp_path,
+        clip_count=30,
+        unique_urdfs=30,
+    )
+    output_root = tmp_path / "rank_shards" / "ws32_e1024"
+
+    manifest = module.prepare_rank_shards(
+        motion_dir=motion_dir,
+        object_map=object_map,
+        output_root=output_root,
+        world_size=32,
+        environments_per_rank=1024,
+    )
+
+    assert manifest["duplicated_to_fill_empty_ranks"] is True
+    assert manifest["exact_clip_partition"] is False
+    assert manifest["environments_per_rank"] == 1024
+    assert manifest["rank_clip_counts_divide_environments_per_rank"] is True
+    assert [shard["clip_count"] for shard in manifest["shards"]] == [1] * 32
+    assert sorted(manifest["clip_cover_counts"].values()) == [1] * 28 + [2] * 2
+
+    global_contributions = {f"clip_{idx:03d}": 0.0 for idx in range(30)}
+    for rank in range(32):
+        payload = json.loads(
+            (output_root / f"rank_{rank}" / "_clip_object_urdf_map.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        metadata = payload["rank_local_shard"]
+        clip_id, cover_count = next(iter(metadata["clip_cover_counts"].items()))
+        expected_rank_scale = 32.0 / (30.0 * float(cover_count))
+        assert math.isclose(metadata["inverse_cover_mass"], 1.0 / float(cover_count))
+        assert math.isclose(metadata["distributed_loss_weight"], expected_rank_scale)
+        global_contributions[clip_id] += expected_rank_scale / 32.0
+
+    assert all(
+        math.isclose(value, 1.0 / 30.0)
+        for value in global_contributions.values()
+    )
+
+    verified = module.validate_published_rank_shards(
+        motion_dir=motion_dir,
+        object_map=object_map,
+        output_root=output_root,
+        world_size=32,
+        environments_per_rank=1024,
+        expected_source_digest=manifest["source_digest"],
+    )
+    assert verified == manifest
 
 
 def test_rank_shards_preserve_source30_transition_semantics_for_active1_ws8(

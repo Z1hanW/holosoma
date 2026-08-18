@@ -30,6 +30,7 @@ RUNTIME_ASSET_MANIFEST_VERSION = 2
 REQUIRED_DIGEST_KEYS = (
     "teacher_sha256",
     "policy_init_sha256",
+    "stage4_init_sha256",
     "training_resume_sha256",
     "motion_shard_manifest_sha256",
     "contact_sidecar_manifest_sha256",
@@ -38,7 +39,7 @@ REQUIRED_DIGEST_KEYS = (
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SNAPSHOT_ID_RE = re.compile(r"^src-([0-9a-f]{64})$")
-_OPTIONAL_CHECKPOINT_ROLES = ("policy_init", "training_resume")
+_OPTIONAL_CHECKPOINT_ROLES = ("policy_init", "stage4_init", "training_resume")
 EXECUTION_RUNTIME_KEY = "execution_runtime"
 SEMANTIC_ENVIRONMENT_KEY = "semantic_environment"
 
@@ -764,6 +765,19 @@ def validate_training_provenance(
             f"unsupported training provenance version {provenance_version!r}; "
             f"expected {PROVENANCE_VERSION}"
         )
+    # ``stage4_init`` was added compatibly to provenance v2.  Older v2
+    # payloads could not select this load mode, so the only faithful
+    # normalization is its domain-separated disabled identity.
+    stage4_enabled_present = "stage4_init_enabled" in provenance
+    stage4_digest_present = "stage4_init_sha256" in provenance
+    if stage4_enabled_present != stage4_digest_present:
+        raise ValueError(
+            "training provenance stage4_init_enabled and stage4_init_sha256 "
+            "must be present together"
+        )
+    if not stage4_enabled_present:
+        provenance["stage4_init_enabled"] = False
+        provenance["stage4_init_sha256"] = disabled_checkpoint_sha256("stage4_init")
     environment = provenance.get("environment")
     if isinstance(environment, Mapping):
         execution_runtime = environment.get(EXECUTION_RUNTIME_KEY)

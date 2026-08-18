@@ -6509,3 +6509,634 @@ materials cannot be hot-updated through this config edit. No live training
 job was attached, paused, stopped, or modified, and no GPU simulator or W&B
 write was used. Code and tests remain unstaged; only `agent.md` and this log
 are allowed in the Git index.
+
+[2026-07-24] launched fresh CORL79 depth-student pure RL with new object physics
+
+Started exactly one formal 32-GPU run on four previously idle 8xL40S nodes:
+`zihanw22/carry-any/998gj8c5`,
+`student_pure_rl_depth_corl79_newphysics_ws32_e1020_20260724_231107`.
+The nodes are 10.99.1.134, 10.99.0.116, 10.99.0.117 and 10.99.0.77;
+master is 10.99.1.134:31821. Each rank uses 1020 environments for a global
+32,640. Two independent idle gates passed before allocation, all four nodes
+reported eight L40S GPUs and zero volatile UECC, and no existing job or other
+node was modified.
+
+The run uses immutable source
+`src-f77271b1e9e87aca0140c0f75ed8db892e1f9bab492f77c101295bf520041383`
+at Git commit `6259df92ee6280183a92d0673f9521ec63fff8d5`. Before launch, 263
+targeted tests passed. Every node verified the same source, Python runtime,
+NCCL library, new CORL79 single-slot view, exact ws32 rank shards, all 79
+contact sidecars and episodic train CLI. The ws32 shards cover the 79 clips
+exactly once, with two or three clips per rank; 1020 is divisible by both.
+
+The live W&B config confirms the intended new physics: coupled object
+mass/full-inertia scale Uniform(0.33,3.0), static friction Uniform(0.1,0.7),
+dynamic/static ratio Uniform(0.7,0.99), and restitution Uniform(0,1). Nominal
+masses in the immutable bank are ball=0.5kg, bin=1.0kg, barrel=1.5kg and
+box=1.0kg with mesh-derived COM/inertia. The run deliberately preserves the
+established 34qv1qqp student comparison: noisy depth, pure PPO,
+distill=false, no teacher/resume/policy init, offline contact reward weight
+zero, uniform clips plus existing adaptive/T1 sampling, 40k updates, and
+checkpoint interval 1000 with no rollout reset. ONNX and training video are
+disabled to avoid redundant storage.
+
+Rule-90 was regenerated from the final view's canonical `box_10` and passed
+manual review plus ffprobe: H.264 1280x720 at 50fps, 368 frames/7.36s,
+1,542,374 bytes, SHA256
+`d8eb25f717e1bd811819988979be83b005686110a3b77e0c86cd446731ae7251`.
+After training history existed, the same bytes were written once to
+`vis/replay` at history step 16. The live primary service rebound summary to
+that history path; a fresh API download matched size/SHA and only then was
+the temporary summary-only copy deleted. Final remote state has one replay
+history row and one MP4.
+
+At 2026-07-24 23:35 UTC all four sessions were alive and synchronized at
+completed iteration 29, each node had eight compute applications, no exit
+file and UECC zero. Traceback, CUDA OOM, ChildFailed, distributed/NCCL fatal
+and nonfinite scans were all zero. W&B remained running with finite values:
+mean reward 0.66543, KL 0.01360, total FPS 106,725, PPO coefficient 1, and
+zero BC/distillation loss. The complete untracked audit root is
+`/home/ubuntu/FAR/holosoma_runs/formal_student_pure_rl_depth_corl79_newphysics_ws32_e1020_20260724_231107`.
+
+[2026-07-25] launched 34q-equivalent CORL79 depth pure RL with new physics and naive adaptive sampling
+
+The reference run `zihanw22/carry-any/34qv1qqp` had completed its 40,000
+updates. It was not resumed or mutated. A fresh run was created as
+`zihanw22/carry-any/lc4kly4n`,
+`student_pure_rl_depth_corl79_newphysics_naive_as_ws64_e1024_20260725_185338`,
+on the eight now-idle former 34q nodes 10.99.0.24, .39, .54, .61, .180,
+.183, .201 and .244. The master is 10.99.0.24:31831 and the exact session
+name is `hs_lc4kly4n`. This is 64 L40S ranks with 1,024 environments per
+rank and 65,536 globally. Three idle gates passed. The separate live run
+`998gj8c5` and all other jobs were untouched.
+
+The policy and optimizer reproduce the 34q depth-student pure-PPO contract:
+94 scalar actor dimensions plus a 32-dimensional noisy-depth encoding,
+[512,256,128] actor/critic hidden layers, 29 actions, a privileged critic,
+and no teacher, distillation, BC, DAgger, resume or policy initialization.
+PPO uses 40,000 updates, 24 rollout steps, seven epochs, four minibatches,
+initial actor/critic learning rates 1e-3 with adaptive scheduling, desired KL
+0.01 and entropy 0.005. Checkpoints skip iteration zero, save exactly every
+1,000 updates, and do not reset the rollout. PT and ONNX exports are retained
+at that cadence to match 34q; training video is disabled.
+
+The final input is the new-physics immutable CORL79 view with 79 actual clips
+(box25, bin15, barrel35 and ball4), view digest
+`c9e02244ac1e3c870564f70837a963b03a337430bb1b4a58dc50610868df8027`.
+The 64 rank shards cover every clip exactly once with one or two clips per
+rank; their manifest SHA256 is
+`c32f9d8009740a814665916638b2a5bb115732cd7d47fc0bcbc5c17e69ae8e3a`.
+Fresh W&B config reads back the intended physics: coupled object mass and
+full-inertia scale [0.33,3], static friction [0.1,0.7], dynamic/static ratio
+[0.7,0.99], restitution [0,1], mesh-derived COM/inertia, and nominal masses
+ball=0.5kg, bin=1kg, barrel=1.5kg and box=1kg.
+
+Naive adaptive sampling means uniform clip selection and a fixed 20-percent
+timestep-zero branch. The remaining 80 percent is
+`0.9 * normalized per-clip failure/exposure + 0.1 * uniform_nonzero`;
+before failures are observed it is uniform over nonzero timesteps. The old
+T1 contact-window reset boost is completely disabled: enabled=false,
+half-width=0 and density boost=1.0. Freeze-at-zero is zero. Contact windows
+remain available for the observation/window definitions but no longer bias
+reset sampling, and offline-contact reward weight remains zero.
+
+The immutable source is
+`src-f77271b1e9e87aca0140c0f75ed8db892e1f9bab492f77c101295bf520041383`
+at Git commit `6259df92ee6280183a92d0673f9521ec63fff8d5`. The focused test suite
+reported 263 passed. All eight nodes verified byte-identical source, runtime,
+NCCL, object bank, 64-rank shards, 79/79 contact coverage, no broken links,
+and the episodic scientific CLI. Run-contract, replay-manifest and worker
+SHA256 values are respectively
+`e511711eea5bbdd6a67634f9f44a8d860d6ba4f861d6600efec4ba755e6fe524`,
+`693995f568c024c41005915cd81f01316a394cc52c9a638e7852b2e16e63d168`,
+and `93de190e7b6f0b518fbafa03ce17a8209448e4d5321def04e1b8b281f1339415`.
+
+Rule-90 was newly recorded from the final canonical `box_10` input and
+manually accepted: single robot, randomization disabled, H.264 1280x720 at
+50fps, 368 frames/7.36s, 1,536,911 bytes, SHA256
+`5a6255dca7ec0dc338c1958698833e4633256fecc8f74fdefdbd343a1f59eda4`.
+The reviewed bytes occur once in history at step 9. Summary was rebound
+through the exact live primary W&B Unix service; a fresh remote download
+matched SHA/size before the temporary summary-only file was deleted. The run
+has exactly one replay history row and one replay MP4.
+
+At bounded acceptance on 2026-07-25 19:14 UTC, rank zero had completed
+iteration 28. All eight sessions were alive, all nodes had exactly eight
+compute applications, volatile UECC and exit-file counts were zero, and
+fatal log scans found no traceback, child failure, CUDA OOM, NCCL failure,
+segfault or killed process. W&B was running; step 27 reported 185,128 total
+FPS, collection/learning times 6.069/2.427 seconds, mean reward 0.67172, KL
+0.01438, finite actor/critic losses, PPO coefficient one, and all BC and
+distillation losses zero. This was a bounded launch acceptance, not a
+recurring monitor. The untracked audit root is
+`/home/ubuntu/FAR/holosoma_runs/formal_student_pure_rl_depth_corl79_newphysics_naive_as_ws64_e1024_20260725_185338/`.
+
+[2026-07-25] fixed manual forward yaw drift without changing the policy interface
+
+The manual forward adapter previously held the actor root command at
+`[command_m, 0, 0]` in the robot's instantaneous heading frame. Any
+contact-induced yaw therefore rotated the commanded forward direction with
+the robot, while the fixed zero yaw slot supplied no restoring error.
+
+Both immediate manual forward and stable-lift-triggered manual forward now
+latch the robot root world yaw when activated. On every control step, the
+same existing actor slots are updated as
+`[command*cos(e_yaw), command*sin(e_yaw), e_yaw]`, where
+`e_yaw=wrap(anchor_yaw-current_yaw)`. The external command flags, 94 scalar
+actor dimensions, 32 depth features, 29 actions, checkpoint format and ONNX
+policy interface are unchanged. Evaluation metrics now expose the anchor,
+effective actor command, heading error, along-track displacement and
+cross-track displacement.
+
+Focused command/evaluation/observation/launcher regression reported 88
+passed. Python compilation and `git diff --check` also passed. Ruff is not
+installed in the active environment and was not claimed.
+
+A real Isaac Sim A/B used the known severe case
+`34qv1qqp/model_25000.pt` SHA256
+`145e8d37f503a9069624c085ccb97cf27caa5fad742986cad5e0ffac8dad9b00`,
+`noscale__any_barrel_12`, one environment, seed 42, disabled
+randomization, and a 0.15m command after a stable 0.30m lift. Over the common
+first-episode forward interval (steps 118 through 325), the old constant
+body-frame command accumulated 231.84 degrees of root yaw; the new
+world-heading lock accumulated 12.21 degrees with a 25.29-degree total yaw
+range. The new rollout advanced 3.409m along the latched forward direction.
+At the last pre-reset frame the object remained lifted at z=0.721m and
+0.390m from the robot in XY. Manual frame review confirmed continuous
+pickup/carry and no spinning.
+
+The current episodic motion-end reset occurred at step 326, so post-reset
+frames were excluded rather than conflated with the first episode. The
+untracked diagnostic root is
+`/home/ubuntu/FAR/holosoma_runs/diagnostic_heading_locked_forward_barrel12_model25000_20260725/`.
+Only idle GPU7 was used; GPU3--7 returned to approximately 905MiB and zero
+utilization afterward. Existing GPU0--2 work was not attached, stopped or
+modified. Nothing was written to W&B and no formal training or push was
+started. Code and tests remain unstaged; the Git index remains restricted to
+`agent.md` and this log.
+
+[2026-07-25] recorded terminal 34qv1qqp old-versus-heading-lock comparison
+
+Fresh W&B state confirmed that `zihanw22/carry-any/34qv1qqp` is finished.
+The comparison used its terminal `model_40000.pt`, whose internal completed
+iteration is 39999 and whose SHA256 is
+`ec7a2de8d0f5a9e7a74ac8b1e70d50f11c346de24670a2eaa73bdd560dae52fe`.
+It did not substitute the earlier model_25000 diagnostic checkpoint.
+
+An evaluation-only `manual_forward_heading_lock` A/B switch was added. It was
+used for the world-heading-lock side of this comparison. A subsequent
+deployment-semantics audit restored the current default to the constant
+robot-frame `[0.15,0,0]` command; world-heading lock is now explicit opt-in
+diagnostic behavior. The policy observation and action interface is unchanged.
+A legacy-path unit test increased the focused suite to 90 passing tests;
+compileall and `git diff --check` passed.
+
+Both sides used `noscale__any_barrel_12`, one environment, seed 42, timestep
+zero, disabled randomization, zero initial-pose noise, and a 0.15 command only
+after a stable 0.30m lift. Robot and object states were bit-identical before
+forward activation. Over common first-episode steps 117 through 325, the old
+logic accumulated 202.12 degrees of net yaw and a 202.12-degree yaw range,
+with along/cross displacement 1.359m/1.491m. The heading-locked logic
+accumulated 11.85 degrees net and a 25.06-degree range, with along/cross
+displacement 3.692m/-1.240m. At the last pre-reset frame both objects remained
+lifted: old/new z was 0.701m/0.670m and root-object XY distance was
+0.395m/0.404m. Step 326 was a motion-end reset and was not mixed into the
+comparison.
+
+The final side-by-side deliverable is one H.264 stream at 1280x360, 50fps,
+325 frames, 6.50 seconds and 1,407,777 bytes. The identical first two renderer
+warm-up frames were removed. Full decode, ffprobe, and a six-frame visual
+contact-sheet review passed. Video SHA256 is
+`0027b4e2858960063beea1421c2972381afd6d29cf3522c93cb3ce6916311074`.
+The audit root is
+`/home/ubuntu/FAR/holosoma_runs/34qv1qqp_terminal40000_heading_lock_comparison_20260725/`.
+
+Only idle GPU6 and GPU7 were used and both returned to approximately 905MiB
+and zero utilization. Existing GPU0--2 jobs were not attached, stopped or
+modified. Nothing was uploaded to W&B. Code and tests remain unstaged; the Git
+index remains restricted to `agent.md` and this log.
+
+[2026-07-25] audited HIL-style task-sparse straight-line reward direction
+
+The user clarified that straight walking must be learned from training reward,
+not supplied by a simulator-state command adapter at deployment. The HIL
+heading objective is a per-step low-dimensional task reward,
+`w_vel*exp(-alpha*(v_target-d_hat^T v)^2) + w_face*(f_hat^T q_hat)`.
+The RSS follow-up similarly calls its position/orientation error plus reach
+bonus sparse relative to dense full-body imitation; neither objective is a
+purely terminal binary reward.
+
+The exact `34qv1qqp/model_40000.pt` config shows that its "pure RL" label means
+PPO without teacher, BC, or distillation. Its active reward remains dense
+reference tracking for root/body pose and velocity plus object pose, with
+positive maximum weight seven and bad-tracking termination. Its command mode
+is `tracking_error`, so training automatically exposes a nonzero reference
+relative dyaw after heading drift. A deployment input held at
+`[0.15,0,0,0]` does not provide that correction. The run is therefore not an
+HIL-style goal/task-sparse experiment.
+
+The scientifically appropriate next contract is to warm start from a
+pickup/carry tracking checkpoint and train parallel tracking and task
+environments. Tracking environments retain dense imitation for motion quality.
+Task environments receive deployment-faithful sample-and-hold commands after a
+stable lift, remove full-body reference tracking, and optimize desired-direction
+velocity, lateral velocity, initial-heading facing, cross-track error, yaw rate,
+object hold, and waypoint/reach bonuses. Only the privileged critic may receive
+a task indicator. World pose can be used to compute reward without entering
+the actor or deployment interface.
+
+There is a necessary observability boundary. The current feed-forward actor
+sees body angular velocity but a fixed dyaw of zero contains no accumulated
+heading error. Reward can teach strong yaw-rate damping and reduce
+self-induced drift, but strict recovery to the original world heading after an
+arbitrary external rotation cannot be guaranteed. HIL supplies target heading
+and facing to the actor. Strong recovery would require a dynamic relative
+heading error in the same command slots or a recurrent/history policy that can
+integrate yaw rate.
+
+To prevent future evaluation confusion, both the recorder
+`manual_forward_heading_lock` flag and the core after-lift `heading_lock`
+argument now default to false. Raw constant command is deployment-faithful;
+the simulator world-heading adapter is explicit opt-in diagnostic behavior.
+The focused suite remains 90 passing tests, compileall passed, and
+`git diff --check` passed. No training, W&B mutation, or GPU use occurred.
+
+[2026-07-26] implemented and validated hybrid Stage-2, formal 32-GPU launch waiting for idle nodes
+
+Implemented a dedicated hybrid Stage-2 preset without changing the deployed
+actor interface. The actor remains the exact 94-dimensional scalar plus
+32-dimensional depth-latent interface from `34qv1qqp`, with 29 actions and
+512/256/128 MLP hidden dimensions. The task identifier is critic-only.
+Tracking environments retain dense reference imitation. Task environments
+also track before pickup, then receive the exact raw actor command
+`[0.15,0,0,0]` and switch to low-dimensional forward velocity, lateral
+velocity, pickup-heading, cross-track, yaw-rate, and robot-relative object
+pose-hold rewards. The pickup root pose and object pose in the robot frame are
+latched at stable pickup or at a reset already beyond the clip pickup phase.
+Task termination permits intentional planar reference divergence while
+retaining gravity/orientation failure and a 0.35m object-hold safety bound.
+
+The first real 1024-environment canary correctly failed before learning
+because a full 79-clip view cannot be represented exactly by 1024 fixed
+env-to-clip rows. Changing the canary to 1032 environments was also correctly
+rejected: the terminal policy-init checkpoint binds the depth-hole generator
+reference batch size to 1024. The fix preserved 1024 rather than weakening
+either guard. `prepare_as_rank_shards.py` now has an explicit
+`--environments-per-rank` contract and deterministically chooses exact
+per-rank clip counts that divide that environment count. For CORL79 on 32
+ranks, the plan is eight 4-clip ranks, twenty-three 2-clip ranks, and one
+1-clip rank. It covers all 79 clips exactly once; every count divides 1024.
+The immutable shard manifest SHA256 is
+`2eb12afba67bea4858db5bb1fb819aaa919ac2f8066bf593d9a28057045cdfd9`
+and its source digest is
+`cf926c0ec4c3df2dc203d4ed0e9b569c6cf921b1f591d0ec4c018e121628fc54`.
+
+Review found and fixed a second topology bias before formal launch. A global
+alternating 50/50 task mask is perfectly correlated with a two-clip
+round-robin: one entire clip becomes task and the other tracking. Hybrid
+assignment is now deterministic but independently stratified inside each
+fixed clip, so each clip has the requested tracking/task ratio without
+consuming any policy, physics, or sampler RNG. The full rank-shard,
+provenance, and hybrid focused suite reported 209 passed; the additional
+hybrid/manual-forward focused suite reported 14 passed.
+
+The final immutable source is
+`src-40c3f3f9697c21e331d7d6a067e76a4c967dd627b0cdd21b38e7999ab6871c7f`
+with archive SHA256
+`a7d7735d806068dd84f8ca00cba32f74fb5b5e56aa72102ae1a28d596b03f61e`.
+A real IsaacSim canary ran on the fully idle node `10.99.0.97` with 1024
+environments and the representative 4-clip rank shard. It verified exactly
+512 task and 512 tracking rows, stratified by fixed clip. Actor-only policy
+initialization loaded exact terminal checkpoint
+`34qv1qqp/model_40000.pt` SHA256
+`ec7a2de8d0f5a9e7a74ac8b1e70d50f11c346de24670a2eaa73bdd560dae52fe`,
+ignored its critic/optimizers/env state/iteration, and started a fresh critic,
+optimizers, RNG, and iteration zero. Two PPO updates completed at about 4612
+then 5795 steps/s. Every hybrid task reward reported nonzero statistics, the
+run atomically saved `model_00002.pt`, emitted `HOLOSOMA_RUN_COMPLETE`, and
+released the GPU process.
+
+The complete visible prelaunch contract is
+`/home/ubuntu/FAR/holosoma_runs/formal_student_hybrid_stage2_corl79_ws32_e1024_init34q40000_20260726_061000/experiment_contract_prelaunch.json`,
+SHA256
+`412ccc237ded0b232d05a2a57ea335a60100b3af986c846fa68f642b4e11c00f`.
+The latest read-only inventory found only `10.99.0.97` as a fully idle
+8xL40S node. Every other accessible eight-GPU node has live compute
+applications. Per the user's instruction, no existing job was stopped,
+attached to, moved, or oversubscribed. Therefore the requested four-node
+32-GPU formal DDP run has not been partially launched, no target W&B run has
+been created, and Rule-90 replay has not been uploaded. Those lifecycle
+mutations remain fail-closed until four exact idle nodes can be bound. Code
+and tests remain unstaged; the Git index remains restricted to `agent.md` and
+this log.
+
+[2026-07-26 21:59 UTC] launched and accepted formal 32-GPU hybrid Stage-2 run
+
+A later read-only inventory identified four fully idle, zero-UECC 8xL40S
+nodes: `10.99.1.21`, `10.99.0.141`, `10.99.0.186`, and `10.99.1.122`.
+No existing job was stopped, attached to, migrated, or oversubscribed. Every
+node passed a full worker dry-run and a second immediately-pre-launch idle
+gate; master port 32131 was free.
+
+The formal W&B run is `zihanw22/carry-any/wgcsw25u`:
+https://wandb.ai/zihanw22/carry-any/runs/wgcsw25u . Before any worker
+started, Rule-90 recorded the canonical first `box_10` reference motion as one
+single-robot H.264 video at 1280x720, 50 fps, 368 frames, and 7.36 seconds.
+The file is 1,543,015 bytes with SHA256
+`892a480a96dc7bac4305c179ac7173dd5505cc7d65ad10da2e4c730abc4c213e`.
+Full decode, ffprobe, and manual multi-frame review passed. A fresh W&B API
+verification proved that summary key `vis/replay` points to exactly this MP4.
+The immutable replay manifest SHA256 is
+`06fa6dfe298bff71e757e6976e3c44f2150ca82ea9d1f5a0bcd5bea3fa0fbeb8`.
+
+The immutable formal contract is
+`/home/ubuntu/FAR/holosoma_runs/formal_student_hybrid_stage2_corl79_ws32_e1024_init34q40000_20260726_061000/run_contract.json`,
+SHA256
+`4b40e0e773f43e43ec430327ef83e9cdb163f147c467fa4f09279f477e219e21`.
+The exact worker SHA256 is
+`20681487cb19192c0007f678863558f4b783c1e38b7e388377109df6f06282a6`.
+All four nodes independently verified source, runtime, NCCL, motion, object,
+contact, 32-rank shard, contract, replay, and actor-init checkpoint digests,
+then passed the complete CLI validator.
+
+The run uses four nodes and 32 ranks, 1024 environments per rank, and 32768
+environments globally. It uses the exact-once CORL79 compatible shard,
+24 rollout steps per environment, seven PPO epochs, four minibatches, and
+40000 updates. Checkpoints are saved every 1000 updates without resetting the
+rollout. Distillation and teacher loading are disabled. Actor-only policy init
+loaded exact `34qv1qqp/model_40000.pt` and explicitly ignored the old
+iteration 39999, critic, optimizers, critic normalizers, and environment
+state; the formal run began with a fresh critic, optimizer state, RNG, and
+iteration zero.
+
+Every rank reported exactly 512 task and 512 tracking environments,
+stratified within each fixed clip, with deployment-faithful raw forward
+command 0.15m. Bounded startup acceptance reached completed iteration five.
+Throughput was 61,724 steps/s at iteration zero, 91,131 steps/s at iteration
+two, and 108,955 steps/s at iteration four. Fresh W&B API state was `running`
+and all seven hybrid task rewards were nonzero at step two. It also verified
+world size 32, 1024 environments per rank, global 32768 environments, and the
+retained Rule-90 `vis/replay`. All four tmux sessions remained up with eight
+GPU compute applications each and no Traceback, OOM, ChildFailed, or NCCL
+fatal signature. The formal run is accepted as successfully training; bounded
+acceptance ended without enabling recurring polling.
+
+[2026-07-27 20:31 UTC] corrected and sealed the original 30-clip real-mesh bank
+
+Bound the user's "original 30" request to the exact source
+`/home/ubuntu/FAR/holosoma/data/ds_as_data/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target`.
+Its source object-map SHA256 is
+`9af9da48f24d0c0f076de7147d80f21786e13bbeabc58b6a138d56f979f30f51`.
+This is the 30-clip real-mesh accepted reference/retarget bank whose map
+records `*_original.npz` lineage. It is not the later
+`prism_debug30_convexhull_allmesh` teacher bank and is not a policy-rollout
+motion bank. The source directory was not modified.
+
+Generated the new derivative
+`/home/ubuntu/FAR/holosoma/data/ds_as_data/debug30_original_realmesh_rollout_u8udzw0u_model05000_cominertia_categorymass_v2`
+with:
+
+`python scripts/build_mesh_physics_object_bank.py --input-bank /home/ubuntu/FAR/holosoma/data/ds_as_data/debug39_realmesh_rollout_u8udzw0u_model05000_retake4gpu_20260706_0205_target --output-bank /home/ubuntu/FAR/holosoma/data/ds_as_data/debug30_original_realmesh_rollout_u8udzw0u_model05000_cominertia_categorymass_v2 --mass-mode category_priors --asset-mode symlink --non-watertight-fallback convex_hull`
+
+The clip set is exactly 30: five ball, one barrel, and 24 bin clips. All 30
+motion files are byte-identical to the source and every NPZ key/array passed
+an explicit equality check. All visual and collision entries still reference
+the original `object_mesh_yup.obj`; no collision or render geometry was
+replaced by a convex hull.
+
+Recomputed each URDF inertial origin and full inertia tensor from the scaled
+collision mesh. Every COM is nonzero, with COM norm in
+`[0.004118177053, 0.031572490922] m`; all 30 tensors are positive definite and
+the global minimum eigenvalue is `0.005782960179 kg m^2`. Twenty-eight source
+meshes were watertight and used direct volume integration. Only
+`scaledown_any_bin_27` and `unscale_any_bin_27` were non-watertight; their
+recorded convex-hull fallback is used only to estimate COM/inertia. Their
+actual visual and collision meshes remain the original real meshes.
+
+Applied exact nominal category masses: ball 0.5 kg, bin 1.0 kg, barrel 1.5 kg
+(and the builder contract remains box 1.0 kg). Artifact digests are:
+
+- derivative object map:
+  `fad0b688ad65e8c811cc961938e26a566a8cf48b6c28d7fbe930ca88f002479a`
+- mesh physics manifest:
+  `f1dec081766327fbd68694d821a9a201f46ee4e670a550685c180e0c21ddc61b`
+- mesh physics CSV report:
+  `7df22426db8d6b695b99bc863fecd0e6ee4b484f24cd57cf49c3cc7abd9ef681`
+- copied source rollout-validation manifest:
+  `c14c271ffec47c2eb467bc8e8d2a7cd11c914a698da063405b48c45edcaa207c`
+
+`verify_object_bank_geometry.py` checked all 30 training-path entries with
+zero missing/invalid clips, zero bad URDF extents, and zero object-size
+mismatches.
+
+The first immutable publication attempt correctly failed because the generic
+mesh-physics builder had materialized `realmesh_rollout_manifest.json` as a
+symlink under `--asset-mode=symlink`. That manifest is a provenance snapshot,
+and `prepare_immutable_solid_bank.py` requires a regular source file. Fixed
+the builder so this one provenance file is always copied while bulk
+motion/object assets may remain symlinked, added a regression assertion, and
+reran the mesh-physics plus immutable suites: 25 tests passed.
+
+Published the immutable read-only single-slot view:
+
+`/home/ubuntu/FAR/holosoma/data/ds_as_data/debug30_original_realmesh_cominertia_categorymass_v2_scientific_single_slot__src_1f3966245545689a2e14909dda31d6673790bdf888168362449a0ac1902f3510`
+
+Its source digest is
+`1f3966245545689a2e14909dda31d6673790bdf888168362449a0ac1902f3510`,
+manifest SHA256 is
+`e2c53df92e5af02048de9b0e062ea6dde03db9b1ee493dfc42591da606dd53b7`,
+and object-map file SHA256 is
+`412e86f38c3376b456d5f97e58876f6189eff1345da92e9903b9752030c9e742`.
+All 30 motion copies match the original and derivative SHA256 three ways.
+The view contains no symlink and no writable file. Its contact snapshot
+contains 1,140 regular files covered by the immutable manifest. The retained
+transition contract is version 1 `global_multi_clip_runtime` with source clip
+count 30.
+
+The URDF bank intentionally freezes only nominal mass, mesh-derived COM, and
+inertia. Current training-time object uncertainty remains explicit startup
+randomization: static friction Uniform(0.1, 0.7), dynamic/static ratio
+Uniform(0.7, 0.99), restitution Uniform(0, 1), and one shared
+Uniform(0.33, 3.0) multiplier for both mass and inertia. No random distribution
+was collapsed into one URDF constant.
+
+This operation did not start, stop, attach to, or modify any training job. It
+used no GPU and made no W&B write. The builder and test changes remain
+unstaged. The Git index remains restricted to `agent.md` and this log.
+
+[2026-07-27 21:55 UTC] launched separate original30-reference pure-RL on 64 GPUs
+
+Preserved the existing CORL79 bank, run identities, artifacts, and jobs
+unchanged. The corrected original 30 clips are used only as policy-free
+reference motions in a separate fresh PPO environment. They are not merged
+into CORL79 and are not teacher rollouts or action labels. Distillation, BC,
+DAgger, teacher loading, policy initialization, and training resume are all
+disabled.
+
+The formal W&B run is `zihanw22/carry-any/6urn4jvc`:
+https://wandb.ai/zihanw22/carry-any/runs/6urn4jvc
+
+Run name:
+`student_pure_rl_depth_original30_reference_newphysics_naive_as_ws64_e1024_20260727_213011`
+
+The final topology is eight nodes and 64 L40S GPUs:
+
+- rank 0 / master: `10.99.1.134:31841`
+- rank 1: `10.99.0.116`
+- rank 2: `10.99.0.117`
+- rank 3: `10.99.0.167`
+- rank 4: `10.99.1.154`
+- rank 5: `10.99.0.77`
+- rank 6: `10.99.0.97`
+- rank 7: `10.99.1.69`
+
+Each rank/GPU runs 1024 environments, for 65,536 globally. The exact tmux
+session is `hs_6urn4jvc` on every node. Three originally selected nodes
+(`10.99.0.18`, `.165`, and `.227`) acquired unrelated pointworld jobs before
+launch. The worker idle gate refused them; no process was stopped, attached
+to, or oversubscribed. Replacement nodes passed a complete dry-run and a
+second launch-instant idle/UECC/hash/port gate.
+
+On `10.99.0.77`, the root volume was full while `/data` had 6.5 TB free.
+Purged only 11,498.9 MB of reproducible pip download cache, not any run,
+checkpoint, source, or user artifact. Stored the 30-clip data on `/data` and
+preserved its authenticated absolute-path contract through a symlink.
+`/data/nfs -> /nfs` was added on `10.99.0.77`, `10.99.0.97`, and
+`10.99.1.69` so the unchanged URDF relative mesh URI resolves to the same
+read-only NFS mesh after data-volume indirection.
+
+The immutable input view is
+`debug30_original_realmesh_cominertia_categorymass_v2_scientific_single_slot__src_1f3966245545689a2e14909dda31d6673790bdf888168362449a0ac1902f3510`,
+containing exactly 30 references: ball 5, barrel 1, and bin 24. With 64 ranks,
+each rank has one clip. Twenty-six clips are covered twice and four are
+covered three times. Inverse-cover distributed loss weights make every clip's
+global weight exactly 64/30, preserving a uniform-clip objective rather than
+biasing the four triplicated clips. The rank-shard manifest SHA256 is
+`e1952bb3fc05b8690c41f59a31dd303225d06fe1a5473a87e4d65d7eed99bb0c`;
+its source digest is
+`bdd1011b2704b8e83134070e6d2b9d605496e7c8005a83e9fee6a2e0b9e602ab`.
+
+Before launch, Rule-90 replayed canonical first clip
+`scaledown__any_ball_24` directly as a reference motion with one robot,
+randomization disabled, timestep zero, and zero reset-pose noise. The reviewed
+H.264 MP4 is 1280x720, 50 fps, 329 frames, 6.58 seconds, and 1,326,443 bytes;
+SHA256 is
+`dfa432c01bce6f40afe755e764a360b5ab599a0c57ce1967ec6aa28d1e2ced35`.
+ffprobe, full decode, and an eight-frame manual review passed. After training
+history existed, the replay was promoted at W&B history step 15. The live
+primary summary now points to that history media, the prebind duplicate was
+deleted, and a fresh API read proved exactly one replay history row and one
+remote MP4. Replay manifest SHA256 is
+`76b487dd9e5921ac2134be8684ef83c4e7f91e9c28363c1ebca98836feb895eb`.
+
+The immutable run-contract SHA256 is
+`63a9ca99a879b4862a7377fb477e97b422fcfe0f6d890491641f7c5f1e0b9ed9`;
+worker SHA256 is
+`ab9ee6f8f662c503a297ca79c008ddc82f1e6c245641a812ed6bbead9d3c8d84`.
+The sealed source remains
+`src-f77271b1e9e87aca0140c0f75ed8db892e1f9bab492f77c101295bf520041383`.
+An earlier prebind-only W&B identity `7cyvqnws` had zero training history and
+was deleted after the final topology changed, avoiding an empty stale run.
+
+The training contract matches the CORL79 pure-RL baseline except for the
+separate 30-reference bank: 94D scalar actor input plus a 32D depth encoding,
+MLP `[512,256,128]`, 29 actions, privileged critic, 24 rollout steps, seven
+epochs, four minibatches, adaptive 1e-3 actor/critic learning rates, desired
+KL 0.01, entropy coefficient 0.005, and 40,000 updates. Naive adaptive
+sampling uses uniform clip weights, explicit `P(t=0)=0.2`, and no T1 boost.
+Offline contact-guidance reward weight is zero. Object randomization remains
+mass+inertia shared Uniform(0.33, 3.0), static friction Uniform(0.1, 0.7),
+dynamic/static ratio Uniform(0.7, 0.99), and restitution Uniform(0, 1).
+PT and ONNX checkpoints are written every 1,000 updates, step zero is skipped,
+and `reset_rollout_at_checkpoint=False`.
+
+Bounded acceptance reached iteration 22. Throughput was 116,605 steps/s at
+iteration 0, 151,968 at iteration 5, 167,245 at iteration 20, and 154,052 at
+iteration 22; mean reward improved from -0.25 to 0.51. All eight sessions were
+up with eight GPU compute applications per node, no exit files, and zero
+Traceback/OOM/NCCL/Gloo/segfault fatal signatures. Fresh W&B API reads proved
+state `running`, pure-RL provenance, teacher/policy-init/training-resume all
+false, world size 64, 1024 environments per rank, 65,536 globally, one
+history-backed replay, and no non-finite latest metrics. Bounded acceptance
+ended without installing recurring monitoring.
+
+No code file was staged by this launch. The Git index remains restricted to
+`agent.md` and this log.
+
+[2026-08-04 17:44 UTC] Launched and bounded-accepted fresh 32-GPU pure-PPO
+formal run `zihanw22/carry-any/0mcqao8k` on four ap-northeast-2a nodes
+(`zzzihanw-15/27/35/42`, eight L40S each). Each rank owns 2,048 environments,
+for world size 32 and 65,536 environments globally. The run has no resume,
+policy initialization, teacher, distillation, BC, or offline contact-guidance.
+Its final actor command is drop-exclusive: whenever drop is active it is
+exactly `[0,0,0,1]`, with root x/y/yaw zeroed.
+
+The immutable effective bank is exact CORL79 plus debug30: 109 clips (box 25,
+ball 9, barrel 36, bin 39), data-closure SHA256
+`3219b4de13c6eb7f89dbd1f46619f9fdcf7aca75fb02473798423bc0cf2c158f`.
+Visual/depth geometry is the original real mesh and collision uses real-mesh
+convex decomposition; missing geometry fails closed. The ws32 exact-once shard
+manifest SHA256 is
+`19500fe84e4fef7c70cadc574b2581a41f1e85b5bf5e6cede7fa58a57ab8c858`,
+with no asset or DataLoader double sharding.
+
+The camera contract matches `sx9wctkd`: torso-link translation
+`[0.0576235,0.01753,0.41987]` m and pitch 47.6 degrees (not 49), with
+`camera_depth_d435i` and strict `far_tracking_warp` depth. Frozen source ID is
+`src-309efb4303690cea9960b10a2e459041608243842e284f2732cd27f0cccbca57`.
+The formal tmux identity is `hs_form_dropzero_0mcqao8k` on all four nodes.
+
+An exact-topology two-update canary generated a native same-iteration PT+ONNX
+pair and passed ONNX checker, ORT loading, and PyTorch-vs-ORT parity (maximum
+absolute error `8.568167686462402e-8`). The formal contract pins
+`training.export_onnx=true`, atomic paired PT+ONNX publication every 1,000
+updates, and fail-closed behavior. At bounded acceptance the formal run had not
+yet reached its first 1,000-update checkpoint; the canary artifacts are not
+reported as formal checkpoints.
+
+Rule-90 replay for canonical clip `box_10` was reviewed and promoted to W&B
+history step 6 as the only `vis/replay` MP4. Its SHA256 is
+`796667afa1c1a5e27b0395a9ab8d8d2c8be3d00a2a6d207f593629736874f1b2`.
+Bounded acceptance passed at W&B step 18 with 95,148 total steps/s,
+13.489-second collection, 3.041-second learning, distributed weight sum 32,
+all 32 ranks alive, and no fatal Traceback/OOM/NCCL/Gloo/segfault or exit
+marker. Acceptance record SHA256 is
+`eb51015de948ae2b86fd4d75a621f256fe414549e9180fbb09d57ceef45400ea`.
+The local audit root is
+`/home/ubuntu/FAR/holosoma_runs/formal_corl79_debug30_dropzero_d435urdf_ws32_e2048_20260804_165326/`.
+
+[2026-08-04 19:47 UTC] Synchronized the exact derived CORL79+debug30
+turn-then-forward data to every currently SSH-accessible zzzihanw node. Added the
+separate installer `cp_corl79_debug30_turn_forward.sh` without changing the
+older `cp_corl79_debug30.sh` contract. The new installer authenticates the
+903,331,462-byte base archive, verifies all 1,995 bank files against the
+immutable generated-record inventory, refuses to replace an invalid existing
+target, and publishes only through an atomic same-filesystem rename. Its
+SHA256 is
+`8466a814050a7dab792eb33e1db4e4059243ef38650f2c26e681de3fa3e169d6`.
+
+The installed base digest is
+`307e9662d498bd507b9d17ca9abf74a3654f7bf66ac6ab989c6f19c3889bddef`;
+manifest and object-map SHA256 are respectively
+`2de9ee5ca188b70e877c32dd9f0d2975eea99d11aa077bb077cf06ea9ab897bb`
+and `70b466aad04837a79f6dd0f4491cb345a73c687209981acd3eb7f4a0365d8f5c`.
+Each verified node has 109 NPZ, 109 URDF, 81 real OBJ meshes, and 109 contact
+clip directories. The exact ws32/e2048 view was also published as a 29,022-byte
+NFS archive with SHA256
+`4d72c044a97dbd45fcbfd903afc69309bef235f9b0720df3b148945f0e9d800c`.
+Every node has 32 rank directories, 109 exact-once NPZ links, no double
+sharding, zero broken links, and zero incoming directories.
+
+Independent post-sync checks passed on 28 nodes: `z1hanw` and
+`zzzihanw-15/17/25/26/27/28/30/31/34/35/39/40/42/45/46/47/49/65/71/72/79/93/102/c/e/f/z`.
+The user-supplied inventory node `zzzihanw-66` remained unreachable because
+EC2 reported system status `ok` but instance status `impaired`, with TCP/22
+timing out. Newly discovered extra node `zzzihanw-7`, which was not in the
+user's 28-node inventory, rejected the current controller keys; this role also
+lacks EC2 Instance Connect permission. Neither node was rebooted or stopped.
+
+Post-sync, all four live `0mcqao8k` training tmux sessions remained up with
+eight GPU processes each, equal completed iteration 849, and zero fatal
+markers. The audit root and machine-readable result are
+`/home/ubuntu/FAR/holosoma_runs/sync_corl79_debug30_turn_forward_20260804_193235/`
+and its `sync_manifest.json`.

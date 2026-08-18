@@ -11,11 +11,12 @@ from __future__ import annotations
 
 
 DISTRIBUTION_CONTRACT_NAME = ".holosoma-runtime-distributions.json"
-DISTRIBUTION_CONTRACT_VERSION = 2
-RUNTIME_PROFILE = "as-core-v1"
+DISTRIBUTION_CONTRACT_VERSION = 3
+RUNTIME_PROFILE = "as-core-onnx-v2"
 ROOT_DISTRIBUTIONS = (
     "attrs",
     "numpy",
     "omegaconf",
+    "onnx",
+    "onnxruntime",
 )
-

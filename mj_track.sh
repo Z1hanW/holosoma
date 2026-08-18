@@ -1851,10 +1851,9 @@ for src_key, env_key in field_map.items():
     if isinstance(value, bool):
         print(f"{env_key}={value}")
     elif isinstance(value, (list, tuple)):
-        # Tyro consumes variable-length sequences as separate CLI tokens.
-        # Emitting Python's ``[3, 4]`` representation makes the shell pass
-        # invalid tokens (``[3,`` and ``4]``).
-        print(f"{env_key}=" + " ".join(str(item) for item in value))
+        # The value is later passed as one argv token.  Tyro's fixed tuple
+        # branch expects a Python literal, not a whitespace-joined string.
+        print(f"{env_key}={tuple(value)!r}")
     elif isinstance(value, int):
         print(f"{env_key}={value}")
     elif isinstance(value, float):
@@ -2175,6 +2174,45 @@ apply_training_robot_init_overrides "$POLICY_MODEL"
 apply_training_robot_asset_overrides "$POLICY_MODEL"
 apply_training_object_overrides "$POLICY_MODEL"
 apply_training_perception_overrides "$POLICY_MODEL"
+
+if is_truthy_env "${HOLOSOMA_EVAL_DISABLE_PERCEPTION_RESET_RANDOMIZATION:-0}"; then
+  if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" != "1" ]]; then
+    echo "[ERROR] Deterministic perception evaluation requires split perception observations." >&2
+    exit 1
+  fi
+  eval_perception_lines="$("$INFER_PY" "$ROOT_DIR/scripts/mj_eval_disable_perception_reset_randomization.py" "$POLICY_MODEL")"
+  PERCEPTION_RANDOMIZATION_TRANSLATION_RANGE=""
+  PERCEPTION_RANDOMIZATION_ROTATION_RANGE_DEG=""
+  PERCEPTION_RANDOMIZATION_NOISE_STD_MULT_RANGE=""
+  PERCEPTION_RANDOMIZATION_NOISE_DROP_PROB_RANGE=""
+  while IFS='=' read -r key value; do
+    [[ -z "${key:-}" ]] && continue
+    case "$key" in
+      PERCEPTION_RANDOMIZATION_ENABLED)
+        PERCEPTION_RANDOMIZATION_ENABLED="$value"
+        ;;
+      PERCEPTION_RANDOMIZATION_CONTRACT_STATUS)
+        PERCEPTION_RANDOMIZATION_CONTRACT_STATUS="$value"
+        ;;
+      PERCEPTION_CONTRACT_ENVELOPE_B64)
+        PERCEPTION_CONTRACT_ENVELOPE_B64="$value"
+        ;;
+      HOLOSOMA_EVAL_PERCEPTION_CONTRACT_ORIGINAL_SHA256)
+        export HOLOSOMA_EVAL_PERCEPTION_CONTRACT_ORIGINAL_SHA256="$value"
+        ;;
+      HOLOSOMA_EVAL_PERCEPTION_CONTRACT_SHA256_OVERRIDE)
+        export HOLOSOMA_EVAL_PERCEPTION_CONTRACT_SHA256_OVERRIDE="$value"
+        ;;
+      *)
+        echo "[ERROR] Unexpected deterministic evaluation contract field: $key" >&2
+        exit 1
+        ;;
+    esac
+  done <<< "$eval_perception_lines"
+  export HOLOSOMA_EVAL_ALLOW_PERCEPTION_CONTRACT_OVERRIDE=1
+  export HOLOSOMA_EVAL_ALLOW_MISSING_CAMERA_SENSOR_NOISE_STATE=1
+  export HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT=False
+fi
 apply_gt_mujoco_physics_overrides
 
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"

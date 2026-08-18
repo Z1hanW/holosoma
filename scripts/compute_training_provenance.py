@@ -62,7 +62,9 @@ REQUIRED_CONTACT_FILES = (
 OPTIONAL_RUNTIME_CONTACT_FILES = (
     "contact_intervals.json",
     "metadata.json",
+    "teacher_rollout_reference.npz",
 )
+CONTACT_SIDECAR_MODES = ("full-sidecars", "runtime-intervals")
 RUNTIME_CONTACT_REGIONS = (
     "left_wrist",
     "right_wrist",
@@ -691,8 +693,14 @@ def _contact_manifest_digest(
     motion_dir: Path,
     contact_root: Path,
     *,
+    contact_sidecar_mode: str = "full-sidecars",
     identity_recorder: Callable[[Path], None] | None = None,
 ) -> str:
+    if contact_sidecar_mode not in CONTACT_SIDECAR_MODES:
+        raise ValueError(
+            f"unsupported contact sidecar mode: {contact_sidecar_mode!r}; "
+            f"expected one of {CONTACT_SIDECAR_MODES!r}"
+        )
     if identity_recorder is not None:
         identity_recorder(motion_dir)
         identity_recorder(contact_root)
@@ -741,7 +749,11 @@ def _contact_manifest_digest(
             identity_recorder(clip_dir)
         clip_dir_identity = _file_identity(clip_dir)
         files: dict[str, Any] = {}
-        file_names = set(REQUIRED_CONTACT_FILES)
+        file_names = (
+            {"contact_intervals.json"}
+            if contact_sidecar_mode == "runtime-intervals"
+            else set(REQUIRED_CONTACT_FILES)
+        )
         file_names.update(name for name in OPTIONAL_RUNTIME_CONTACT_FILES if (clip_dir / name).is_file())
         for region_name in RUNTIME_CONTACT_REGIONS:
             for suffix in RUNTIME_CONTACT_REGION_FILE_SUFFIXES:
@@ -770,7 +782,8 @@ def _contact_manifest_digest(
         )
     return sha256_json(
         {
-            "version": 3,
+            "version": 4,
+            "contact_sidecar_mode": contact_sidecar_mode,
             "clips": clips,
             "teacher_rollout_manifest": rollout_manifest_record,
         }
@@ -795,6 +808,7 @@ def revalidate_data_asset_provenance(
     """
 
     validated = validate_training_provenance(provenance, require_finalized=True)
+    contact_sidecar_mode = str(provenance.get("contact_sidecar_mode", "full-sidecars"))
     motion_dir = motion_dir.expanduser().resolve()
     object_map = object_map.expanduser().resolve()
     contact_root = contact_root.expanduser().resolve() if contact_root is not None else None
@@ -815,6 +829,7 @@ def revalidate_data_asset_provenance(
             _contact_manifest_digest(
                 motion_dir,
                 contact_root,
+                contact_sidecar_mode=contact_sidecar_mode,
                 identity_recorder=identity_recorder,
             )
             if contact_root is not None
@@ -1332,11 +1347,13 @@ def compute_provenance(
     motion_dir: Path,
     object_map: Path,
     contact_root: Path | None,
+    contact_sidecar_mode: str = "full-sidecars",
     motion_shard_manifest: Path | None,
     student_motion_end_mode: str,
     contact_interval_runtime_prepend_compensation: bool,
     source_root: Path,
     policy_init_checkpoint: Path | None = None,
+    stage4_init_checkpoint: Path | None = None,
     training_resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     teacher_checkpoint = teacher_checkpoint.expanduser().resolve()
@@ -1383,6 +1400,11 @@ def compute_provenance(
             policy_init_checkpoint,
             role="policy_init",
         ),
+        "stage4_init_enabled": stage4_init_checkpoint is not None,
+        "stage4_init_sha256": _optional_checkpoint_digest(
+            stage4_init_checkpoint,
+            role="stage4_init",
+        ),
         "training_resume_enabled": training_resume_checkpoint is not None,
         "training_resume_sha256": _optional_checkpoint_digest(
             training_resume_checkpoint,
@@ -1394,10 +1416,15 @@ def compute_provenance(
             motion_shard_manifest.expanduser().resolve() if motion_shard_manifest is not None else None,
         ),
         "contact_sidecar_manifest_sha256": (
-            _contact_manifest_digest(motion_dir, contact_root)
+            _contact_manifest_digest(
+                motion_dir,
+                contact_root,
+                contact_sidecar_mode=contact_sidecar_mode,
+            )
             if contact_root is not None
             else disabled_contact_sidecar_manifest_sha256()
         ),
+        "contact_sidecar_mode": contact_sidecar_mode,
         "source_bundle_sha256": _source_bundle_digest(source_root),
         "teacher_motion_end_mode": "episodic" if teacher_motion_ends else "continuing",
         "teacher_uses_action_history": teacher_uses_actions,
@@ -1435,10 +1462,12 @@ def compute_generalist_provenance(
     motion_dir: Path,
     object_map: Path,
     contact_root: Path | None,
+    contact_sidecar_mode: str = "full-sidecars",
     motion_shard_manifest: Path | None,
     source_root: Path,
     contact_interval_runtime_prepend_compensation: bool = False,
     policy_init_checkpoint: Path | None = None,
+    stage4_init_checkpoint: Path | None = None,
     training_resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Build content-closed provenance for teacher-free object RL training."""
@@ -1464,6 +1493,11 @@ def compute_generalist_provenance(
             policy_init_checkpoint,
             role="policy_init",
         ),
+        "stage4_init_enabled": stage4_init_checkpoint is not None,
+        "stage4_init_sha256": _optional_checkpoint_digest(
+            stage4_init_checkpoint,
+            role="stage4_init",
+        ),
         "training_resume_enabled": training_resume_checkpoint is not None,
         "training_resume_sha256": _optional_checkpoint_digest(
             training_resume_checkpoint,
@@ -1477,10 +1511,15 @@ def compute_generalist_provenance(
             else None,
         ),
         "contact_sidecar_manifest_sha256": (
-            _contact_manifest_digest(motion_dir, contact_root)
+            _contact_manifest_digest(
+                motion_dir,
+                contact_root,
+                contact_sidecar_mode=contact_sidecar_mode,
+            )
             if contact_root is not None
             else disabled_contact_sidecar_manifest_sha256()
         ),
+        "contact_sidecar_mode": contact_sidecar_mode,
         "contact_interval_runtime_prepend_compensation": bool(
             contact_interval_runtime_prepend_compensation
         ),
@@ -1499,6 +1538,11 @@ def _revalidate_data_assets_main(argv: list[str]) -> None:
     parser.add_argument("--motion-dir", required=True, type=Path)
     parser.add_argument("--object-map", required=True, type=Path)
     parser.add_argument("--contact-root", type=Path)
+    parser.add_argument(
+        "--contact-sidecar-mode",
+        choices=CONTACT_SIDECAR_MODES,
+        default="full-sidecars",
+    )
     parser.add_argument("--motion-shard-manifest", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--cache-root", type=Path)
@@ -1542,6 +1586,11 @@ def main() -> None:
     parser.add_argument("--motion-dir", required=True, type=Path)
     parser.add_argument("--object-map", required=True, type=Path)
     parser.add_argument("--contact-root", type=Path)
+    parser.add_argument(
+        "--contact-sidecar-mode",
+        choices=CONTACT_SIDECAR_MODES,
+        default="full-sidecars",
+    )
     parser.add_argument("--motion-shard-manifest", type=Path)
     parser.add_argument("--student-motion-end-mode", choices=("episodic", "continuing"))
     parser.add_argument(
@@ -1550,6 +1599,7 @@ def main() -> None:
     )
     parser.add_argument("--source-root", required=True, type=Path)
     parser.add_argument("--policy-init-checkpoint", type=Path)
+    parser.add_argument("--stage4-init-checkpoint", type=Path)
     parser.add_argument("--training-resume-checkpoint", type=Path)
     args = parser.parse_args()
     try:
@@ -1568,6 +1618,7 @@ def main() -> None:
                 motion_dir=args.motion_dir,
                 object_map=args.object_map,
                 contact_root=args.contact_root,
+                contact_sidecar_mode=args.contact_sidecar_mode,
                 motion_shard_manifest=args.motion_shard_manifest,
                 student_motion_end_mode=args.student_motion_end_mode,
                 contact_interval_runtime_prepend_compensation=(
@@ -1575,6 +1626,7 @@ def main() -> None:
                 ),
                 source_root=args.source_root,
                 policy_init_checkpoint=args.policy_init_checkpoint,
+                stage4_init_checkpoint=args.stage4_init_checkpoint,
                 training_resume_checkpoint=args.training_resume_checkpoint,
             )
         else:
@@ -1586,6 +1638,7 @@ def main() -> None:
                 motion_dir=args.motion_dir,
                 object_map=args.object_map,
                 contact_root=args.contact_root,
+                contact_sidecar_mode=args.contact_sidecar_mode,
                 motion_shard_manifest=args.motion_shard_manifest,
                 contact_interval_runtime_prepend_compensation=(
                     args.contact_interval_runtime_prepend_compensation == "true"
@@ -1594,6 +1647,7 @@ def main() -> None:
                 ),
                 source_root=args.source_root,
                 policy_init_checkpoint=args.policy_init_checkpoint,
+                stage4_init_checkpoint=args.stage4_init_checkpoint,
                 training_resume_checkpoint=args.training_resume_checkpoint,
             )
     except Exception as exc:

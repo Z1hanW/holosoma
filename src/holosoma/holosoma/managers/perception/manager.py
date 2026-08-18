@@ -25,6 +25,7 @@ from holosoma.utils import warp_utils
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
+    get_euler_xyz,
     matrix_to_quaternion,
     quat_apply,
     quat_apply_yaw,
@@ -558,8 +559,18 @@ class PerceptionManager:
             except Exception:
                 quat_vals = None
             if quat_vals and len(quat_vals) == 4:
-                self._camera_mount_quat = torch.tensor(quat_vals, device=self.device, dtype=torch.float32)
+                mount_quat = torch.tensor(quat_vals, device=self.device, dtype=torch.float32)
+                if not bool(torch.isfinite(mount_quat).all()):
+                    raise ValueError("camera_mount_quat must contain only finite values.")
+                mount_quat_norm = torch.linalg.vector_norm(mount_quat)
+                if float(mount_quat_norm.detach().to("cpu").item()) <= 1.0e-8:
+                    raise ValueError("camera_mount_quat must have non-zero norm.")
+                self._camera_mount_quat = mount_quat / mount_quat_norm
                 self._use_camera_mount_quat = True
+                mount_rpy = get_euler_xyz(self._camera_mount_quat.unsqueeze(0), w_last=True)
+                self._strict_camera_mount_rotation_deg = torch.rad2deg(
+                    torch.stack(mount_rpy, dim=-1)[0]
+                ).to(device=self.device, dtype=torch.float32)
 
         if cfg.output_mode not in {"heightmap", "camera_depth"}:
             raise ValueError(f"Unsupported output_mode: {cfg.output_mode}")
@@ -1820,10 +1831,22 @@ class PerceptionManager:
             path="live_perception.semantics",
         )
 
-    def validate_deployment_geometry_support(self, expected: Any) -> dict[str, Any]:
-        """Require live static geometry equality and selected-object membership."""
+    def validate_deployment_geometry_support(
+        self,
+        expected: Any,
+        *,
+        allow_unknown_object_geometry: bool = False,
+    ) -> dict[str, Any]:
+        """Validate static geometry and, by default, object membership.
+
+        ``allow_unknown_object_geometry`` is reserved for an explicitly
+        labelled evaluation-only OOD path.  Camera source and robot geometry
+        remain exact even in that mode.
+        """
 
         normalized = self._normalize_training_geometry_support(expected)
+        if type(allow_unknown_object_geometry) is not bool:
+            raise TypeError("allow_unknown_object_geometry must be a bool.")
         live = self.get_local_geometry_support()
         if live["camera_source"] != normalized["camera_source"]:
             raise ValueError(
@@ -1851,7 +1874,7 @@ class PerceptionManager:
                 "Live perception object-geometry presence differs from the training checkpoint."
             )
         unknown = sorted(live_objects - expected_objects)
-        if unknown:
+        if unknown and not allow_unknown_object_geometry:
             raise ValueError(
                 "Live perception selected object geometry is not a member of the authenticated "
                 f"training support: {unknown}."
@@ -3061,7 +3084,7 @@ class PerceptionManager:
         This matches the bundled far-tracking placement contract: translation
         perturbs the local sensor position, while RPY noise is added to the
         configured mount Euler angles.  In particular, rotation jitter must
-        not rotate the sensor's 0.44 m lever arm around the robot body.
+        not rotate the configured sensor lever arm around the robot body.
         """
 
         if self._camera_disable_offsets:

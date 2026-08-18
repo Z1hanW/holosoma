@@ -196,7 +196,14 @@ def test_no_reset_path_keeps_regular_observation_and_extras_semantics(timing_ena
     assert calls["refresh_select"] == 0
     assert calls["refresh_ids"] == []
     assert task.extras["reset_env_ids"].numel() == 0
-    for key in ("episode", "episode_all", "raw_episode", "raw_episode_all"):
+    for key in (
+        "episode",
+        "episode_all",
+        "raw_episode",
+        "raw_episode_all",
+        "episode_rate",
+        "raw_episode_mean",
+    ):
         assert task.extras[key] == {}
     assert task.extras["time_outs"] is task.time_out_buf
     assert not torch.any(task.extras["time_outs"])
@@ -230,6 +237,8 @@ def test_reset_then_no_reset_clears_transition_extras_without_reentering_reset_h
         task.extras["raw_episode_all"] = {
             "raw_rew_term": torch.tensor([4.0, 5.0, 6.0])
         }
+        task.extras["episode_rate"] = {"rew_term": torch.tensor([0.25])}
+        task.extras["raw_episode_mean"] = {"raw_rew_term": torch.tensor([0.5])}
 
     task.reset_envs_idx = reset_with_episode_extras
 
@@ -241,6 +250,8 @@ def test_reset_then_no_reset_clears_transition_extras_without_reentering_reset_h
     assert task.extras["episode_all"]
     assert task.extras["raw_episode"]
     assert task.extras["raw_episode_all"]
+    assert task.extras["episode_rate"]
+    assert task.extras["raw_episode_mean"]
     assert torch.equal(task.extras["time_outs"], torch.tensor([True, False, False]))
     assert torch.equal(task.extras["reset_env_ids"], torch.tensor([0]))
     assert "final_observations" in task.extras
@@ -256,7 +267,14 @@ def test_reset_then_no_reset_clears_transition_extras_without_reentering_reset_h
     assert len(calls["reset_ids"]) == 1
     assert calls["refresh_select"] == 1
     assert calls["refresh_ids"] == []
-    for key in ("episode", "episode_all", "raw_episode", "raw_episode_all"):
+    for key in (
+        "episode",
+        "episode_all",
+        "raw_episode",
+        "raw_episode_all",
+        "episode_rate",
+        "raw_episode_mean",
+    ):
         assert task.extras[key] == {}
     assert task.extras["time_outs"] is task.time_out_buf
     assert not torch.any(task.extras["time_outs"])

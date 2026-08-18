@@ -657,6 +657,79 @@ class FarTrackingDepthSmallEncoder(nn.Module):
         return self.output_activation(latent)
 
 
+class SpatialSoftmax2d(nn.Module):
+    """Convert each feature channel into an expected 2-D image coordinate."""
+
+    def __init__(self, height: int, width: int, temperature: float = 1.0):
+        super().__init__()
+        if height <= 0 or width <= 0:
+            raise ValueError(f"SpatialSoftmax2d expects positive spatial dimensions, got {(height, width)}.")
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError(f"SpatialSoftmax2d temperature must be finite and positive, got {temperature}.")
+        self.height = int(height)
+        self.width = int(width)
+        self.temperature = float(temperature)
+        y_coords = torch.linspace(-1.0, 1.0, steps=self.height)
+        x_coords = torch.linspace(-1.0, 1.0, steps=self.width)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
+        self.register_buffer("grid_x", grid_x.reshape(1, 1, -1), persistent=False)
+        self.register_buffer("grid_y", grid_y.reshape(1, 1, -1), persistent=False)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 4 or tuple(features.shape[-2:]) != (self.height, self.width):
+            raise ValueError(
+                "SpatialSoftmax2d expected [B,C,H,W] with "
+                f"H,W={(self.height, self.width)}, got {tuple(features.shape)}."
+            )
+        logits = features.flatten(start_dim=2) / self.temperature
+        probabilities = torch.softmax(logits, dim=-1)
+        expected_x = torch.sum(probabilities * self.grid_x, dim=-1)
+        expected_y = torch.sum(probabilities * self.grid_y, dim=-1)
+        return torch.stack((expected_x, expected_y), dim=-1).flatten(start_dim=1)
+
+
+class FarTrackingDepthSpatialSoftmaxEncoder(nn.Module):
+    """Far-tracking CNN with a position-preserving spatial-softmax readout."""
+
+    def __init__(self, input_height: int, input_width: int, output_dim: int):
+        super().__init__()
+        if input_height <= 0 or input_width <= 0:
+            raise ValueError(
+                "FarTrackingDepthSpatialSoftmaxEncoder expects positive input size, "
+                f"got {(input_height, input_width)}."
+            )
+        self.input_height = int(input_height)
+        self.input_width = int(input_width)
+        self.feature_height = (self.input_height + 7) // 8
+        self.feature_width = (self.input_width + 7) // 8
+        activation = nn.ELU()
+        # Keep the original far_tracking_cnn_small convolutional backbone exact.
+        self.image_backbone = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5, stride=2, padding=2),
+            activation,
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1),
+            activation,
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1),
+            activation,
+        )
+        self.spatial_softmax = SpatialSoftmax2d(self.feature_height, self.feature_width)
+        self.projection = nn.Linear(64 * 2, output_dim)
+        self.output_activation = activation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        expected_dim = self.input_height * self.input_width
+        if flat.shape[-1] != expected_dim:
+            raise ValueError(
+                "FarTrackingDepthSpatialSoftmaxEncoder expected flattened input dim "
+                f"{expected_dim}, got {flat.shape[-1]}."
+            )
+        images = flat.view(x.shape[0], 1, self.input_height, self.input_width)
+        features = self.image_backbone(images)
+        coordinates = self.spatial_softmax(features)
+        return self.output_activation(self.projection(coordinates))
+
+
 @lru_cache(maxsize=1)
 def _resolve_defm_repo_root() -> Path:
     return resolve_defm_source_root(environ=os.environ, anchor=Path(__file__))
@@ -1374,6 +1447,19 @@ class BaseModule(nn.Module):
                     "far_tracking_cnn_small requires perception_input_height and perception_input_width to be set."
                 )
             self.perception_encoder = FarTrackingDepthSmallEncoder(
+                input_height=int(input_height),
+                input_width=int(input_width),
+                output_dim=output_dim,
+            )
+        elif encoder_type == "far_tracking_cnn_spatial_softmax":
+            input_height = getattr(layer_config, "perception_input_height", None)
+            input_width = getattr(layer_config, "perception_input_width", None)
+            if input_height is None or input_width is None:
+                raise ValueError(
+                    "far_tracking_cnn_spatial_softmax requires perception_input_height "
+                    "and perception_input_width to be set."
+                )
+            self.perception_encoder = FarTrackingDepthSpatialSoftmaxEncoder(
                 input_height=int(input_height),
                 input_width=int(input_width),
                 output_dim=output_dim,

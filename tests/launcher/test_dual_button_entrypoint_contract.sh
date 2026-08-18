@@ -186,6 +186,28 @@ for invalid_entrypoint in \
   fi
 done
 
+for invalid_config_spec in \
+    'DISTILL_EXPERIMENT_CONFIG=../experiment|DISTILL_EXPERIMENT_CONFIG must be empty or one safe config name' \
+    'DISTILL_REWARD_CONFIG=reward:injected|DISTILL_REWARD_CONFIG must be empty or one safe config name' \
+    'DISTILL_REWARD_CONFIG=reward;true|DISTILL_REWARD_CONFIG must be empty or one safe config name'; do
+  invalid_config_assignment=${invalid_config_spec%%|*}
+  invalid_config_error=${invalid_config_spec#*|}
+  invalid_config_name=${invalid_config_assignment%%=*}
+  invalid_config_value=${invalid_config_assignment#*=}
+  invalid_config_output="${TMP_DIR}/invalid-config-${invalid_config_name}-$RANDOM.out"
+  expect_failure \
+    "${invalid_config_output}" \
+    "${invalid_config_error}" \
+    "${batch_base[@]}" "${invalid_config_name}=${invalid_config_value}" \
+      bash batch_ne.sh launch
+  if rg -n 'source_snapshot_id=|\[DRY_RUN\].*(ssh|scp)' \
+      "${invalid_config_output}" >/dev/null; then
+    fail "invalid ${invalid_config_name} reached snapshot construction or remote actions"
+  fi
+done
+unset invalid_config_spec invalid_config_assignment invalid_config_error
+unset invalid_config_name invalid_config_value invalid_config_output
+
 # Emergency control actions recover entrypoint identity from the hash-bound
 # active control.  A stale/poisoned training shell must not prevent status or
 # stop from reaching that durable state.
@@ -277,6 +299,8 @@ fi
 dual_output="${TMP_DIR}/dual-batch.out"
 "${batch_base[@]}" \
   DISTILL_AS_ENTRYPOINT=distill_as_dual_button_solid.sh \
+  DISTILL_EXPERIMENT_CONFIG=g1-29dof-wbt-w-object-distill-sparse-root-cmd-teacher-linvel \
+  DISTILL_REWARD_CONFIG=g1-29dof-wbt-w-object-generalist-offline-contact-guidance \
   DISTILL_AS_FORMAL_FRESH=1 \
   STUDENT_ACTOR_INPUTS="${exact_inputs}" \
   bash batch_ne.sh launch >"${dual_output}"
@@ -294,13 +318,27 @@ for expected_control_line in \
     'export DISTILL_AS_ENTRYPOINT=distill_as_dual_button_solid.sh' \
     "export DISTILL_AS_ENTRYPOINT_PATH=${entrypoint_path}" \
     "export DISTILL_AS_ENTRYPOINT_SHA256=${entrypoint_sha}" \
+    'export DISTILL_EXPERIMENT_CONFIG=g1-29dof-wbt-w-object-distill-sparse-root-cmd-teacher-linvel' \
+    'export DISTILL_REWARD_CONFIG=g1-29dof-wbt-w-object-generalist-offline-contact-guidance' \
+    'export EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-teacher-linvel' \
     'export DISTILL_AS_FORMAL_FRESH=1' \
+    'export HOLOSOMA_RUNTIME_SCRATCH_ROOT=' \
+    'export TMPDIR=' \
+    'export HOLOSOMA_OBJECT_USD_CACHE_DIR=' \
+    'export HOLOSOMA_ROBOT_USD_CACHE_DIR=' \
+    'Runtime scratch requires at least 4 GiB free' \
+    'runtime_scratch_verified=${HOLOSOMA_RUNTIME_SCRATCH_ROOT}' \
     'export STUDENT_PROPRIO_HISTORY_LENGTH=1' \
+    'TRAIN_EXTRA_ARGS+=("reward:${DISTILL_REWARD_CONFIG}")' \
     "actual_distill_as_entrypoint_sha256=\$(sha256sum -- \"\${DISTILL_AS_ENTRYPOINT_PATH}\" | awk '{print \$1}')" \
     'bash "${DISTILL_AS_ENTRYPOINT_PATH}" "${TRAIN_EXTRA_ARGS[@]}" 2>&1 | tee -a '; do
   grep -F -- "${expected_control_line}" "${dual_output}" >/dev/null ||
     fail "generated dual node control omitted entrypoint binding: ${expected_control_line}"
 done
+if grep -F 'TRAIN_EXTRA_ARGS+=("exp:${DISTILL_EXPERIMENT_CONFIG}")' \
+    "${dual_output}" >/dev/null; then
+  fail 'generated dual node control retained a second late experiment selector'
+fi
 for history_group in \
     actor-obs-root-contact-aware \
     actor-obs-pickup-button \

@@ -92,6 +92,7 @@ class TrainingContext:
         self.config = config
         self.simulation_app: Any | None = None
         self._policy_init_preflight_complete = False
+        self._stage4_init_preflight_complete = False
 
     def __enter__(self):
         self.config = _effective_runtime_config(self.config)
@@ -111,6 +112,8 @@ class TrainingContext:
         # idempotent without downloading the artifact again.
         self.config = _preflight_policy_init_before_sim(self.config)
         self._policy_init_preflight_complete = True
+        self.config = _preflight_stage4_init_before_sim(self.config)
+        self._stage4_init_preflight_complete = True
         # Initialize simulation app
         self.simulation_app = init_sim_imports(self.config)
         return self
@@ -1157,19 +1160,23 @@ def _preflight_checkpoint_lineage_before_sim(tyro_config: ExperimentConfig) -> N
     if provenance is None:
         return
     configured = {
-        "policy_init": tyro_config.training.policy_init_checkpoint is not None,
-        "training_resume": tyro_config.training.checkpoint is not None,
+        "policy_init": getattr(tyro_config.training, "policy_init_checkpoint", None) is not None,
+        "stage4_init": getattr(tyro_config.training, "stage4_init_checkpoint", None) is not None,
+        "training_resume": getattr(tyro_config.training, "checkpoint", None) is not None,
     }
-    if all(configured.values()):
-        raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
+    if sum(configured.values()) > 1:
+        raise ValueError(
+            "--training.checkpoint, --training.policy-init-checkpoint, and "
+            "--training.stage4-init-checkpoint are mutually exclusive."
+        )
     for role, configured_enabled in configured.items():
         provenance_enabled = checkpoint_lineage_enabled(provenance, role)
         if provenance_enabled != configured_enabled:
-            cli_option = (
-                "--training.policy-init-checkpoint"
-                if role == "policy_init"
-                else "--training.checkpoint"
-            )
+            cli_option = {
+                "policy_init": "--training.policy-init-checkpoint",
+                "stage4_init": "--training.stage4-init-checkpoint",
+                "training_resume": "--training.checkpoint",
+            }[role]
             raise ValueError(
                 f"Training provenance {role}_enabled={provenance_enabled} does not match "
                 f"{cli_option} presence={configured_enabled}."
@@ -1258,8 +1265,14 @@ def _preflight_policy_init_before_sim(tyro_config: ExperimentConfig) -> Experime
                 "--training.policy-init-checkpoint is empty."
             )
         return tyro_config
-    if tyro_config.training.checkpoint is not None:
-        raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
+    if (
+        tyro_config.training.checkpoint is not None
+        or getattr(tyro_config.training, "stage4_init_checkpoint", None) is not None
+    ):
+        raise ValueError(
+            "--training.checkpoint, --training.policy-init-checkpoint, and "
+            "--training.stage4-init-checkpoint are mutually exclusive."
+        )
 
     checkpoint_path: Path
     if str(checkpoint).startswith("wandb://"):
@@ -1337,6 +1350,91 @@ def _preflight_policy_init_before_sim(tyro_config: ExperimentConfig) -> Experime
         training=dataclasses.replace(
             tyro_config.training,
             policy_init_checkpoint=str(checkpoint_path),
+        ),
+    )
+
+
+def _preflight_stage4_init_before_sim(tyro_config: ExperimentConfig) -> ExperimentConfig:
+    """Validate actor and critic semantics for a fresh Stage-4 lineage."""
+
+    checkpoint = getattr(tyro_config.training, "stage4_init_checkpoint", None)
+    if checkpoint is None:
+        return tyro_config
+    if (
+        tyro_config.training.checkpoint is not None
+        or getattr(tyro_config.training, "policy_init_checkpoint", None) is not None
+    ):
+        raise ValueError(
+            "--training.checkpoint, --training.policy-init-checkpoint, and "
+            "--training.stage4-init-checkpoint are mutually exclusive."
+        )
+    checkpoint_path: Path
+    if str(checkpoint).startswith("wandb://"):
+        rank = int(os.environ.get("RANK", "0"))
+        cache_root = Path(
+            os.environ.get(
+                "HOLOSOMA_STAGE4_INIT_PREFLIGHT_CACHE",
+                str(Path.home() / ".cache" / "holosoma" / "stage4_init_preflight"),
+            )
+        )
+        checkpoint_path = load_checkpoint(str(checkpoint), str(cache_root / f"rank_{rank}"))
+    else:
+        checkpoint_path = Path(str(checkpoint)).expanduser()
+    checkpoint_path = Path(os.path.abspath(os.fspath(checkpoint_path)))
+    try:
+        checkpoint_stat = os.lstat(checkpoint_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Stage-4 initializer is not a readable local file: {checkpoint_path}"
+        ) from exc
+    if not stat.S_ISREG(checkpoint_stat.st_mode) or stat.S_ISLNK(checkpoint_stat.st_mode):
+        raise ValueError(
+            f"Stage-4 initializer must be a non-symlink regular file: {checkpoint_path}"
+        )
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    per_rank_num_envs = _per_rank_env_count(tyro_config.training.num_envs, world_size)
+    effective_config = apply_observation_overrides(tyro_config)
+    effective_config = apply_perception_overrides(effective_config)
+    effective_config = dataclasses.replace(
+        effective_config,
+        training=dataclasses.replace(
+            effective_config.training,
+            num_envs=per_rank_num_envs,
+            stage4_init_checkpoint=str(checkpoint_path),
+        ),
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "holosoma.utils.policy_init_preflight",
+        "--checkpoint",
+        str(checkpoint_path),
+        "--load-mode",
+        "stage4_init",
+    ]
+    current_provenance = training_provenance_from_env()
+    if current_provenance is not None:
+        command.extend(
+            ["--current-provenance-json", canonical_training_provenance_json(current_provenance)]
+        )
+    completed = subprocess.run(
+        command,
+        input=json.dumps(effective_config.to_serializable_dict()),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown Stage-4 init preflight failure"
+        raise RuntimeError(detail)
+    return dataclasses.replace(
+        tyro_config,
+        training=dataclasses.replace(
+            tyro_config.training,
+            stage4_init_checkpoint=str(checkpoint_path),
         ),
     )
 
@@ -1618,13 +1716,23 @@ def _run_debug_mode_by_perception(
 def _configure_defm_materialization_mode(config: ExperimentConfig) -> str:
     """Bind lazy DeFM construction to the checkpoint operation that follows."""
 
-    has_resume = config.training.checkpoint is not None
-    has_policy_init = config.training.policy_init_checkpoint is not None
-    if has_resume and has_policy_init:
+    has_resume = getattr(config.training, "checkpoint", None) is not None
+    has_policy_init = getattr(config.training, "policy_init_checkpoint", None) is not None
+    has_stage4_init = getattr(config.training, "stage4_init_checkpoint", None) is not None
+    if sum((has_resume, has_policy_init, has_stage4_init)) > 1:
         raise ValueError(
-            "--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive."
+            "--training.checkpoint, --training.policy-init-checkpoint, and "
+            "--training.stage4-init-checkpoint are mutually exclusive."
         )
-    mode = "full_resume" if has_resume else "policy_init" if has_policy_init else "fresh"
+    mode = (
+        "full_resume"
+        if has_resume
+        else "policy_init"
+        if has_policy_init
+        else "stage4_init"
+        if has_stage4_init
+        else "fresh"
+    )
     # The serialized training config is authoritative. Do not permit an
     # ambient shell variable to silently choose a different initialization.
     return set_defm_materialization_mode(mode)
@@ -1651,6 +1759,10 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         if not training_context._policy_init_preflight_complete:
             raise RuntimeError(
                 "TrainingContext did not complete policy-init preflight before simulator startup."
+            )
+        if not training_context._stage4_init_preflight_complete:
+            raise RuntimeError(
+                "TrainingContext did not complete Stage-4 init preflight before simulator startup."
             )
         context_config = _effective_runtime_config(training_context.config)
         if context_config != tyro_config:
@@ -1682,6 +1794,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         # verified checkpoint path into the returned immutable config, so this
         # second fail-closed boundary cannot download a W&B artifact twice.
         tyro_config = _preflight_policy_init_before_sim(tyro_config)
+        tyro_config = _preflight_stage4_init_before_sim(tyro_config)
         # Default behavior - create and manage sim app ourselves
         simulation_app = init_sim_imports(tyro_config)
         auto_close = True
@@ -1965,11 +2078,18 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         algo.setup()
 
         algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
-        if (
-            tyro_config.training.checkpoint is not None
-            and tyro_config.training.policy_init_checkpoint is not None
-        ):
-            raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
+        if sum(
+            checkpoint is not None
+            for checkpoint in (
+                tyro_config.training.checkpoint,
+                tyro_config.training.policy_init_checkpoint,
+                tyro_config.training.stage4_init_checkpoint,
+            )
+        ) > 1:
+            raise ValueError(
+                "--training.checkpoint, --training.policy-init-checkpoint, and "
+                "--training.stage4-init-checkpoint are mutually exclusive."
+            )
         if tyro_config.training.checkpoint is not None:
             loaded_checkpoint = load_checkpoint(tyro_config.training.checkpoint, str(experiment_save_dir))
             tyro_config = dataclasses.replace(
@@ -1986,6 +2106,19 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 ),
             )
             algo.load_policy_init(loaded_checkpoint)
+        elif tyro_config.training.stage4_init_checkpoint is not None:
+            loaded_checkpoint = load_checkpoint(
+                tyro_config.training.stage4_init_checkpoint,
+                str(experiment_save_dir),
+            )
+            tyro_config = dataclasses.replace(
+                tyro_config,
+                training=dataclasses.replace(
+                    tyro_config.training,
+                    stage4_init_checkpoint=str(loaded_checkpoint),
+                ),
+            )
+            algo.load_stage4_init(loaded_checkpoint)
 
         # This is the controller's terminal startup handshake boundary.  It is
         # deliberately after real simulator/environment construction,
@@ -2067,6 +2200,7 @@ def main() -> None:
     _preflight_cross_rank_provenance_before_sim()
     _preflight_checkpoint_lineage_before_sim(tyro_cfg)
     tyro_cfg = _preflight_policy_init_before_sim(tyro_cfg)
+    tyro_cfg = _preflight_stage4_init_before_sim(tyro_cfg)
     tyro_cfg = _preflight_training_resume_before_sim(tyro_cfg)
     print(tyro_cfg.curriculum)
     train(tyro_cfg)

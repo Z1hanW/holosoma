@@ -4,11 +4,12 @@ export LC_ALL=C
 export PYTHONDONTWRITEBYTECODE=1
 
 # Legacy-named entrypoint for the complete scientific Python runtime overlay.
-# Package NumPy, OmegaConf, OmegaConf's optional attrs semantics, and every
-# active non-extra dependency into one immutable, content-addressed
-# site-packages tree. Heterogeneous nodes then execute the same AS runtime
-# without mutating their Conda environments. DeFM's forbidden network-download
-# branch is deliberately outside this profile.
+# Package NumPy, OmegaConf, OmegaConf's optional attrs semantics, ONNX,
+# ONNX Runtime, and every active non-extra dependency into one immutable,
+# content-addressed site-packages tree. Heterogeneous nodes then execute the
+# same AS training and checkpoint-export runtime without mutating their Conda
+# environments. DeFM's forbidden network-download branch is deliberately
+# outside this profile.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd -P)

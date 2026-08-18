@@ -53,9 +53,9 @@ fi
 
 # Lock camera alignment to far-tracking depth training defaults.
 CAMERA_BODY_NAME="torso_link"
-CAMERA_MOUNT_QUAT="[0.00644801,0.23350163,0.00644801,0.97231365]"
+CAMERA_MOUNT_QUAT="[0.0,0.40354529635239006,0.0,0.9149596678498247]"
 CAMERA_FRAME_QUAT="[-0.5,0.5,-0.5,0.5]"
-CAMERA_SENSOR_OFFSET="[0.01,0.01,0.44]"
+CAMERA_SENSOR_OFFSET="[0.0576235,0.01753,0.42987]"
 CAMERA_PITCH_DEG="0.0"
 
 # Deterministic camera behavior (no hidden auto-fix offsets/yaw hacks).

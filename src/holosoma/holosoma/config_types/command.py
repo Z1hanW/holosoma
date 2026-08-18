@@ -213,24 +213,132 @@ class MotionConfig:
     contact_aware_sparse_root_command_mode: Literal[
         "tracking_error",
         "t1_aligned_segment",
+        "rolling_reference_delta",
+        "precomputed_turn_then_forward",
     ] = "tracking_error"
     """Root command used by ``actor_obs_root_contact_aware``.
 
     ``tracking_error`` preserves the original robot-to-target root delta. ``t1_aligned_segment``
     uses a non-overlap motion segment command anchored at carry-window start ``t1``.
+    ``rolling_reference_delta`` recomputes the reference-to-reference displacement from the
+    current motion frame to ``contact_aware_sparse_root_segment_steps`` frames ahead on every
+    policy step, expressed in the current reference-root heading frame and without robot-state
+    feedback.
+    ``precomputed_turn_then_forward`` reads an immutable per-frame command from the motion NPZ;
+    each active row must contain either forward ``dx`` or ``dyaw``, never both, and is gated by
+    the same runtime pickup latch as the pure-RL deployment command.
+    """
+
+    zero_root_command_when_drop_active: Annotated[
+        bool,
+        Field(strict=True),
+    ] = False
+    """Zero the actor's three root-command dimensions while its effective drop button is active.
+
+    The default preserves historical checkpoint semantics. New runs may enable
+    this explicitly to enforce the mutually exclusive actor input contract
+    ``[root_x, root_y, root_yaw, drop] == [0, 0, 0, 1]`` during release.
     """
 
     contact_aware_sparse_root_segment_steps: Annotated[
         int,
         Field(strict=True, ge=1, le=MAX_CONTACT_AWARE_SEGMENT_STEPS),
     ] = 30
-    """Segment length, in motion frames, for ``contact_aware_sparse_root_command_mode='t1_aligned_segment'``."""
+    """Segment length or rolling lookahead, in motion frames, for reference-delta commands."""
 
     contact_aware_sparse_root_zero_yaw_threshold_deg: Annotated[
         float,
         Field(strict=True, ge=0.0, le=180.0, allow_inf_nan=False),
     ] = 0.0
     """Zero sparse yaw commands whose absolute value is at or below this threshold in degrees."""
+
+    hybrid_stage2_enabled: bool = False
+    """Enable the HIL-inspired parallel tracking/task environment contract.
+
+    Tracking environments keep the configured reference command. Task
+    environments receive zero root command until the runtime pickup latch is
+    set, then receive a deployment-faithful constant local-frame forward
+    command. Reward and termination terms use the same immutable environment
+    assignment.
+    """
+
+    hybrid_stage2_task_env_fraction: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.5
+    """Fraction of environments assigned to the stage-2 task objective."""
+
+    hybrid_stage2_forward_command_m: Annotated[
+        float,
+        Field(strict=True, gt=0.0, le=10.0, allow_inf_nan=False),
+    ] = 0.15
+    """Constant raw ``dx`` command exposed after the task environment lifts."""
+
+    hybrid_velocity_enabled: bool = False
+    """Enable the isolated velocity-conditioned tracking/task curriculum.
+
+    The actor command is always ``[vx, vy, yaw_rate]``. Tracking rows receive
+    the reference root velocity while task rows receive zero before the
+    runtime pickup latch and a constant forward velocity afterwards.
+    """
+
+    hybrid_velocity_command_frame: Literal["heading", "world"] = "heading"
+    """Coordinate frame for hybrid velocity commands and task rewards.
+
+    ``heading`` preserves the original behavior: reference XY velocity and the
+    task objective are expressed in the robot/pickup heading frame. ``world``
+    exposes the canonical per-frame world XY velocity and defines the fixed
+    task command along world +X.
+    """
+
+    hybrid_velocity_task_env_fraction_start: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.0
+    """Task-row fraction at the beginning of the hybrid curriculum."""
+
+    hybrid_velocity_task_env_fraction_end: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.5
+    """Task-row fraction after the hybrid curriculum ramp completes."""
+
+    hybrid_velocity_task_env_fraction_start_iter: Annotated[
+        int,
+        Field(strict=True, ge=0),
+    ] = 0
+    """First PPO iteration of the task-row fraction ramp."""
+
+    hybrid_velocity_task_env_fraction_end_iter: Annotated[
+        int,
+        Field(strict=True, ge=0),
+    ] = 5000
+    """PPO iteration at which the final task-row fraction is reached."""
+
+    hybrid_velocity_forward_command_mps: Annotated[
+        float,
+        Field(strict=True, gt=0.0, le=5.0, allow_inf_nan=False),
+    ] = 0.5
+    """Task-row forward command after pickup, in metres per second."""
+
+    hybrid_velocity_lift_height_m: Annotated[
+        float,
+        Field(strict=True, gt=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.10
+    """Object world-height increase that saturates task lift progress."""
+
+    pure_rl_policy_command_after_lift_enabled: bool = False
+    """Replace only the actor's sparse root command around the runtime lift latch.
+
+    This option does not alter rewards, terminations, motion tracking, or any
+    other observation term.
+    """
+
+    pure_rl_policy_forward_command_m: Annotated[
+        float,
+        Field(strict=True, gt=0.0, le=10.0, allow_inf_nan=False),
+    ] = 0.5
+    """Constant post-lift ``dx`` value in the actor's ``[dx, dy, dyaw]`` input."""
 
     uniform_t1_window_sampling_enabled: bool = False
     """Whether uniform timestep resets should density-boost a window around contact start ``t1``."""

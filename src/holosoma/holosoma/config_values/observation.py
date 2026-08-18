@@ -12,6 +12,12 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_videomimic,
     g1_29dof_wbt_observation_w_object_legacy,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317,
+    g1_29dof_wbt_observation_w_object_hybrid_stage2,
+    g1_29dof_wbt_observation_w_object_hybrid_velocity,
+    g1_29dof_wbt_observation_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_observation_w_object_policy_world_root_error,
+    g1_29dof_wbt_observation_w_object_policy_world_velocity,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
     g1_29dof_wbt_observation_w_object,
@@ -34,6 +40,20 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_teacher_linvel": g1_29dof_wbt_observation_w_object_teacher_linvel,
     "g1_29dof_wbt_w_object_legacy": g1_29dof_wbt_observation_w_object_legacy,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_critic317": (
+        g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317
+    ),
+    "g1_29dof_wbt_w_object_hybrid_stage2": g1_29dof_wbt_observation_w_object_hybrid_stage2,
+    "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_observation_w_object_hybrid_velocity,
+    "g1_29dof_wbt_w_object_hybrid_world_velocity": (
+        g1_29dof_wbt_observation_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_policy_world_velocity": (
+        g1_29dof_wbt_observation_w_object_policy_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_policy_world_root_error": (
+        g1_29dof_wbt_observation_w_object_policy_world_root_error
+    ),
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
 }

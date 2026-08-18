@@ -76,6 +76,15 @@ class TrainingConfig:
     policy_init_checkpoint: str | None = None
     """Path to checkpoint used only to initialize actor policy parameters before training from iteration 0."""
 
+    policy_init_actor_contract_migration: str | None = None
+    """Explicit audited actor-input semantic migration allowed for policy initialization."""
+
+    stage4_init_checkpoint: str | None = None
+    """Checkpoint used to initialize actor, critic, and their normalizers for a fresh Stage-4 lineage."""
+
+    stage4_init_contract_migration: str | None = None
+    """Explicit audited semantic migration allowed for Stage-4 actor/critic initialization."""
+
     # Logging settings
     project: str = "default_project"
     """Project name for logging. `logger.project` takes precedence if set."""

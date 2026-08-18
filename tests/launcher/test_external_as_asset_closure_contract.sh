@@ -8,11 +8,6 @@ LEGACY_GENERATOR_SHA=$(printf 'a%.0s' {1..64})
 TMP_DIR=$(mktemp -d)
 LOCAL_GATE_ROOT=""
 cleanup() {
-  if [[ -n "${LOCAL_GATE_ROOT}" \
-        && "${LOCAL_GATE_ROOT}" == "${REPO_ROOT}/data/ds_as_data/.external-as-contract-test-"* ]]; then
-    chmod -R u+w "${LOCAL_GATE_ROOT}" 2>/dev/null || true
-    rm -rf "${LOCAL_GATE_ROOT}"
-  fi
   chmod -R u+w "${TMP_DIR}" 2>/dev/null || true
   rm -rf "${TMP_DIR}"
 }
@@ -34,6 +29,16 @@ grep -F 'Effective AS single-slot directory changed after the all-node barrier' 
 grep -F 'Effective AS rank-shard source changed after the all-node barrier' \
   distill_as_perception.sh >/dev/null ||
   fail 'perception wrapper no longer binds its real rank materialization to the sealed digest'
+grep -F 'normalized_single_slot_dir=$(realpath -m -- "${AS_EXTERNAL_SINGLE_SLOT_DIR}")' \
+  batch_ne.sh >/dev/null ||
+  fail 'controller no longer requires the resolved external single-slot path to be canonical'
+grep -F 'expected_single_slot_suffix="/_single_slot_motion_bank/by-source/${AS_EXTERNAL_SINGLE_SLOT_VIEW_DIGEST}"' \
+  batch_ne.sh >/dev/null ||
+  fail 'controller no longer binds the external single-slot path suffix to its view digest'
+if grep -F '"${REMOTE_REPO_NORMALIZED}/data/"*"/_single_slot_motion_bank/by-source/' \
+    batch_ne.sh >/dev/null; then
+  fail 'controller still rejects signed repo assets after they resolve to an external immutable volume'
+fi
 
 # Keep the signed source-snapshot asset symlink contract intact.  The external
 # AS byte closure is additive: it must not weaken the existing exact-link
@@ -468,6 +473,7 @@ REVALIDATE_ENV=(
   HOLOSOMA_EXTERNAL_AS_MOTION_GENERATOR_TEACHER_SHA256="${LEGACY_GENERATOR_SHA}"
   HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR="${SINGLE_DIR}"
   HOLOSOMA_EXTERNAL_AS_WORLD_SIZE=1
+  PER_GPU_ENVS=1024
 )
 
 # Model the old self-authentication bypass: change a scientific rank-map field
@@ -648,11 +654,11 @@ grep -F 'Effective solid-AS source changed after the all-node barrier' \
   }
 
 # Exercise the real perception wrapper's post-materialization gate too.  Use a
-# private repo-local fixture (the wrapper intentionally rejects data outside
-# repo/data), precompute its exact single view, then supply one wrong sealed
-# rank digest.  The wrapper must pass the exact single source/view/dir checks
-# and reject the rank identity before delegating to the training launcher.
-LOCAL_GATE_ROOT="${REPO_ROOT}/data/ds_as_data/.external-as-contract-test-${BASHPID}"
+# private fixture outside repo/data, precompute its exact single view, then
+# supply one wrong sealed rank digest.  The wrapper must accept only the exact
+# sealed external solid/single paths, pass their source/view checks, and reject
+# the rank identity before delegating to the training launcher.
+LOCAL_GATE_ROOT="${TMP_DIR}/external-gate/fixture_bank"
 mkdir -p "${LOCAL_GATE_ROOT}"
 cp -a "${COMPLETE_REPO}/data/ds_as_data/fixture_bank/." "${LOCAL_GATE_ROOT}/"
 LOCAL_SINGLE_BASE="${LOCAL_GATE_ROOT}/_single_slot_motion_bank"
@@ -675,7 +681,7 @@ LOCAL_RANK_SOURCE=$("${PYTHON_BIN:-/home/ubuntu/.holosoma_deps/miniconda3/envs/h
   scripts/prepare_as_rank_shards.py \
   --motion-dir "${LOCAL_SINGLE_DIR}" \
   --object-map "${LOCAL_SINGLE_DIR}/_clip_object_urdf_map.json" \
-  --world-size 1 --source-digest-only)
+  --world-size 1 --environments-per-rank 1024 --source-digest-only)
 [[ "${LOCAL_SINGLE_SOURCE}" =~ ^[0-9a-f]{64}$ \
     && "${LOCAL_SINGLE_VIEW}" =~ ^[0-9a-f]{64}$ \
     && "${LOCAL_RANK_SOURCE}" =~ ^[0-9a-f]{64}$ ]] ||
@@ -700,7 +706,7 @@ env \
   OMOMO_OBJECT_MAP="${LOCAL_GATE_ROOT}/_clip_object_urdf_map.json" \
   OMOMO_EXPECTED_TOTAL=1 AS_CONTACT_AWARE=0 AS_CONTACT_AWARE_HISTORY=0 \
   AS_SINGLE_SLOT_MOTION_BASE="${LOCAL_SINGLE_BASE}" \
-  AS_RANK_LOCAL_SHARDS=1 NPROC=1 NNODES=1 CUDA_VISIBLE_DEVICES=0 \
+  AS_RANK_LOCAL_SHARDS=1 NPROC=1 NNODES=1 CUDA_VISIBLE_DEVICES=0 PER_GPU_ENVS=1024 \
   HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST="${LOCAL_SINGLE_SOURCE}" \
   HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST="${LOCAL_SINGLE_VIEW}" \
   HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST="${WRONG_RANK_SOURCE}" \

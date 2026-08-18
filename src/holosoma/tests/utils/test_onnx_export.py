@@ -17,7 +17,11 @@ from torch import nn
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
 from holosoma.agents.ppo.ppo import PPO
-from holosoma.utils.inference_helpers import attach_onnx_metadata, export_policy_as_onnx
+from holosoma.utils.inference_helpers import (
+    attach_onnx_metadata,
+    export_policy_as_onnx,
+    validate_exported_policy_onnx,
+)
 
 
 class ActorWrapper(nn.Module):
@@ -34,6 +38,21 @@ class ActorWrapper(nn.Module):
 class ActorWithPerceptionWrapper(nn.Module):
     def forward(self, actor_obs: torch.Tensor, depth_features: torch.Tensor) -> torch.Tensor:
         return actor_obs[:, :1] + depth_features[:, :1]
+
+
+class ValidationCopyTrackingWrapper(nn.Module):
+    validation_calls: list[tuple[int, str, bool]] = []
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(2, 1)
+        self.cached_nonleaf = self.linear(torch.ones(1, 2))
+
+    def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
+        type(self).validation_calls.append(
+            (id(self), actor_obs.device.type, self.training)
+        )
+        return self.linear(actor_obs)
 
 
 def test_export_policy_as_onnx():
@@ -136,6 +155,112 @@ def test_export_policy_as_onnx_preserves_custom_perception_input_name(tmp_path):
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
 
 
+def test_validate_exported_policy_onnx_checks_runtime_and_numerical_parity(tmp_path):
+    onnx_path = tmp_path / "validated.onnx"
+    wrapper = ActorWithPerceptionWrapper().eval()
+    examples = {
+        "actor_obs": torch.zeros(1, 3),
+        "depth_features": torch.zeros(1, 5),
+    }
+    export_policy_as_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+        perception_input_name="depth_features",
+    )
+    attach_onnx_metadata(str(onnx_path), {"iteration": 4})
+
+    report = validate_exported_policy_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+        perception_input_name="depth_features",
+    )
+
+    assert report["checker"] == "onnx.checker.check_model"
+    assert report["runtime"] == "onnxruntime_cpu"
+    assert report["pytorch_vs_ort"] is True
+    assert report["input_names"] == ["actor_obs", "depth_features"]
+    assert report["output_names"] == ["action"]
+    assert report["probe_rows"] == 6
+    assert report["rtol"] == 1.0e-3
+    assert report["atol"] == 1.0e-5
+
+
+def test_validate_exported_policy_onnx_accepts_bounded_float32_backend_drift(tmp_path):
+    onnx_path = tmp_path / "bounded-drift.onnx"
+    examples = {"actor_obs": torch.zeros(1, 2)}
+    exported = nn.Linear(2, 1, bias=False).eval()
+    live = nn.Linear(2, 1, bias=False).eval()
+    with torch.no_grad():
+        exported.weight.fill_(1.0)
+        live.weight.fill_(1.0005)
+    export_policy_as_onnx(
+        wrapper=exported,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+
+    report = validate_exported_policy_onnx(
+        wrapper=live,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+
+    assert report["pytorch_vs_ort"] is True
+    assert 1.0e-4 < report["max_rel_error"] < 1.0e-3
+
+
+def test_validate_exported_policy_onnx_rejects_different_live_actor(tmp_path):
+    onnx_path = tmp_path / "mismatch.onnx"
+    examples = {"actor_obs": torch.zeros(1, 2)}
+    exported = nn.Linear(2, 1, bias=False).eval()
+    live = nn.Linear(2, 1, bias=False).eval()
+    with torch.no_grad():
+        exported.weight.fill_(1.0)
+        live.weight.fill_(2.0)
+    export_policy_as_onnx(
+        wrapper=exported,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+
+    with pytest.raises(RuntimeError, match="failed PyTorch-vs-ORT action parity"):
+        validate_exported_policy_onnx(
+            wrapper=live,
+            onnx_file_path=str(onnx_path),
+            example_obs_dict=examples,
+        )
+
+
+def test_validate_exported_policy_onnx_uses_detached_eval_cpu_copy(tmp_path):
+    onnx_path = tmp_path / "cpu-copy.onnx"
+    wrapper = ValidationCopyTrackingWrapper().eval()
+    examples = {"actor_obs": torch.zeros(1, 2)}
+    export_policy_as_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+    wrapper.train()
+    cached_nonleaf = wrapper.cached_nonleaf
+    ValidationCopyTrackingWrapper.validation_calls.clear()
+
+    validate_exported_policy_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+
+    assert wrapper.training is True
+    assert wrapper.cached_nonleaf is cached_nonleaf
+    assert ValidationCopyTrackingWrapper.validation_calls
+    assert all(
+        module_id != id(wrapper) and device == "cpu" and training is False
+        for module_id, device, training in ValidationCopyTrackingWrapper.validation_calls
+    )
+
+
 def _write_identity_onnx(path: Path, metadata_entries: list[tuple[str, object]]) -> None:
     actor_obs = helper.make_tensor_value_info("actor_obs", TensorProto.FLOAT, [1, 1])
     action = helper.make_tensor_value_info("action", TensorProto.FLOAT, [1, 1])
@@ -226,6 +351,22 @@ def test_ppo_export_uses_pure_policy_even_with_motion_command(tmp_path):
         mock.patch.object(PPO, "actor_onnx_wrapper", new_callable=mock.PropertyMock) as actor_onnx_wrapper,
         mock.patch("holosoma.agents.ppo.ppo.export_policy_as_onnx") as export_policy,
         mock.patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
+        mock.patch(
+            "holosoma.agents.ppo.ppo.validate_exported_policy_onnx",
+            return_value={
+                "version": 1,
+                "checker": "onnx.checker.check_model",
+                "runtime": "onnxruntime_cpu",
+                "pytorch_vs_ort": True,
+                "input_names": ["actor_obs"],
+                "output_names": ["action"],
+                "probe_rows": 6,
+                "rtol": 1.0e-4,
+                "atol": 1.0e-5,
+                "max_abs_error": 0.0,
+                "max_rel_error": 0.0,
+            },
+        ),
         mock.patch("holosoma.agents.ppo.ppo.get_control_gains_from_config", return_value=([], [])),
         mock.patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value=None),
         mock.patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),

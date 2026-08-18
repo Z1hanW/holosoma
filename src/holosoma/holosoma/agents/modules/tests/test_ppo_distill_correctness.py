@@ -1656,6 +1656,9 @@ def test_evaluation_policy_mode_is_explicit_and_fail_closed(monkeypatch):
     monkeypatch.setenv("HOLOSOMA_EVAL_POLICY", "distill_label_teacher")
     assert PPO._requested_evaluation_policy_mode() == "distill_label_teacher"
 
+    monkeypatch.setenv("HOLOSOMA_EVAL_POLICY", "distill_label_teacher_bc_target")
+    assert PPO._requested_evaluation_policy_mode() == "distill_label_teacher_bc_target"
+
     monkeypatch.setenv("HOLOSOMA_EVAL_POLICY", "teacher")
     with pytest.raises(ValueError, match="ambiguous.*checkpoint_actor.*distill_label_teacher"):
         PPO._requested_evaluation_policy_mode()
@@ -1665,8 +1668,19 @@ def test_evaluation_policy_mode_is_explicit_and_fail_closed(monkeypatch):
         PPO._requested_evaluation_policy_mode()
 
 
-def test_teacher_evaluation_loads_source_authenticated_teacher(monkeypatch):
-    monkeypatch.setenv("HOLOSOMA_EVAL_POLICY", "distill_label_teacher")
+@pytest.mark.parametrize(
+    ("evaluation_mode", "expected_clip_enabled"),
+    [
+        ("distill_label_teacher", False),
+        ("distill_label_teacher_bc_target", True),
+    ],
+)
+def test_teacher_evaluation_loads_source_authenticated_teacher(
+    monkeypatch,
+    evaluation_mode,
+    expected_clip_enabled,
+):
+    monkeypatch.setenv("HOLOSOMA_EVAL_POLICY", evaluation_mode)
     teacher = nn.Linear(1, 1)
     teacher.train()
     normalizer = nn.Identity()
@@ -1681,6 +1695,8 @@ def test_teacher_evaluation_loads_source_authenticated_teacher(monkeypatch):
         teacher_obs_keys="actor_obs",
         strict_teacher_load=True,
         teacher_perception_obs_key=None,
+        clip_teacher_actions=True,
+        clip_actions_threshold=8.0,
     )
     ppo = object.__new__(PPO)
     ppo._evaluation_only = True
@@ -1703,10 +1719,14 @@ def test_teacher_evaluation_loads_source_authenticated_teacher(monkeypatch):
 
     ppo._prepare_selected_evaluation_policy()
 
-    assert ppo._evaluation_policy_mode == "distill_label_teacher"
+    assert ppo._evaluation_policy_mode == evaluation_mode
     assert ppo.distill_enabled is True
     assert ppo.dagger_enabled is False
     assert ppo.teacher_use_stochastic_actions is False
+    assert ppo._evaluation_teacher_action_clip_enabled is expected_clip_enabled
+    assert ppo._evaluation_teacher_action_clip_threshold == (
+        8.0 if expected_clip_enabled else None
+    )
     assert captured == {
         "path": "/tmp/authenticated-teacher.pt",
         "obs_keys": ["actor_obs"],
@@ -1783,3 +1803,33 @@ def test_teacher_evaluation_step_uses_teacher_observation_and_action_path():
     assert captured["stochastic"] is False
     assert torch.equal(result["actions"], torch.tensor([[42.0]]))
     assert torch.equal(captured["debug"]["actor_obs"], torch.tensor([[13.0, 14.0, 15.0]]))
+
+
+def test_teacher_bc_target_evaluation_clips_actions_before_env_step():
+    ppo = object.__new__(PPO)
+    ppo._evaluation_policy_mode = "distill_label_teacher_bc_target"
+    ppo._evaluation_teacher_action_clip_enabled = True
+    ppo._evaluation_teacher_action_clip_threshold = 8.0
+    ppo.actor_obs_keys = ["student_obs"]
+    ppo.teacher_obs_keys = ["teacher_obs"]
+    ppo.eval_callbacks = []
+    captured = {}
+    ppo._normalize_teacher_actor_obs = lambda value: value
+    ppo._select_teacher_actions = lambda *_args, **_kwargs: (
+        torch.tensor([[9.0, -10.0, 3.0]]),
+        None,
+    )
+    ppo._maybe_debug_eval_policy_io = lambda **kwargs: captured.update(debug=kwargs)
+    actor_state = {
+        "step": 0,
+        "obs": {
+            "student_obs": torch.tensor([[1.0, 2.0]]),
+            "teacher_obs": torch.tensor([[3.0, 4.0, 5.0]]),
+        },
+    }
+
+    result = ppo._pre_eval_env_step(actor_state)
+
+    expected = torch.tensor([[8.0, -8.0, 3.0]])
+    assert torch.equal(result["actions"], expected)
+    assert torch.equal(captured["debug"]["actions"], expected)

@@ -28,7 +28,8 @@ reject_launcher_owned_cli_overrides() {
       --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps|\
-      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg)
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg|\
+      --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active)
         echo "[ERROR] ${option} is launcher-owned and cannot be overridden in forwarded argv/EXTRA_ARGS." >&2
         echo "[ERROR] Select a supported launcher-owned mode before launch." >&2
         return 2
@@ -74,6 +75,16 @@ case "${EXPORT_ONNX,,}" in
   0|false|no|off) EXPORT_ONNX=False ;;
   *)
     echo "[ERROR] EXPORT_ONNX must be a boolean. Got: ${EXPORT_ONNX}" >&2
+    exit 2
+    ;;
+esac
+
+ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE:-False}
+case "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE,,}" in
+  1|true|yes|on) ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True ;;
+  0|false|no|off) ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False ;;
+  *)
+    echo "[ERROR] ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE must be a boolean. Got: ${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}" >&2
     exit 2
     ;;
 esac
@@ -1651,6 +1662,7 @@ fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
+echo "[INFO] zero_root_command_when_drop_active=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
 echo "[INFO] shoo7sr1_near03_debug=${SHOO7SR1_NEAR03_DEBUG}"
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   echo "[INFO] shoo7sr1_obs_variant=${SHOO7SR1_OBS_VARIANT}"
@@ -1954,6 +1966,7 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode="${CONTACT_AWARE_CARRY_WINDOW_MODE}" \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-alpha="${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" \
     --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps="${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active="${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-sampling-enabled="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-half-width-steps="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-density-boost="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \

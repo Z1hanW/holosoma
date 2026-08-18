@@ -14,6 +14,7 @@ import torch
 from holosoma.utils.policy_init_preflight import (
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
+    TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
     canonical_actor_contract,
     required_policy_init_terminal_target_from_env,
     validate_policy_init_checkpoint,
@@ -560,6 +561,103 @@ def test_policy_init_contact_aware_legacy_default_matches_explicit_tracking_erro
     }
 
     assert canonical_actor_contract(saved) == canonical_actor_contract(current)
+
+
+def _contact_aware_command_config(*, mode: str, drop_exclusive: bool) -> dict:
+    config = _config()
+    config["observation"]["groups"]["root"]["terms"]["target"]["func"] = (
+        "holosoma.managers.observation.terms.wbt:"
+        "sparse_target_root_trajectory_command_contact_aware"
+    )
+    config["command"] = {
+        "setup_terms": {
+            "motion_command": {
+                "params": {
+                    "motion_config": {
+                        "contact_aware_sparse_root_command_mode": mode,
+                        "zero_root_command_when_drop_active": drop_exclusive,
+                    }
+                }
+            }
+        }
+    }
+    return config
+
+
+def test_policy_init_accepts_explicit_tracking_to_precomputed_drop_exclusive_migration(
+    tmp_path,
+):
+    saved = _contact_aware_command_config(
+        mode="tracking_error",
+        drop_exclusive=False,
+    )
+    current = _contact_aware_command_config(
+        mode="precomputed_turn_then_forward",
+        drop_exclusive=True,
+    )
+    current["training"]["policy_init_actor_contract_migration"] = (
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION
+    )
+
+    validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_policy_init_migration_profile_requires_drop_exclusive_target(tmp_path):
+    saved = _contact_aware_command_config(
+        mode="tracking_error",
+        drop_exclusive=False,
+    )
+    current = _contact_aware_command_config(
+        mode="precomputed_turn_then_forward",
+        drop_exclusive=False,
+    )
+    current["training"]["policy_init_actor_contract_migration"] = (
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION
+    )
+
+    with pytest.raises(ValueError, match="target zero_root_command_when_drop_active"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_policy_init_migration_profile_rejects_additional_actor_drift(tmp_path):
+    saved = _contact_aware_command_config(
+        mode="tracking_error",
+        drop_exclusive=False,
+    )
+    current = _contact_aware_command_config(
+        mode="precomputed_turn_then_forward",
+        drop_exclusive=True,
+    )
+    current["training"]["policy_init_actor_contract_migration"] = (
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION
+    )
+    current["perception"]["camera_warp_normalize"] = False
+
+    with pytest.raises(ValueError, match="residual actor semantic drift"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_policy_init_migration_profile_rejects_stale_identical_contract(tmp_path):
+    saved = _contact_aware_command_config(
+        mode="tracking_error",
+        drop_exclusive=False,
+    )
+    current = copy.deepcopy(saved)
+    current["training"]["policy_init_actor_contract_migration"] = (
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION
+    )
+
+    with pytest.raises(ValueError, match="contracts are already identical"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_policy_init_rejects_unknown_actor_contract_migration_profile(tmp_path):
+    config = _config()
+    current = copy.deepcopy(config)
+    current["training"]["policy_init_actor_contract_migration"] = "unknown"
+
+    with pytest.raises(ValueError, match="Unsupported.*migration profile"):
+        validate_policy_init_checkpoint(_save(tmp_path, config), current)
 
 
 def test_policy_init_rejects_contact_aware_carry_window_drift(tmp_path):

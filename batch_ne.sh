@@ -193,12 +193,15 @@ Useful env:
   EXPECTED_CLIP_COUNT=<n>      expected clip count for custom bank copy
   KEEP_BACKUP=0                remove existing local copied bank instead of keeping .bak
   PREPARE_COPY_SCRIPT=cp_corl  use cp_corl for custom NFS_CORL_BANK, cp_ch for ch51
+  CONTACT_SIDECAR_MODE=full-sidecars  full-sidecars or explicit runtime-intervals
   PREPARE_DATA=0               install/verify immutable source snapshot only
   CORL_SOLID80_BANK_NAME=<name>  source bank name used by distill_as_button_solid.sh
   SOLID_CLIP_LIST=<file>      optional allowlist for distill_as_button_solid.sh
   SOLID_TARGET_BANK_NAME=<name> optional generated filtered-bank name
   DISTILL_AS_ENTRYPOINT=distill_as_button_solid.sh
                                repo-local AS wrapper selected from the launcher's explicit allowlist
+  DISTILL_EXPERIMENT_CONFIG=<name> optional explicit exp: config passed to the selected wrapper
+  DISTILL_REWARD_CONFIG=<name> optional explicit reward: config passed to the selected wrapper
   DISTILL_AS_FORMAL_FRESH=0|1  dual-button opt-in: reject every training-resume/policy-init alias
   ENABLE_OFFLINE_CONTACT_GUIDANCE=False  disable offline contact guidance reward
   RESUME_FROM_BOX=0            default; set 1 only with an actor-architecture-compatible box checkpoint
@@ -271,6 +274,9 @@ Useful env:
   STUDENT_MOTION_END_MODE=episodic  terminate/reset at every motion end; continuing requires explicit opt-in
   CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True|False  explicit override; resume otherwise infers checkpoint value
   EXPORT_ONNX=False           default off for large distributed runs; explicit True is honored
+  CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=<mode>  optional deployable mode: tracking_error or precomputed_turn_then_forward
+  ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False  set True for [0,0,0,1] actor input during drop
+  CAMERA_PITCH_DEG=<degrees>  optional finite residual pitch composed with the camera mount; unset preserves the wrapper default
   NUM_MINI_BATCHES=64
   NUM_LEARNING_EPOCHS=1
   HOLOSOMA_MINIBATCH_THROUGHPUT_CANARY=0  set 1 together with explicit NUM_MINI_BATCHES=16 for the algorithm-changing A/B
@@ -356,6 +362,8 @@ RUN_REPO=""
 DISTILL_AS_ENTRYPOINT=${DISTILL_AS_ENTRYPOINT:-distill_as_button_solid.sh}
 DISTILL_AS_ENTRYPOINT_PATH=""
 DISTILL_AS_ENTRYPOINT_SHA256=""
+DISTILL_EXPERIMENT_CONFIG=${DISTILL_EXPERIMENT_CONFIG:-}
+DISTILL_REWARD_CONFIG=${DISTILL_REWARD_CONFIG:-}
 DISTILL_AS_FORMAL_FRESH=${DISTILL_AS_FORMAL_FRESH:-0}
 if (( CONTROL_ONLY_ACTION == 0 )); then
   # This value becomes an archive member, a shell command, and durable launch
@@ -370,6 +378,16 @@ if (( CONTROL_ONLY_ACTION == 0 )); then
       exit 2
       ;;
   esac
+  for _distill_config_name in \
+      DISTILL_EXPERIMENT_CONFIG DISTILL_REWARD_CONFIG; do
+    _distill_config_value=${!_distill_config_name}
+    if [[ -n "${_distill_config_value}" \
+          && ! "${_distill_config_value}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+      echo "[ERROR] ${_distill_config_name} must be empty or one safe config name of 1-128 characters. Got: ${_distill_config_value@Q}" >&2
+      exit 2
+    fi
+  done
+  unset _distill_config_name _distill_config_value
   DUAL_BUTTON_STUDENT_ACTOR_INPUTS_CONTRACT="['actor_obs_root_contact_aware','actor_obs_pickup_button','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
   if [[ "${DISTILL_AS_ENTRYPOINT}" == distill_as_dual_button_solid.sh \
         && -n "${STUDENT_ACTOR_INPUTS+x}" \
@@ -535,6 +553,7 @@ SOLID_CLIP_LIST=${SOLID_CLIP_LIST:-}
 SOLID_TARGET_BANK_NAME=${SOLID_TARGET_BANK_NAME:-}
 SOLID_ALLOWED_OBJECT_CATEGORIES=${SOLID_ALLOWED_OBJECT_CATEGORIES:-}
 SOLID_CONTACT_EXPORT_NAME=${SOLID_CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
+CONTACT_SIDECAR_MODE=${CONTACT_SIDECAR_MODE:-full-sidecars}
 MOTION_GENERATOR_TEACHER_EXPECTED_SHA256=${MOTION_GENERATOR_TEACHER_EXPECTED_SHA256:-}
 REQUIRE_MOTION_GENERATOR_TEACHER_MATCH=${REQUIRE_MOTION_GENERATOR_TEACHER_MATCH:-1}
 ENABLE_OFFLINE_CONTACT_GUIDANCE=${ENABLE_OFFLINE_CONTACT_GUIDANCE:-}
@@ -1035,6 +1054,9 @@ ALLOW_NONDETERMINISTIC_RNG_RESUME=${ALLOW_NONDETERMINISTIC_RNG_RESUME:-0}
 ALLOW_FIXED_BC_EVAL_RESET_ON_RESUME=${ALLOW_FIXED_BC_EVAL_RESET_ON_RESUME:-0}
 ALLOW_RUNTIME_DRIFT_ON_RESUME=${ALLOW_RUNTIME_DRIFT_ON_RESUME:-0}
 EXPORT_ONNX=${EXPORT_ONNX:-False}
+CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
+ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE:-False}
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-}
 TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-wandb://zihanw22/carry-any/bcleb5oi/model_67000.pt}
 HOLOSOMA_SKIP_INITIAL_CHECKPOINT=${HOLOSOMA_SKIP_INITIAL_CHECKPOINT:-1}
 HOLOSOMA_SKIP_GRAD_FINITE_CHECK=${HOLOSOMA_SKIP_GRAD_FINITE_CHECK:-0}
@@ -1070,6 +1092,7 @@ HOLOSOMA_SUPERVISED_ACTOR_MICROBATCH=${HOLOSOMA_SUPERVISED_ACTOR_MICROBATCH:-16}
 HOLOSOMA_SUPERVISED_ACTOR_STREAM_BACKWARD=${HOLOSOMA_SUPERVISED_ACTOR_STREAM_BACKWARD:-1}
 HOLOSOMA_SKIP_CRITIC_WEIGHT_SYNC=${HOLOSOMA_SKIP_CRITIC_WEIGHT_SYNC:-0}
 TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=${TORCH_ALLOW_TF32_CUBLAS_OVERRIDE:-1}
+PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-}
 DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-https://wandb.ai/zihanw22/boxer/runs/d9m3z369-recovered}
 DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
 DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-${DEFAULT_BOX_RESUME_RUN}/files/${DEFAULT_BOX_RESUME_MODEL_FILE}}
@@ -1245,6 +1268,34 @@ if [[ "${_export_onnx_bool}" == "1" ]]; then
 else
   EXPORT_ONNX=False
 fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  _contact_aware_sparse_root_command_mode_norm="${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE,,}"
+  _contact_aware_sparse_root_command_mode_norm="${_contact_aware_sparse_root_command_mode_norm//-/_}"
+  case "${_contact_aware_sparse_root_command_mode_norm}" in
+    tracking_error|tracking|default|robot_tracking_error)
+      CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=tracking_error
+      ;;
+    precomputed_turn_then_forward)
+      CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
+      ;;
+    *)
+      echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error or precomputed_turn_then_forward. Got: ${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" >&2
+      exit 2
+      ;;
+  esac
+  unset _contact_aware_sparse_root_command_mode_norm
+fi
+_zero_root_command_when_drop_active_bool="$(
+  normalize_bool01 \
+    ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE \
+    "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
+)"
+if [[ "${_zero_root_command_when_drop_active_bool}" == "1" ]]; then
+  ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True
+else
+  ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False
+fi
+unset _zero_root_command_when_drop_active_bool
 _dagger_match_std_bool="$(normalize_bool01 DAGGER_MATCH_STD "${DAGGER_MATCH_STD}")"
 if [[ "${_dagger_match_std_bool}" == "1" ]]; then
   DAGGER_MATCH_STD=True
@@ -1483,6 +1534,23 @@ for reset_curriculum_prefix in START_AT_TIMESTEP_ZERO_PROB FREEZE_AT_TIMESTEP_ZE
 done
 unset reset_curriculum_prefix reset_curriculum_start_iter_name reset_curriculum_end_iter_name
 unset reset_curriculum_start_iter reset_curriculum_end_iter
+
+# An explicit residual camera pitch changes the policy input.  Validate it on
+# the controller before source snapshot construction or any remote action.
+if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
+  "${PYTHON_BIN}" - "${CAMERA_PITCH_DEG}" <<'PY'
+import math
+import sys
+
+raw = sys.argv[1]
+try:
+    value = float(raw)
+except (TypeError, ValueError, OverflowError) as exc:
+    raise SystemExit(f"[ERROR] CAMERA_PITCH_DEG must be numeric. Got: {raw}") from exc
+if not math.isfinite(value):
+    raise SystemExit(f"[ERROR] CAMERA_PITCH_DEG must be finite. Got: {raw}")
+PY
+fi
 
 # Validate all controller-owned floating-point experiment knobs before source
 # snapshot construction or any remote action.  Python's float parser handles
@@ -2092,6 +2160,14 @@ case "${PREPARE_COPY_SCRIPT}" in
     exit 2
     ;;
 esac
+case "${CONTACT_SIDECAR_MODE}" in
+  full-sidecars|runtime-intervals)
+    ;;
+  *)
+    echo "[ERROR] CONTACT_SIDECAR_MODE must be full-sidecars or runtime-intervals. Got: ${CONTACT_SIDECAR_MODE}" >&2
+    exit 2
+    ;;
+esac
 if [[ "${PREPARE_COPY_SCRIPT}" == "cp_ch" && ( -n "${NFS_CORL_BANK}" || -n "${LOCAL_BANK_NAME}" ) ]]; then
   echo "[ERROR] PREPARE_COPY_SCRIPT=cp_ch cannot prepare a custom NFS_CORL_BANK/LOCAL_BANK_NAME for training." >&2
   echo "[ERROR] Use PREPARE_COPY_SCRIPT=cp_corl so the installed and trained bank identities remain identical." >&2
@@ -2136,6 +2212,12 @@ fi
 if (( CONTROL_ONLY_ACTION == 0 )) \
     && ! [[ "${TORCH_ALLOW_TF32_CUBLAS_OVERRIDE}" =~ ^[01]$ ]]; then
   echo "[ERROR] TORCH_ALLOW_TF32_CUBLAS_OVERRIDE must be exactly 0 or 1 because PyTorch's pre-start c10 flag parser does not accept other boolean spellings. Got: ${TORCH_ALLOW_TF32_CUBLAS_OVERRIDE}" >&2
+  exit 2
+fi
+if (( CONTROL_ONLY_ACTION == 0 )) \
+    && [[ -n "${PYTORCH_CUDA_ALLOC_CONF}" ]] \
+    && [[ "${PYTORCH_CUDA_ALLOC_CONF}" != "expandable_segments:True" ]]; then
+  echo "[ERROR] PYTORCH_CUDA_ALLOC_CONF must be exactly expandable_segments:True when set. Got: ${PYTORCH_CUDA_ALLOC_CONF}" >&2
   exit 2
 fi
 if ! canonical_positive_uint_at_most "${NNODES}" "${MAX_TOTAL_GPUS}" \
@@ -2955,7 +3037,7 @@ aliases = {
     "trash": "bin", "trashcan": "bin", "trashcans": "bin", "basket": "bin", "baskets": "bin", "bins": "bin",
     "barrels": "barrel", "sphere": "ball", "spheres": "ball", "balls": "ball",
 }
-allowed_universe = {"box", "bin", "barrel", "ball"}
+allowed_universe = {"box", "bin", "barrel", "ball", "anything"}
 raw_text = sys.argv[1].strip() or '["box","bin","barrel","ball"]'
 try:
     raw = json.loads(raw_text)
@@ -3035,6 +3117,7 @@ RANK_SOURCE_DIGEST=$("$PYTHON_BIN_REMOTE" scripts/prepare_as_rank_shards.py \
   --motion-dir "$SINGLE_DIR" \
   --object-map "$SINGLE_MAP" \
   --world-size "$GLOBAL_WORLD_SIZE" \
+  --environments-per-rank "$ENVIRONMENTS_PER_RANK" \
   --source-digest-only)
 if [[ ! "$RANK_SOURCE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
   echo "[ERROR][$NODE_LABEL] Effective AS rank-shard source digest is malformed." >&2
@@ -3046,6 +3129,7 @@ PUBLISHED_RANK_ROOT=$("$PYTHON_BIN_REMOTE" scripts/prepare_as_rank_shards.py \
   --object-map "$SINGLE_MAP" \
   --output-root "$RANK_ROOT" \
   --world-size "$GLOBAL_WORLD_SIZE" \
+  --environments-per-rank "$ENVIRONMENTS_PER_RANK" \
   --expected-source-digest "$RANK_SOURCE_DIGEST")
 if [[ "$(realpath -e -- "$PUBLISHED_RANK_ROOT")" != "$(realpath -e -- "$RANK_ROOT")" ]]; then
   echo "[ERROR][$NODE_LABEL] Rank-shard publisher returned a different effective root." >&2
@@ -3054,6 +3138,7 @@ fi
 
 "$PYTHON_BIN_REMOTE" - \
   "$SINGLE_DIR" "$SINGLE_MAP" "$RANK_ROOT" "$GLOBAL_WORLD_SIZE" \
+  "$ENVIRONMENTS_PER_RANK" \
   "$SOLID_SOURCE_DIGEST" "$SOLID_SELECTED_CLIP_COUNT" "$RANK_SOURCE_DIGEST" \
   "$EXPECTED_MOTION_CLIP_ID" "$EXPECTED_MOTION_NPZ_SHA256" \
   "$EXPECTED_OBJECT_MAP_SHA256" "$EXPECTED_OBJECT_URDF_SHA256" \
@@ -3086,6 +3171,7 @@ from motion_generator_teacher import (
     single_map_raw,
     rank_root_raw,
     world_size_raw,
+    environments_per_rank_raw,
     solid_source_digest,
     selected_clip_count_raw,
     rank_source_digest,
@@ -3142,9 +3228,10 @@ single_dir = Path(single_dir_raw).resolve(strict=True)
 single_map = require_regular_readable(Path(single_map_raw), role="effective single-slot object map")
 rank_root = Path(rank_root_raw).resolve(strict=True)
 world_size = int(world_size_raw)
+environments_per_rank = int(environments_per_rank_raw)
 selected_clip_count = int(selected_clip_count_raw)
-if world_size < 1 or selected_clip_count < 1:
-    raise SystemExit("[ERROR] Effective AS closure has a non-positive world/clip count")
+if world_size < 1 or environments_per_rank < 1 or selected_clip_count < 1:
+    raise SystemExit("[ERROR] Effective AS closure has a non-positive world/env/clip count")
 if re.fullmatch(r"[0-9a-f]{64}", solid_source_digest) is None:
     raise SystemExit("[ERROR] Effective solid source digest is malformed")
 if re.fullmatch(r"[0-9a-f]{64}", rank_source_digest) is None:
@@ -3260,6 +3347,7 @@ validate_published_rank_shards(
     object_map=single_map,
     output_root=rank_root,
     world_size=world_size,
+    environments_per_rank=environments_per_rank,
     expected_source_digest=rank_source_digest,
 )
 
@@ -3313,6 +3401,7 @@ REMOTE
   cmd+="SOLID_CONTACT_EXPORT_NAME_RAW=$(quote "${SOLID_CONTACT_EXPORT_NAME}")"$'\n'
   cmd+="EXPECTED_SELECTED_CLIP_COUNT=$(quote "${OMOMO_EXPECTED_TOTAL}")"$'\n'
   cmd+="GLOBAL_WORLD_SIZE=$(quote "${TOTAL_GPUS}")"$'\n'
+  cmd+="ENVIRONMENTS_PER_RANK=$(quote "${PER_GPU_ENVS}")"$'\n'
   cmd+="EXPECTED_MOTION_CLIP_ID=$(quote "${REPLAY_AS_MOTION_CLIP_ID}")"$'\n'
   cmd+="EXPECTED_MOTION_NPZ_SHA256=$(quote "${REPLAY_AS_MOTION_NPZ_SHA256}")"$'\n'
   cmd+="EXPECTED_OBJECT_MAP_SHA256=$(quote "${REPLAY_AS_OBJECT_MAP_SHA256}")"$'\n'
@@ -3439,10 +3528,19 @@ preflight_external_as_asset_closures_parallel() {
       return 2
     fi
   done
+  local normalized_single_slot_dir expected_single_slot_suffix
+  normalized_single_slot_dir=$(realpath -m -- "${AS_EXTERNAL_SINGLE_SLOT_DIR}")
+  expected_single_slot_suffix="/_single_slot_motion_bank/by-source/${AS_EXTERNAL_SINGLE_SLOT_VIEW_DIGEST}"
+  # The signed repo asset may intentionally resolve to an external immutable
+  # data volume.  The remote verifier already resolves it strictly and hashes
+  # the complete closure; require that canonical absolute path and its
+  # digest-bound suffix instead of incorrectly requiring the pre-resolution
+  # repo symlink prefix.
   if [[ ! "${AS_EXTERNAL_MOTION_CLIP_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$ \
-        || "${AS_EXTERNAL_SINGLE_SLOT_DIR}" \
-          != "${REMOTE_REPO_NORMALIZED}/data/"*"/_single_slot_motion_bank/by-source/${AS_EXTERNAL_SINGLE_SLOT_VIEW_DIGEST}" ]]; then
-    echo "[ERROR] External AS closure record does not bind one canonical repo-local single-slot view." >&2
+        || "${AS_EXTERNAL_SINGLE_SLOT_DIR}" != /* \
+        || "${AS_EXTERNAL_SINGLE_SLOT_DIR}" != "${normalized_single_slot_dir}" \
+        || "${AS_EXTERNAL_SINGLE_SLOT_DIR}" != *"${expected_single_slot_suffix}" ]]; then
+    echo "[ERROR] External AS closure record does not bind one canonical absolute single-slot view." >&2
     return 2
   fi
   AS_EXTERNAL_CLOSURE_RECORD=${expected_record}
@@ -4671,6 +4769,7 @@ grep -Fx -- $(quote "${SOURCE_SNAPSHOT_ID}") .holosoma_snapshot/id >/dev/null
 export PYTHON_BIN=$(quote "${PYTHON_BIN}")
 export PYTHONHASHSEED=$(quote "${PYTHONHASHSEED}")
 export CUBLAS_WORKSPACE_CONFIG=$(quote "${CUBLAS_WORKSPACE_CONFIG}")
+export PYTORCH_CUDA_ALLOC_CONF=$(quote "${PYTORCH_CUDA_ALLOC_CONF}")
 export HOLOSOMA_PYTHON_PROFILE=hssim
 export PYTHONDONTWRITEBYTECODE=1
 source ./scripts/gpu_launch_defaults.sh
@@ -4692,6 +4791,8 @@ elif [[ $(quote "${PREPARE_COPY_SCRIPT}") == "cp_corl" ]]; then
   LOCAL_BANK_NAME=$(quote "${LOCAL_BANK_NAME:-${CORL_SOLID80_BANK_NAME}}") \
   EXPECTED_CLIP_COUNT=$(quote "${EXPECTED_CLIP_COUNT:-${OMOMO_EXPECTED_TOTAL}}") \
   KEEP_BACKUP=$(quote "${KEEP_BACKUP}") \
+  CONTACT_EXPORT_NAME=$(quote "${SOLID_CONTACT_EXPORT_NAME}") \
+  CONTACT_SIDECAR_MODE=$(quote "${CONTACT_SIDECAR_MODE}") \
   bash cp_corl.sh
 else
   PULL_CODE=0 CH_BANK_NAME=$(quote "${CH_BANK_NAME}") NFS_CH_BANK=$(quote "${NFS_CH_BANK}") bash cp_ch.sh
@@ -7499,6 +7600,7 @@ launch_node() {
   local launch_token="$3"
   local launch_epoch="$4"
   local command_sha_result_file="$5"
+  local runtime_scratch_root="${REMOTE_RUN_ROOT}/.runtime/scratch/${SESSION}/${node_rank}-${launch_token}"
   LAST_LAUNCHED_COMMAND_SHA=""
   ensure_local_source_snapshot
   local log_file="${RUN_REPO}/${LOG_DIR}/node_${node_rank}_${node}.log"
@@ -7626,16 +7728,23 @@ CONTACT_ROOT="\${SOURCE_BANK}/$(quote "${SOLID_CONTACT_EXPORT_NAME}")"
 test -d "\${SOURCE_BANK}"
 test -f "\${SOURCE_BANK}/_clip_object_urdf_map.json"
 test -d "\${CONTACT_ROOT}"
-CONTACT_VALIDATOR_RUNTIME_ARGS=()
-if [[ $(quote "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}") == True ]]; then
-  CONTACT_VALIDATOR_RUNTIME_ARGS+=(--runtime-prepend-compensation --runtime-prepend-duration-s 0.2)
+if [[ $(quote "${CONTACT_SIDECAR_MODE}") == runtime-intervals ]]; then
+  "\${PYTHON_BIN}" scripts/validate_runtime_contact_intervals.py \
+    --motion-dir "\${SOURCE_BANK}" \
+    --contact-root "\${CONTACT_ROOT}" \
+    --expected-total $(quote "${OMOMO_EXPECTED_TOTAL}") >/dev/null
+else
+  CONTACT_VALIDATOR_RUNTIME_ARGS=()
+  if [[ $(quote "${CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION}") == True ]]; then
+    CONTACT_VALIDATOR_RUNTIME_ARGS+=(--runtime-prepend-compensation --runtime-prepend-duration-s 0.2)
+  fi
+  "\${PYTHON_BIN}" scripts/validate_contact_sidecars.py \
+    --motion-dir "\${SOURCE_BANK}" \
+    --contact-root "\${CONTACT_ROOT}" \
+    --motion-end-mode $(quote "${STUDENT_MOTION_END_MODE}") \
+    "\${CONTACT_VALIDATOR_RUNTIME_ARGS[@]}" \
+    --expected-total $(quote "${OMOMO_EXPECTED_TOTAL}") >/dev/null
 fi
-"\${PYTHON_BIN}" scripts/validate_contact_sidecars.py \
-  --motion-dir "\${SOURCE_BANK}" \
-  --contact-root "\${CONTACT_ROOT}" \
-  --motion-end-mode $(quote "${STUDENT_MOTION_END_MODE}") \
-  "\${CONTACT_VALIDATOR_RUNTIME_ARGS[@]}" \
-  --expected-total $(quote "${OMOMO_EXPECTED_TOTAL}") >/dev/null
 echo '[INFO] node_data_sidecar_health_check_ok bank='"\${SOURCE_BANK}"' clips='$(quote "${OMOMO_EXPECTED_TOTAL}")
 " "${LAUNCH_PREFLIGHT_TIMEOUT_SECONDS}"
   fi
@@ -7783,6 +7892,9 @@ unset RESUME_STEP
 unset DISTILL_AS_ENTRYPOINT
 unset DISTILL_AS_ENTRYPOINT_PATH
 unset DISTILL_AS_ENTRYPOINT_SHA256
+unset DISTILL_EXPERIMENT_CONFIG
+unset DISTILL_REWARD_CONFIG
+unset EXP
 unset DISTILL_AS_FORMAL_FRESH
 # W&B 0.26 accepts a broad and evolving WANDB_*/_WANDB_* settings surface.
 # A stale WANDB_LAUNCH or sweep/service/private setting can override even
@@ -7847,6 +7959,10 @@ unset HOLOSOMA_ALLOW_LEGACY_UNPROVENANCED_RESUME
 unset HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD
 unset HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_TEACHER_LOAD
 unset HOLOSOMA_CLEAN_ROBOT_USD_CACHE
+unset HOLOSOMA_OBJECT_USD_CACHE_DIR
+unset HOLOSOMA_ROBOT_USD_CACHE_DIR
+unset HOLOSOMA_RUNTIME_SCRATCH_ROOT
+unset TMPDIR
 unset HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT
 unset HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT
 unset HOLOSOMA_PROVENANCE_TIMEOUT_SEC
@@ -7913,6 +8029,7 @@ unset CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS
 unset CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE
 unset CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS
 unset CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG
+unset ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE
 unset CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION
 unset STUDENT_ACTOR_INPUTS
 unset STUDENT_PROPRIO_HISTORY_LENGTH
@@ -8010,6 +8127,9 @@ unset ISAACSIM_KIT_ARGS
 unset CHECK_ONLY
 unset DRY_RUN
 unset LD_PRELOAD
+$(if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
+    printf 'export CAMERA_PITCH_DEG=%s\n' "$(quote "${CAMERA_PITCH_DEG}")"
+  fi)
 # This controller owns the fixed scientific reset/perception semantics.  Bind
 # both launcher aliases and the process-wide variables before AS provenance is
 # computed; node-local shell profiles must not select a different experiment.
@@ -8032,6 +8152,7 @@ export HOLOSOMA_ASSET_REPO=$(quote "${REMOTE_REPO}")
 export PYTHON_BIN=$(quote "${PYTHON_BIN}")
 export PYTHONHASHSEED=$(quote "${PYTHONHASHSEED}")
 export CUBLAS_WORKSPACE_CONFIG=$(quote "${CUBLAS_WORKSPACE_CONFIG}")
+export PYTORCH_CUDA_ALLOC_CONF=$(quote "${PYTORCH_CUDA_ALLOC_CONF}")
 export HOLOSOMA_PYTHON_PROFILE=hssim
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONNOUSERSITE=1
@@ -8041,6 +8162,10 @@ export HOLOSOMA_PYTHON_RUNTIME_MANIFEST_SHA256=$(quote "${PYTHON_RUNTIME_MANIFES
 export PYTHONPATH=$(quote "${runtime_pythonpath}")
 export PATH=$(quote "${runtime_path}")
 export LOGGER_BASE_DIR=$(quote "${LOGGER_BASE_DIR}")
+export HOLOSOMA_RUNTIME_SCRATCH_ROOT=$(quote "${runtime_scratch_root}")
+export TMPDIR=$(quote "${runtime_scratch_root}/tmp")
+export HOLOSOMA_OBJECT_USD_CACHE_DIR=$(quote "${runtime_scratch_root}/object_usd")
+export HOLOSOMA_ROBOT_USD_CACHE_DIR=$(quote "${runtime_scratch_root}/robot_usd")
 export OMNI_KIT_ACCEPT_EULA=$(quote "${OMNI_KIT_ACCEPT_EULA}")
 export ACCEPT_EULA=$(quote "${ACCEPT_EULA}")
 export NPROC=$(quote "${NPROC}")
@@ -8080,7 +8205,14 @@ export SOLID_CLIP_LIST=$(quote "${SOLID_CLIP_LIST}")
 export SOLID_TARGET_BANK_NAME=$(quote "${SOLID_TARGET_BANK_NAME}")
 export SOLID_ALLOWED_OBJECT_CATEGORIES=$(quote "${SOLID_ALLOWED_OBJECT_CATEGORIES}")
 export SOLID_CONTACT_EXPORT_NAME=$(quote "${SOLID_CONTACT_EXPORT_NAME}")
+export CONTACT_SIDECAR_MODE=$(quote "${CONTACT_SIDECAR_MODE}")
 export ENABLE_OFFLINE_CONTACT_GUIDANCE=$(quote "${ENABLE_OFFLINE_CONTACT_GUIDANCE}")
+export DISTILL_EXPERIMENT_CONFIG=$(quote "${DISTILL_EXPERIMENT_CONFIG}")
+export DISTILL_REWARD_CONFIG=$(quote "${DISTILL_REWARD_CONFIG}")
+# EXP is consumed by the wrapper before its final Tyro command is assembled.
+# Propagate the explicit experiment preset at that boundary so wrapper-side
+# reward/observation branches and the final exp selector cannot disagree.
+export EXP=$(quote "${DISTILL_EXPERIMENT_CONFIG}")
 export AS_SUCCESS133_FINAL0P5=1
 export AS_RANK_LOCAL_SHARDS=1
 export AS_SINGLE_SLOT_MOTION_BASE=$(quote "${AS_EXTERNAL_SINGLE_SLOT_DIR%/by-source/*}")
@@ -8240,6 +8372,7 @@ unset HOLOSOMA_SKIP_WANDB_CHECKPOINT_UPLOAD
 unset HOLOSOMA_SKIP_WANDB_FILE_UPLOAD
 export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=$(quote "${TORCH_ALLOW_TF32_CUBLAS_OVERRIDE}")
 export EXPORT_ONNX=$(quote "${EXPORT_ONNX}")
+export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=$(quote "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}")
 export WANDB_RESUME_SAME_RUN=$(quote "${WANDB_RESUME_SAME_RUN}")
 export OBJECT_GEOMETRY_MODE=mesh
 export HOLOSOMA_OBJECT_SPAWN_MODE=single_slot_multi_urdf
@@ -8252,6 +8385,9 @@ export PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=$(quote "${PHYSX_GPU_TOTAL_AGGRE
 export PHYSX_GPU_COLLISION_STACK_SIZE=$(quote "${PHYSX_GPU_COLLISION_STACK_SIZE}")
 EOF
 )
+  if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+    env_exports+=$'\n'"export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=$(quote "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}")"
+  fi
   if [[ -n "${STUDENT_ACTOR_INPUTS_WAS_SET}" ]]; then
     env_exports+=$'\n'"export STUDENT_ACTOR_INPUTS=$(quote "${STUDENT_ACTOR_INPUTS}")"
   fi
@@ -8319,6 +8455,41 @@ if ({
   exit 2
 fi
 ${env_exports}
+for runtime_dir in \
+    "\${HOLOSOMA_RUNTIME_SCRATCH_ROOT}" \
+    "\${TMPDIR}" \
+    "\${HOLOSOMA_OBJECT_USD_CACHE_DIR}" \
+    "\${HOLOSOMA_ROBOT_USD_CACHE_DIR}"; do
+  if [[ -e "\${runtime_dir}" || -L "\${runtime_dir}" ]]; then
+    if [[ ! -d "\${runtime_dir}" || -L "\${runtime_dir}" ]]; then
+      echo "[ERROR][${node}] Runtime scratch path is not a real directory: \${runtime_dir}" >&2
+      exit 2
+    fi
+  else
+    mkdir -p -- "\${runtime_dir}"
+  fi
+  chmod 0700 -- "\${runtime_dir}"
+done
+runtime_scratch_actual=\$(realpath -e -- "\${HOLOSOMA_RUNTIME_SCRATCH_ROOT}")
+if [[ "\${runtime_scratch_actual}" != "\${HOLOSOMA_RUNTIME_SCRATCH_ROOT}" ]]; then
+  echo "[ERROR][${node}] Runtime scratch path is not canonical: actual=\${runtime_scratch_actual} expected=\${HOLOSOMA_RUNTIME_SCRATCH_ROOT}" >&2
+  exit 2
+fi
+runtime_scratch_available_kib=\$(df -Pk -- "\${HOLOSOMA_RUNTIME_SCRATCH_ROOT}" | awk 'NR == 2 { print \$4 }')
+if [[ ! "\${runtime_scratch_available_kib}" =~ ^[0-9]+$ \
+      || "\${runtime_scratch_available_kib}" -lt 4194304 ]]; then
+  echo "[ERROR][${node}] Runtime scratch requires at least 4 GiB free: path=\${HOLOSOMA_RUNTIME_SCRATCH_ROOT} available_kib=\${runtime_scratch_available_kib}" >&2
+  exit 2
+fi
+for runtime_probe_root in \
+    "\${TMPDIR}" \
+    "\${HOLOSOMA_OBJECT_USD_CACHE_DIR}" \
+    "\${HOLOSOMA_ROBOT_USD_CACHE_DIR}"; do
+  runtime_probe=\$(mktemp "\${runtime_probe_root}/.holosoma-runtime-write-probe.XXXXXX")
+  rm -f -- "\${runtime_probe}"
+done
+echo "[INFO][${node}] runtime_scratch_verified=\${HOLOSOMA_RUNTIME_SCRATCH_ROOT} available_kib=\${runtime_scratch_available_kib} tmpdir=\${TMPDIR} object_usd=\${HOLOSOMA_OBJECT_USD_CACHE_DIR} robot_usd=\${HOLOSOMA_ROBOT_USD_CACHE_DIR}"
+unset runtime_dir runtime_probe_root runtime_probe runtime_scratch_actual runtime_scratch_available_kib
 case "\${DISTILL_AS_ENTRYPOINT}" in
   distill_as_button_solid.sh|distill_as_dual_button_solid.sh)
     ;;
@@ -8682,6 +8853,7 @@ if [[ -n "\${FRESH_WANDB_RUN_ID}" ]]; then
   echo "[INFO][${node}] wandb_fresh_prebound_replay=\${WANDB_ENTITY}/carry-any/\${FRESH_WANDB_RUN_ID} mode=\${WANDB_RESUME_MODE}"
 fi
 echo "[INFO][${node}] actor_hidden_dims=\${STUDENT_ACTOR_HIDDEN_DIMS}"
+echo "[INFO][${node}] camera_pitch_deg=\${CAMERA_PITCH_DEG-<wrapper-default>}"
 echo "[INFO][${node}] num_mini_batches=\${NUM_MINI_BATCHES}"
 echo "[INFO][${node}] num_learning_epochs=\${NUM_LEARNING_EPOCHS}"
 echo "[INFO][${node}] ppo_minibatch_throughput canary=\${HOLOSOMA_MINIBATCH_THROUGHPUT_CANARY} source=snapshot:PPOConfig.num_steps_per_env snapshot_id=\${HOLOSOMA_SOURCE_SNAPSHOT_ID} num_steps_per_env=${PPO_NUM_STEPS_PER_ENV} rank_local_rollout_samples=${PPO_RANK_LOCAL_ROLLOUT_SAMPLES} global_rollout_samples=${PPO_GLOBAL_ROLLOUT_SAMPLES} rank_local_samples_per_minibatch_update=${PPO_RANK_LOCAL_SAMPLES_PER_MINIBATCH_UPDATE} global_samples_per_minibatch_update=${PPO_GLOBAL_SAMPLES_PER_MINIBATCH_UPDATE} minibatch_update_rounds_per_iteration=${PPO_MINIBATCH_UPDATE_ROUNDS_PER_ITERATION}"
@@ -8797,6 +8969,9 @@ printf 'HOLOSOMA_STARTUP_READY token=%s launch_epoch=%s source_snapshot=%s phase
 # after real env/algo/checkpoint setup and a main-process-group barrier.
 export PRINT_TRAIN_CMD=1
 TRAIN_EXTRA_ARGS=(--logger.entity="\${WANDB_ENTITY}")
+if [[ -n "\${DISTILL_REWARD_CONFIG}" ]]; then
+  TRAIN_EXTRA_ARGS+=("reward:\${DISTILL_REWARD_CONFIG}")
+fi
 if [[ -n "\${RESUME_WANDB_RUN_ID}" ]]; then
   TRAIN_EXTRA_ARGS+=(--logger.id="\${RESUME_WANDB_RUN_ID}" --logger.resume="\${WANDB_RESUME_MODE}")
 elif [[ -n "\${FRESH_WANDB_RUN_ID}" ]]; then
@@ -8950,8 +9125,9 @@ generator_teacher_expected = required_env(
 )
 single_dir = Path(required_env("HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR")).resolve(strict=True)
 world_size = int(required_env("HOLOSOMA_EXTERNAL_AS_WORLD_SIZE"))
-if world_size < 1:
-    raise SystemExit("[ERROR] External AS world size is not positive before entrypoint")
+environments_per_rank = int(required_env("PER_GPU_ENVS"))
+if world_size < 1 or environments_per_rank < 1:
+    raise SystemExit("[ERROR] External AS world size or per-rank environment count is not positive before entrypoint")
 if selected_clip_count_expected < 1:
     raise SystemExit("[ERROR] External AS selected clip count is not positive before entrypoint")
 if single_dir.name != single_view_expected or single_dir.parent.name != "by-source":
@@ -9182,6 +9358,7 @@ rank_source_actual = compute_rank_shard_source_digest(
     motion_dir=single_dir,
     object_map=single_map,
     world_size=world_size,
+    environments_per_rank=environments_per_rank,
 )
 if rank_source_actual != rank_source_expected:
     raise SystemExit(
@@ -9194,6 +9371,7 @@ validate_published_rank_shards(
     object_map=single_map,
     output_root=rank_root,
     world_size=world_size,
+    environments_per_rank=environments_per_rank,
     expected_source_digest=rank_source_expected,
 )
 print(

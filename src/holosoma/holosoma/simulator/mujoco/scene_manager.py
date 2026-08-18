@@ -795,6 +795,12 @@ class MujocoSceneManager:
     @staticmethod
     def _configure_urdf_meshdir(spec: mujoco.MjSpec, urdf_path: Path) -> None:
         mesh_files = [Path(str(mesh.file)) for mesh in spec.meshes if str(getattr(mesh, "file", "")).strip()]
+        if spec.assets and all(str(mesh_file) in spec.assets for mesh_file in mesh_files):
+            # VFS-backed assets must not inherit the source URDF meshdir:
+            # MuJoCo 3.4 otherwise prepends that directory before consulting
+            # the attached, prefix-renamed in-memory asset key.
+            spec.compiler.meshdir = ""
+            return
         meshdir_candidates = [urdf_path.parent, urdf_path.parent / "meshes"]
         for candidate in meshdir_candidates:
             if not candidate.is_dir():
@@ -818,9 +824,6 @@ class MujocoSceneManager:
 
     @classmethod
     def _load_urdf_spec(cls, urdf_path: Path, *, load_visual_meshes: bool = False) -> mujoco.MjSpec:
-        if not load_visual_meshes:
-            return mujoco.MjSpec.from_file(str(urdf_path))
-
         root = ET.parse(urdf_path).getroot()
         mujoco_elem = root.find("mujoco")
         if mujoco_elem is None:
@@ -830,7 +833,35 @@ class MujocoSceneManager:
         if compiler_elem is None:
             compiler_elem = ET.SubElement(mujoco_elem, "compiler")
 
-        compiler_elem.set("discardvisual", "false")
+        if load_visual_meshes:
+            compiler_elem.set("discardvisual", "false")
+
+        # MjSpec.from_file() in MuJoCo 3.4 does not dispatch ``.urdf`` files
+        # through the URDF decoder.  Loading the XML text works, but loses the
+        # source-directory context used to resolve mesh filenames.  Pin every
+        # relative mesh to the authenticated URDF location before parsing.
+        resolved_mesh_assets: dict[str, Path] = {}
+        for mesh_tag in root.findall(".//mesh"):
+            filename = str(mesh_tag.get("filename") or "").strip()
+            if not filename:
+                continue
+            mesh_path = Path(filename).expanduser()
+            if not mesh_path.is_absolute():
+                mesh_path = (urdf_path.parent / mesh_path).resolve()
+            asset_name = mesh_path.name
+            previous_path = resolved_mesh_assets.get(asset_name)
+            if previous_path is not None and previous_path != mesh_path:
+                raise ValueError(
+                    f"URDF '{urdf_path}' contains distinct mesh paths with the same basename "
+                    f"'{asset_name}': '{previous_path}' and '{mesh_path}'"
+                )
+            if not mesh_path.is_file():
+                raise FileNotFoundError(
+                    f"URDF '{urdf_path}' references missing mesh asset '{mesh_path}'"
+                )
+            resolved_mesh_assets[asset_name] = mesh_path
+            mesh_tag.set("filename", str(mesh_path))
+
         meshdir_raw = str(compiler_elem.get("meshdir", "") or "").strip()
         mesh_names = {
             Path(str(mesh_tag.get("filename") or "")).name
@@ -854,7 +885,22 @@ class MujocoSceneManager:
             fallback_meshdir = meshdir_candidates[0] if meshdir_candidates else urdf_path.parent
             compiler_elem.set("meshdir", str(fallback_meshdir.resolve()))
 
-        return mujoco.MjSpec.from_string(ET.tostring(root, encoding="unicode"))
+        spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="unicode"))
+
+        # The MuJoCo 3.4 URDF decoder normalizes every mesh filename to its
+        # basename, even when the input filename is absolute.  MjSpec then
+        # loses the source directory again when this spec is attached to the
+        # composed robot/object world.  Supplying VFS assets by that basename
+        # keeps the exact authenticated bytes bound to the composed scene.
+        for asset_name, mesh_path in resolved_mesh_assets.items():
+            mesh_bytes = mesh_path.read_bytes()
+            previous_bytes = spec.assets.get(asset_name)
+            if previous_bytes is not None and previous_bytes != mesh_bytes:
+                raise ValueError(
+                    f"URDF '{urdf_path}' produced conflicting in-memory mesh asset '{asset_name}'"
+                )
+            spec.assets[asset_name] = mesh_bytes
+        return spec
 
     @staticmethod
     def _find_spec_body(spec: mujoco.MjSpec, body_name: str) -> mujoco.MjSpec.Body:
@@ -1241,7 +1287,10 @@ class MujocoSceneManager:
 
         for tendon_idx, reference_tendon in enumerate(reference_spec.tendons):
             tendon = robot_spec.add_tendon(
-                name=reference_tendon.name or None,
+                # MuJoCo 3.4 requires string-valued spec fields here; unlike
+                # older bindings it rejects ``None`` even for optional,
+                # unnamed tendon attributes.
+                name=reference_tendon.name or "",
                 stiffness=_scalar_or_seq_or_none(reference_tendon.stiffness),
                 springlength=_seq_or_none(reference_tendon.springlength),
                 damping=_scalar_or_seq_or_none(reference_tendon.damping),
@@ -1256,12 +1305,14 @@ class MujocoSceneManager:
                 margin=float(reference_tendon.margin),
                 solref_limit=_seq_or_none(reference_tendon.solref_limit),
                 solimp_limit=_seq_or_none(reference_tendon.solimp_limit),
-                material=reference_tendon.material or None,
+                material=reference_tendon.material or "",
                 width=float(reference_tendon.width),
                 rgba=_seq_or_none(reference_tendon.rgba),
                 group=int(reference_tendon.group),
-                userdata=_seq_or_none(reference_tendon.userdata),
-                info=reference_tendon.info or None,
+                # An empty vector is the valid unset value in MuJoCo 3.4;
+                # passing None is rejected by the pybind setter.
+                userdata=np.asarray(reference_tendon.userdata, dtype=np.float64).tolist(),
+                info=reference_tendon.info or "",
             )
 
             for wrap in reference_tendon.path:
@@ -3423,5 +3474,43 @@ class MujocoSceneManager:
         mujoco.MjModel
             Compiled MuJoCo model ready for simulation.
         """
-        logger.info("Compiling world model using MjSpec")
-        return self.world_spec.compile()
+        rebound_mesh_count = 0
+        asset_keys = tuple(str(name) for name in self.world_spec.assets)
+        for mesh in self.world_spec.meshes:
+            mesh_file = str(mesh.file)
+            if not mesh_file or mesh_file in self.world_spec.assets:
+                continue
+            basename = Path(mesh_file).name
+            candidates = [
+                asset_key
+                for asset_key in asset_keys
+                if Path(asset_key).name == basename or asset_key.endswith(f"_{basename}")
+            ]
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"MuJoCo mesh '{mesh_file}' ambiguously matches in-memory assets {candidates}"
+                )
+            if len(candidates) == 1:
+                mesh.file = candidates[0]
+                rebound_mesh_count += 1
+
+        logger.info(
+            "Compiling world model using MjSpec ({} mesh spec(s), {} in-memory asset(s), meshdir={!r})",
+            len(self.world_spec.meshes),
+            len(self.world_spec.assets),
+            str(self.world_spec.compiler.meshdir),
+        )
+        if rebound_mesh_count:
+            logger.info(
+                "Rebound {} attached MuJoCo mesh filename(s) to their prefixed in-memory assets",
+                rebound_mesh_count,
+            )
+        try:
+            return self.world_spec.compile()
+        except ValueError:
+            logger.error(
+                "World compile mesh diagnostics: files={} asset_keys={}",
+                [str(mesh.file) for mesh in self.world_spec.meshes],
+                sorted(str(name) for name in self.world_spec.assets),
+            )
+            raise

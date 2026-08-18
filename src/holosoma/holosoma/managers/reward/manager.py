@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from typing import Any
 
 import torch
@@ -216,10 +217,10 @@ class RewardManager:
         env_ids : torch.Tensor or None, optional
             Environment IDs to reset. If ``None``, reset all environments.
         include_all : bool, default=True
-            Whether to also snapshot full-batch ``episode_all`` and
-            ``raw_episode_all`` statistics.  Sparse rollout consumers set this
-            to ``False`` so a subset reset only reads and normalizes completed
-            rows.  The default preserves the historical Direct/FastSAC output.
+            Whether to also snapshot full-batch ``*_all`` statistics. Sparse
+            rollout consumers set this to ``False`` so a subset reset only
+            reads and normalizes completed rows. The default preserves the
+            historical Direct/FastSAC output.
 
         Returns
         -------
@@ -231,7 +232,14 @@ class RewardManager:
                     "episode_all": {term_name: tensor_per_all_envs},
                     "raw_episode": {...},
                     "raw_episode_all": {...},
+                    "episode_rate": {...},
+                    "raw_episode_mean": {...},
                 }
+
+            ``episode`` and ``raw_episode`` retain their historical fixed
+            maximum-horizon normalization. ``episode_rate`` divides the
+            weighted, dt-scaled return by actual alive time, while
+            ``raw_episode_mean`` divides the raw sum by actual alive steps.
         """
         if not isinstance(include_all, bool):
             raise TypeError("include_all must be a boolean.")
@@ -241,6 +249,8 @@ class RewardManager:
             "episode_all": {},
             "raw_episode": {},
             "raw_episode_all": {},
+            "episode_rate": {},
+            "raw_episode_mean": {},
         }
 
         # Resolve environment ids to operate on
@@ -272,6 +282,37 @@ class RewardManager:
                 snapshot.div_(self.env.max_episode_length_s)
             return snapshot
 
+        pending_episode_lengths = getattr(self.env, "_pending_episode_lengths", None)
+        if pending_episode_lengths is None:
+            raise RuntimeError(
+                "Actual-duration reward reporting requires _pending_episode_lengths on the environment."
+            )
+
+        dt = float(getattr(self.env, "dt", 0.0))
+        if not math.isfinite(dt) or dt <= 0.0:
+            raise RuntimeError(f"Actual-duration reward reporting requires a finite positive env.dt, got {dt}.")
+
+        def _selected_episode_steps() -> torch.Tensor:
+            if env_ids_tensor is None:
+                return pending_episode_lengths.detach()
+            return pending_episode_lengths.detach()[env_ids_slice]
+
+        def _normalize_by_steps(
+            tensor: torch.Tensor,
+            steps: torch.Tensor,
+            *,
+            seconds: bool,
+        ) -> torch.Tensor:
+            denominator = steps.to(dtype=tensor.dtype)
+            if seconds:
+                denominator = denominator * dt
+            valid = denominator > 0
+            safe_denominator = torch.where(valid, denominator, torch.ones_like(denominator))
+            normalized = tensor / safe_denominator
+            return normalized.masked_fill(~valid, 0.0)
+
+        selected_steps = _selected_episode_steps()
+
         # Populate scaled reward statistics
         for term_name in self._term_names:
             episode_sum = self._episode_sums[term_name]
@@ -284,6 +325,16 @@ class RewardManager:
                     extras["episode"][f"rew_{term_name}"] = _clone(rew_all[env_ids_slice])
             else:
                 extras["episode"][f"rew_{term_name}"] = _selected_normalized_snapshot(episode_sum)
+            selected_sum = (
+                episode_sum.detach().clone()
+                if env_ids_tensor is None
+                else episode_sum.detach()[env_ids_slice]
+            )
+            extras["episode_rate"][f"rew_{term_name}"] = _normalize_by_steps(
+                selected_sum,
+                selected_steps,
+                seconds=True,
+            )
 
             # Reset episodic sums for the completed environments
             episode_sum[env_ids_slice] = 0.0
@@ -302,6 +353,16 @@ class RewardManager:
                 extras["raw_episode"][f"raw_rew_{term_name}"] = _selected_normalized_snapshot(
                     raw_episode_sum
                 )
+            selected_raw_sum = (
+                raw_episode_sum.detach().clone()
+                if env_ids_tensor is None
+                else raw_episode_sum.detach()[env_ids_slice]
+            )
+            extras["raw_episode_mean"][f"raw_rew_{term_name}"] = _normalize_by_steps(
+                selected_raw_sum,
+                selected_steps,
+                seconds=False,
+            )
 
             raw_episode_sum[env_ids_slice] = 0.0
 

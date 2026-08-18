@@ -420,6 +420,8 @@ def _clock_only_command() -> _ClockOnlyMotionCommand:
     command._runtime_default_pose_prepend_step = torch.tensor([0, 2, 0], dtype=torch.long)
     command._disable_clip_end_reset = False
     command.use_adaptive_timesteps_sampler = False
+    command._manual_forward_after_lift_enabled = False
+    command._manual_forward_heading_lock_enabled = False
     command._env = SimpleNamespace(step_timing=None, episode_length_buf=torch.ones(3, dtype=torch.long))
     command._test_root_pos = torch.zeros(3, 3)
     command._test_root_quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]]).repeat(3, 1)

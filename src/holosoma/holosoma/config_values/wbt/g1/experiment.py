@@ -513,6 +513,155 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_hybrid_stage2 = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_hybrid_stage2",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hybrid_stage2,
+    observation=observation.g1_29dof_wbt_observation_w_object_hybrid_stage2,
+    reward=reward.g1_29dof_wbt_reward_w_object_hybrid_stage2,
+    termination=termination.g1_29dof_wbt_termination_hybrid_stage2,
+)
+
+g1_29dof_wbt_w_object_hybrid_velocity = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_hybrid_velocity",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hybrid_velocity,
+    observation=observation.g1_29dof_wbt_observation_w_object_hybrid_velocity,
+    reward=reward.g1_29dof_wbt_reward_w_object_hybrid_velocity,
+    termination=termination.g1_29dof_wbt_termination_hybrid_velocity,
+)
+
+
+def _policy_command_module_dict(command_group: str) -> PPOModuleDictConfig:
+    return replace(
+        _w_object_distill_sparse_root_cmd_module_dict,
+        actor=replace(
+            _w_object_distill_sparse_root_cmd_module_dict.actor,
+            input_dim=[
+                command_group,
+                "actor_obs_drop_button",
+                "actor_obs_proprio_with_actions_no_linvel",
+            ],
+        ),
+    )
+
+
+_pure_rl_critic317_inputs = [
+    "critic_obs",
+    "critic_actions",
+    "actor_obs_root_contact_aware",
+    "actor_obs_drop_button",
+]
+
+_pure_rl_critic317_base_module_dict = _policy_command_module_dict(
+    "actor_obs_root_contact_aware"
+)
+_pure_rl_critic317_module_dict = replace(
+    _pure_rl_critic317_base_module_dict,
+    critic=replace(
+        _pure_rl_critic317_base_module_dict.critic,
+        input_dim=_pure_rl_critic317_inputs,
+        layer_config=replace(
+            _pure_rl_critic317_base_module_dict.critic.layer_config,
+            module_input_name=tuple(_pure_rl_critic317_inputs),
+        ),
+    ),
+)
+
+
+g1_29dof_wbt_w_object_policy_world_velocity = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_policy_world_velocity",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_policy_world_velocity,
+    reward=reward.g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact,
+    termination=termination.g1_29dof_wbt_termination_generalist,
+    algo=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo.config,
+            module_dict=_policy_command_module_dict("actor_obs_world_velocity_command"),
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_policy_world_root_error = replace(
+    g1_29dof_wbt_w_object_policy_world_velocity,
+    training=replace(
+        g1_29dof_wbt_w_object_policy_world_velocity.training,
+        name="g1_29dof_wbt_w_object_policy_world_root_error",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_policy_world_root_error,
+    algo=replace(
+        g1_29dof_wbt_w_object_policy_world_velocity.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_policy_world_velocity.algo.config,
+            module_dict=_policy_command_module_dict("actor_obs_world_root_error_command"),
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_hybrid_world_velocity = replace(
+    g1_29dof_wbt_w_object_hybrid_velocity,
+    training=replace(
+        g1_29dof_wbt_w_object_hybrid_velocity.training,
+        name="g1_29dof_wbt_w_object_hybrid_world_velocity",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hybrid_world_velocity,
+    observation=observation.g1_29dof_wbt_observation_w_object_hybrid_world_velocity,
+    algo=replace(
+        g1_29dof_wbt_w_object_hybrid_velocity.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_hybrid_velocity.algo.config,
+            module_dict=_policy_command_module_dict(
+                "actor_obs_hybrid_world_velocity_command"
+            ),
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift",
+    ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_pure_rl,
+    command=command.g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift,
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    reward=reward.g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact,
+    termination=termination.g1_29dof_wbt_termination_generalist,
+)
+
+# 317D critic = critic_obs(284) + previous action(29) + the exact same-step
+# actor root command(3) + drop button(1).  This intentionally omits the
+# redundant one-frame critic_proprio_history(64) used by older 381D runs.
+g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317 = replace(
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift,
+    training=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift.training,
+        name="g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317",
+    ),
+    observation=(
+        observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317
+    ),
+    algo=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift.algo.config,
+            module_dict=_pure_rl_critic317_module_dict,
+        ),
+    ),
+)
+
 g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel = replace(
     g1_29dof_wbt_w_object_distill_sparse_root_cmd,
     training=replace(
@@ -663,6 +812,12 @@ __all__ = [
     "g1_29dof_wbt_w_object_generalist_teacher_linvel",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_w_object_hybrid_velocity",
+    "g1_29dof_wbt_w_object_hybrid_world_velocity",
+    "g1_29dof_wbt_w_object_policy_world_velocity",
+    "g1_29dof_wbt_w_object_policy_world_root_error",
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift",
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",

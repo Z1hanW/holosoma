@@ -902,6 +902,7 @@ def _rank_shard_source_digest_from_specs(
     object_map: Path,
     specs: list[ClipSpec],
     world_size: int,
+    environments_per_rank: int | None = None,
     source_guard: _SourceScanGuard | None = None,
 ) -> str:
     if source_guard is None:
@@ -949,6 +950,8 @@ def _rank_shard_source_digest_from_specs(
         "motion_files": [_source_file_record(spec.npz_path) for spec in specs],
         "object_assets": [_source_file_record(path) for path in asset_paths],
     }
+    if environments_per_rank is not None:
+        identity["environments_per_rank"] = environments_per_rank
     source_guard.verify()
     return _sha256_json(identity)
 
@@ -958,9 +961,14 @@ def compute_rank_shard_source_digest(
     motion_dir: Path,
     object_map: Path,
     world_size: int,
+    environments_per_rank: int | None = None,
 ) -> str:
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
+    if environments_per_rank is not None and environments_per_rank < 1:
+        raise ValueError(
+            f"environments_per_rank must be >= 1, got {environments_per_rank}"
+        )
     source_guard = _SourceScanGuard()
     _, specs = _active_clip_specs(
         motion_dir=motion_dir,
@@ -972,6 +980,7 @@ def compute_rank_shard_source_digest(
         object_map=object_map,
         specs=specs,
         world_size=world_size,
+        environments_per_rank=environments_per_rank,
         source_guard=source_guard,
     )
 
@@ -1008,14 +1017,107 @@ def _assignment_units(specs: list[ClipSpec], world_size: int) -> tuple[str, list
     return "clip", units
 
 
-def _assign_units(units: list[AssignmentUnit], world_size: int) -> tuple[list[list[AssignmentUnit]], bool]:
+def _compatible_rank_clip_capacities(
+    *,
+    clip_count: int,
+    world_size: int,
+    environments_per_rank: int,
+) -> list[int]:
+    """Choose the most balanced exact clip counts that divide the env count."""
+
+    if clip_count < world_size:
+        raise ValueError(
+            "Environment-compatible exact rank shards require at least one source clip "
+            f"per rank, got clips={clip_count}, world_size={world_size}."
+        )
+    divisors = [
+        value
+        for value in range(1, min(clip_count, environments_per_rank) + 1)
+        if environments_per_rank % value == 0
+    ]
+    target = clip_count / float(world_size)
+    # sum -> (imbalance cost, capacities). The capacity tuple is also the
+    # deterministic tie-breaker.
+    states: dict[int, tuple[float, tuple[int, ...]]] = {0: (0.0, ())}
+    for rank in range(world_size):
+        next_states: dict[int, tuple[float, tuple[int, ...]]] = {}
+        ranks_left = world_size - rank - 1
+        for partial_sum, (cost, capacities) in states.items():
+            for capacity in divisors:
+                new_sum = partial_sum + capacity
+                if new_sum + ranks_left > clip_count:
+                    continue
+                if new_sum + ranks_left * divisors[-1] < clip_count:
+                    continue
+                candidate = (
+                    cost + (capacity - target) ** 2,
+                    capacities + (capacity,),
+                )
+                current = next_states.get(new_sum)
+                if current is None or candidate < current:
+                    next_states[new_sum] = candidate
+        states = next_states
+    if clip_count not in states:
+        raise ValueError(
+            "Could not partition the clip bank into non-empty per-rank clip counts "
+            "that all divide environments_per_rank: "
+            f"clips={clip_count}, world_size={world_size}, "
+            f"environments_per_rank={environments_per_rank}, divisors={divisors}."
+        )
+    # Put larger shards first so rank numbering is stable and obvious in the
+    # manifest; the assignment itself still balances measured unit weights.
+    return sorted(states[clip_count][1], reverse=True)
+
+
+def _assign_units(
+    units: list[AssignmentUnit],
+    world_size: int,
+    environments_per_rank: int | None = None,
+) -> tuple[list[list[AssignmentUnit]], bool]:
     assignments: list[list[AssignmentUnit]] = [[] for _ in range(world_size)]
     rank_weights = [0.0 for _ in range(world_size)]
 
+    rank_capacities: list[int] | None = None
+    if environments_per_rank is not None:
+        if any(len(unit.clip_ids) != 1 for unit in units):
+            raise ValueError(
+                "Environment-compatible rank sharding currently requires one clip per "
+                "assignment unit; split shared object-closure units or omit "
+                "--environments-per-rank."
+            )
+        if len(units) >= world_size:
+            rank_capacities = _compatible_rank_clip_capacities(
+                clip_count=len(units),
+                world_size=world_size,
+                environments_per_rank=environments_per_rank,
+            )
+
     for unit in sorted(units, key=lambda item: (-item.weight, item.unit_id)):
-        rank = min(range(world_size), key=lambda idx: (rank_weights[idx], len(assignments[idx]), idx))
+        candidates = (
+            range(world_size)
+            if rank_capacities is None
+            else (
+                rank
+                for rank in range(world_size)
+                if len(assignments[rank]) < rank_capacities[rank]
+            )
+        )
+        try:
+            rank = min(
+                candidates,
+                key=lambda idx: (rank_weights[idx], len(assignments[idx]), idx),
+            )
+        except ValueError as exc:
+            raise RuntimeError("Rank-shard capacity plan was exhausted early.") from exc
         assignments[rank].append(unit)
         rank_weights[rank] += unit.weight
+
+    if rank_capacities is not None:
+        actual = [len(rank_units) for rank_units in assignments]
+        if actual != rank_capacities:
+            raise RuntimeError(
+                f"Rank-shard capacity plan mismatch: expected={rank_capacities}, actual={actual}."
+            )
 
     duplicated = False
     empty_ranks = [rank for rank, rank_units in enumerate(assignments) if not rank_units]
@@ -1374,6 +1476,7 @@ def _build_rank_shard_plan(
     object_map: Path,
     output_root: Path,
     world_size: int,
+    environments_per_rank: int | None,
     source_digest: str,
     metadata: dict[str, Any],
     specs: list[ClipSpec],
@@ -1381,7 +1484,11 @@ def _build_rank_shard_plan(
     """Build the only accepted v3 rank tree directly from source inputs."""
 
     strategy, units = _assignment_units(specs, world_size)
-    assignments, duplicated = _assign_units(units, world_size)
+    assignments, duplicated = _assign_units(
+        units,
+        world_size,
+        environments_per_rank=environments_per_rank,
+    )
     clip_cover_counts = {spec.clip_id: 0 for spec in specs}
     for rank_units in assignments:
         for clip_id in {
@@ -1435,6 +1542,12 @@ def _build_rank_shard_plan(
         "clip_cover_counts": clip_cover_counts,
         "shards": [rank_file.shard_record for rank_file in rank_files],
     }
+    if environments_per_rank is not None:
+        manifest["environments_per_rank"] = environments_per_rank
+        manifest["rank_clip_counts_divide_environments_per_rank"] = all(
+            environments_per_rank % int(rank_file.shard_record["clip_count"]) == 0
+            for rank_file in rank_files
+        )
     return RankShardPlan(manifest=manifest, rank_files=rank_files)
 
 
@@ -1580,6 +1693,7 @@ def validate_published_rank_shards(
     object_map: Path,
     output_root: Path,
     world_size: int,
+    environments_per_rank: int | None = None,
     expected_source_digest: str | None = None,
 ) -> dict[str, Any]:
     """Read-only validation of one published tree against its source plan.
@@ -1591,6 +1705,10 @@ def validate_published_rank_shards(
 
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
+    if environments_per_rank is not None and environments_per_rank < 1:
+        raise ValueError(
+            f"environments_per_rank must be >= 1, got {environments_per_rank}"
+        )
     motion_dir = motion_dir.expanduser().resolve(strict=True)
     object_map = object_map.expanduser().resolve(strict=True)
     output_root = _lexical_absolute_path(output_root)
@@ -1613,6 +1731,7 @@ def validate_published_rank_shards(
         object_map=object_map,
         specs=specs,
         world_size=world_size,
+        environments_per_rank=environments_per_rank,
         source_guard=source_guard,
     )
     if expected_source_digest is not None and source_digest != expected_source_digest:
@@ -1625,6 +1744,7 @@ def validate_published_rank_shards(
         object_map=object_map,
         output_root=output_root,
         world_size=world_size,
+        environments_per_rank=environments_per_rank,
         source_digest=source_digest,
         metadata=metadata,
         specs=specs,
@@ -1648,10 +1768,15 @@ def prepare_rank_shards(
     object_map: Path,
     output_root: Path,
     world_size: int,
+    environments_per_rank: int | None = None,
     expected_source_digest: str | None = None,
 ) -> dict[str, Any]:
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
+    if environments_per_rank is not None and environments_per_rank < 1:
+        raise ValueError(
+            f"environments_per_rank must be >= 1, got {environments_per_rank}"
+        )
     motion_dir = motion_dir.expanduser().resolve(strict=True)
     object_map = object_map.expanduser().resolve(strict=True)
     output_root = _lexical_absolute_path(output_root)
@@ -1671,6 +1796,7 @@ def prepare_rank_shards(
             object_map=object_map,
             specs=specs,
             world_size=world_size,
+            environments_per_rank=environments_per_rank,
             source_guard=source_guard,
         )
         if expected_source_digest is not None and source_digest != expected_source_digest:
@@ -1683,6 +1809,7 @@ def prepare_rank_shards(
             object_map=object_map,
             output_root=output_root,
             world_size=world_size,
+            environments_per_rank=environments_per_rank,
             source_digest=source_digest,
             metadata=metadata,
             specs=specs,
@@ -1775,6 +1902,7 @@ def prepare_rank_shards(
                 object_map=object_map,
                 specs=final_specs,
                 world_size=world_size,
+                environments_per_rank=environments_per_rank,
                 source_guard=final_source_guard,
             )
             if final_source_digest != source_digest:
@@ -1822,6 +1950,14 @@ def main() -> int:
     parser.add_argument("--object-map", required=True, type=Path)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--world-size", required=True, type=int)
+    parser.add_argument(
+        "--environments-per-rank",
+        type=int,
+        help=(
+            "Require every rank-local clip count to divide this environment count, "
+            "so fixed env-to-clip assignment can represent uniform clip mass exactly."
+        ),
+    )
     parser.add_argument("--source-digest-only", action="store_true")
     parser.add_argument("--expected-source-digest")
     args = parser.parse_args()
@@ -1835,6 +1971,7 @@ def main() -> int:
                     motion_dir=motion_dir,
                     object_map=object_map,
                     world_size=args.world_size,
+                    environments_per_rank=args.environments_per_rank,
                 )
             )
         except Exception as exc:
@@ -1854,6 +1991,7 @@ def main() -> int:
             object_map=object_map,
             output_root=output_root,
             world_size=args.world_size,
+            environments_per_rank=args.environments_per_rank,
             expected_source_digest=args.expected_source_digest,
         )
     except Exception as exc:
