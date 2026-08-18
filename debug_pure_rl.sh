@@ -275,7 +275,7 @@ fi
 
 echo "[INFO] pure_rl=1 distill_enabled=False"
 echo "[INFO] motion_transitions prepend=False/0.0s append=False/0.0s"
-echo "[INFO] randomization=g1_29dof_wbt_w_object_pure_rl actuator_control_chain_dr=enabled"
+echo "[INFO] randomization=g1_29dof_wbt_w_object_pure_rl joint_bias_pd_gain_dr=enabled torque_rfi=disabled action_delay=disabled"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] reference_root=${REFERENCE_ROOT}"

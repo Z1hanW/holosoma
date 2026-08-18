@@ -19,7 +19,7 @@ def test_pure_rl_disables_default_pose_motion_transitions() -> None:
     assert motion.contact_interval_runtime_prepend_compensation is False
 
 
-def test_pure_rl_restores_actuator_and_control_chain_randomization() -> None:
+def test_pure_rl_uses_joint_bias_and_pd_gain_dr_without_rfi_or_delay() -> None:
     config = g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift
     assert config.randomization is g1_29dof_wbt_randomization_w_object_pure_rl
     assert (
@@ -33,19 +33,19 @@ def test_pure_rl_restores_actuator_and_control_chain_randomization() -> None:
         "enabled": True,
     }
     assert terms["setup_torque_rfi"].params == {
-        "enabled": True,
-        "rfi_lim": 0.01,
+        "enabled": False,
+        "rfi_lim": 0.0,
     }
     assert terms["actuator_randomizer_state"].params == {
         "kp_range": [0.9, 1.1],
         "kd_range": [0.9, 1.1],
-        "rfi_lim_range": [0.0, 1.0],
+        "rfi_lim_range": [1.0, 1.0],
         "enable_pd_gain": True,
-        "enable_rfi_lim": True,
+        "enable_rfi_lim": False,
     }
     assert terms["setup_action_delay_buffers"].params == {
-        "ctrl_delay_step_range": [0, 1],
-        "enabled": True,
+        "ctrl_delay_step_range": [0, 0],
+        "enabled": False,
     }
 
 

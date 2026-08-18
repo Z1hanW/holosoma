@@ -221,10 +221,10 @@ distill_setup_terms = {
 }
 
 # Pure PPO keeps the current state, rigid-body, object, and perception
-# randomization contract, but restores the actuator/control-chain uncertainty
-# used by the original tracking policy. Keep this separate from
-# ``distill_setup_terms``: label-based student training intentionally uses the
-# nominal control chain, while pure RL can learn under the perturbations.
+# randomization contract.  Its actuator-side DR is limited to joint-zero bias
+# and PD-gain scaling; torque RFI and random action delay remain disabled.
+# Keep this separate from ``distill_setup_terms`` because label-based student
+# training intentionally uses a fully nominal calibration/control chain.
 pure_rl_control_chain_setup_terms = {
     **distill_setup_terms,
     "setup_dof_pos_bias": RandomizationTermCfg(
@@ -237,8 +237,8 @@ pure_rl_control_chain_setup_terms = {
     "setup_torque_rfi": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:setup_torque_rfi",
         params={
-            "enabled": True,
-            "rfi_lim": 0.01,
+            "enabled": False,
+            "rfi_lim": 0.0,
         },
     ),
     "actuator_randomizer_state": RandomizationTermCfg(
@@ -248,15 +248,15 @@ pure_rl_control_chain_setup_terms = {
             "kp_range": [0.9, 1.1],
             "kd_range": [0.9, 1.1],
             "enable_pd_gain": True,
-            "rfi_lim_range": [0.0, 1.0],
-            "enable_rfi_lim": True,
+            "rfi_lim_range": [1.0, 1.0],
+            "enable_rfi_lim": False,
         },
     ),
     "setup_action_delay_buffers": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:setup_action_delay_buffers",
         params={
-            "ctrl_delay_step_range": [0, 1],
-            "enabled": True,
+            "ctrl_delay_step_range": [0, 0],
+            "enabled": False,
         },
     ),
 }
