@@ -29,6 +29,70 @@ def _make_stub_ppo(
     return ppo
 
 
+def _make_entropy_schedule(
+    *,
+    start: float = 0.005,
+    end: float | None = 0.0,
+    start_iteration: int = 2000,
+    end_iteration: int = 10000,
+) -> PPO:
+    ppo = object.__new__(PPO)
+    ppo.config = SimpleNamespace(
+        entropy_coef=start,
+        entropy_coef_end=end,
+        entropy_coef_decay_start_iteration=start_iteration,
+        entropy_coef_decay_end_iteration=end_iteration,
+    )
+    (
+        ppo._entropy_coef_start,
+        ppo._entropy_coef_end,
+        ppo._entropy_coef_decay_start_iteration,
+        ppo._entropy_coef_decay_end_iteration,
+    ) = ppo._validate_entropy_coefficient_schedule()
+    ppo.current_learning_iteration = 0
+    return ppo
+
+
+def test_entropy_coefficient_holds_then_decays_to_zero_by_absolute_iteration():
+    ppo = _make_entropy_schedule()
+
+    expected = {
+        0: 0.005,
+        1999: 0.005,
+        2000: 0.005,
+        6000: 0.0025,
+        9999: 0.005 / 8000,
+        10000: 0.0,
+        60000: 0.0,
+    }
+    for iteration, coefficient in expected.items():
+        assert ppo._operational_entropy_coefficient(iteration) == pytest.approx(coefficient)
+
+
+def test_entropy_coefficient_fixed_mode_preserves_legacy_behavior():
+    ppo = _make_entropy_schedule(end=None)
+
+    assert ppo._operational_entropy_coefficient(0) == pytest.approx(0.005)
+    assert ppo._operational_entropy_coefficient(60000) == pytest.approx(0.005)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("entropy_coef", -0.1, "finite non-negative real"),
+        ("entropy_coef_end", float("nan"), "finite non-negative real"),
+        ("entropy_coef_decay_start_iteration", True, "non-negative integer"),
+        ("entropy_coef_decay_end_iteration", 2000, "requires.*end_iteration"),
+    ],
+)
+def test_entropy_coefficient_schedule_rejects_invalid_contract(field, value, match):
+    ppo = _make_entropy_schedule()
+    setattr(ppo.config, field, value)
+
+    with pytest.raises(ValueError, match=match):
+        ppo._validate_entropy_coefficient_schedule()
+
+
 def test_adjust_ppo_dagger_coeff_uses_linear_ramp_by_default():
     ppo = _make_stub_ppo(ppo_start_epoch=0, dagger_end_epoch=3000, ppo_target_coeff=0.3, step_epochs=0)
 

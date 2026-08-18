@@ -7,6 +7,9 @@ from holosoma.config_values.wbt.g1.reward import (
     g1_29dof_wbt_reward,
     g1_29dof_wbt_reward_w_object_generalist,
     g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance,
+    g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact,
+    g1_29dof_wbt_reward_w_object_hybrid_stage2,
+    g1_29dof_wbt_reward_w_object_hybrid_velocity,
     g1_29dof_wbt_reward_w_object_r2s_contact_guidance,
     g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance,
     g1_29dof_wbt_reward_w_object_extend,
@@ -27,6 +30,11 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_generalist_offline_contact_guidance": (
         g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance
     ),
+    "g1_29dof_wbt_w_object_generalist_tracking_no_contact": (
+        g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact
+    ),
+    "g1_29dof_wbt_w_object_hybrid_stage2": g1_29dof_wbt_reward_w_object_hybrid_stage2,
+    "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_reward_w_object_hybrid_velocity,
     "g1_29dof_wbt_w_object_r2s_contact_guidance": g1_29dof_wbt_reward_w_object_r2s_contact_guidance,
     "g1_29dof_wbt_w_object_r2s_rollout_reference_guidance": g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance,
     "g1_29dof_wbt_w_object_extend": g1_29dof_wbt_reward_w_object_extend,

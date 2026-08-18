@@ -731,6 +731,8 @@ class BaseTask:
         self.extras["episode_all"] = reward_extras.get("episode_all", {})
         self.extras["raw_episode"] = reward_extras.get("raw_episode", {})
         self.extras["raw_episode_all"] = reward_extras.get("raw_episode_all", {})
+        self.extras["episode_rate"] = reward_extras.get("episode_rate", {})
+        self.extras["raw_episode_mean"] = reward_extras.get("raw_episode_mean", {})
 
         self.extras["time_outs"] = self.time_out_buf
 
@@ -823,7 +825,14 @@ class BaseTask:
         # overwrite them.  ``time_outs`` remains a live view of the buffer that
         # ``_check_termination`` refreshes in-place on every step.
         self.extras.pop("final_observations", None)
-        for key in ("episode", "episode_all", "raw_episode", "raw_episode_all"):
+        for key in (
+            "episode",
+            "episode_all",
+            "raw_episode",
+            "raw_episode_all",
+            "episode_rate",
+            "raw_episode_mean",
+        ):
             self.extras[key] = {}
         self.extras["time_outs"] = self.time_out_buf
         timing = self.step_timing if self.step_timing.enabled else None
@@ -1284,6 +1293,35 @@ class BaseTask:
             if term_result is None:
                 continue
             self.log_dict[f"termination/{term_name}_frac"] = term_result.float().mean().detach()
+            component_getter = getattr(
+                self.termination_manager,
+                "get_last_term_components",
+                None,
+            )
+            if not callable(component_getter):
+                continue
+            components = component_getter(term_name)
+            if not components:
+                continue
+            component_names = tuple(components)
+            component_masks = []
+            for component_name in component_names:
+                component = components[component_name]
+                if component.dtype != torch.bool or component.shape != term_result.shape:
+                    raise TypeError(
+                        f"Termination component '{term_name}/{component_name}' must be a bool tensor "
+                        f"with shape {tuple(term_result.shape)}, got {component.dtype} {tuple(component.shape)}."
+                    )
+                component_masks.append(component)
+            component_fractions = torch.stack(component_masks, dim=0).float().mean(dim=1).detach()
+            for component_name, component_fraction in zip(
+                component_names,
+                component_fractions,
+                strict=True,
+            ):
+                self.log_dict[
+                    f"termination/{term_name}/condition_{component_name}_frac"
+                ] = component_fraction
 
     def _pre_compute_observations_callback(
         self,

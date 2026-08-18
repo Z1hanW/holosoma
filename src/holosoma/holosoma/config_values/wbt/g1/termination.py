@@ -14,9 +14,9 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
             func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
             params={
                 # robot tracking
-                "bad_ref_pos_threshold": 0.5,
-                "bad_ref_ori_threshold": 0.8,
-                "bad_motion_body_pos_threshold": 0.25,
+                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_ori_threshold": 1.1,
+                "bad_motion_body_pos_threshold": 0.5,
                 # NOTE: body_names_to_track is shared with command_manager
                 "body_names_to_track": [
                     "pelvis",
@@ -42,8 +42,8 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
                 ],
                 # object tracking
                 # only triggered when has_object=True
-                "bad_object_pos_threshold": 0.25,
-                "bad_object_ori_threshold": 0.8,
+                "bad_object_pos_threshold": 0.5,
+                "bad_object_ori_threshold": 1.1,
             },
         ),
     }
@@ -59,6 +59,45 @@ g1_29dof_wbt_termination_generalist = TerminationManagerCfg(
         "motion_ends": TerminationTermCfg(
             func="holosoma.managers.termination.terms.wbt:motion_ends",
             is_timeout=False,
+        ),
+    }
+)
+
+g1_29dof_wbt_termination_generalist_z_only = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination.terms,
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+            is_timeout=False,
+        ),
+    }
+)
+
+g1_29dof_wbt_termination_hybrid_stage2 = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination_generalist.terms,
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination_generalist.terms["bad_tracking"],
+            func="holosoma.managers.termination.terms.wbt:HybridStage2BadTracking",
+            params={
+                **g1_29dof_wbt_termination_generalist.terms["bad_tracking"].params,
+                "task_object_hold_pos_threshold": 0.35,
+            },
+        ),
+    }
+)
+
+g1_29dof_wbt_termination_hybrid_velocity = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination_generalist.terms,
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination_generalist.terms["bad_tracking"],
+            func="holosoma.managers.termination.terms.wbt:HybridVelocityBadTracking",
+            params={
+                **g1_29dof_wbt_termination_generalist.terms["bad_tracking"].params,
+                "task_object_hold_pos_threshold": 0.35,
+                "task_max_tilt_deg": 60.0,
+            },
         ),
     }
 )
@@ -113,5 +152,8 @@ g1_29dof_wbt_termination_distill = TerminationManagerCfg(
 __all__ = [
     "g1_29dof_wbt_termination",
     "g1_29dof_wbt_termination_generalist",
+    "g1_29dof_wbt_termination_generalist_z_only",
+    "g1_29dof_wbt_termination_hybrid_stage2",
+    "g1_29dof_wbt_termination_hybrid_velocity",
     "g1_29dof_wbt_termination_distill",
 ]

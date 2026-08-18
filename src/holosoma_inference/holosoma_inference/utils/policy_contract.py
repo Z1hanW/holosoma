@@ -27,6 +27,19 @@ class PolicyContractError(ValueError):
 
 _MAX_CONTACT_AWARE_SMOOTHING_STEPS = 4096
 _MAX_MOTION_TRANSITION_STEPS = 4096
+_PRECOMPUTED_COMMAND_CONTRACT_KEY = (
+    "precomputed_turn_then_forward_deployment_contract"
+)
+_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY = (
+    "precomputed_turn_then_forward_deployment_contract_sha256"
+)
+_ROLLING_REFERENCE_DELTA_CONTRACT_KEY = (
+    "rolling_reference_delta_deployment_contract"
+)
+_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY = (
+    "rolling_reference_delta_deployment_contract_sha256"
+)
+_ONNX_VALIDATION_CONTRACT_KEY = "onnx_validation_contract"
 
 
 def _validate_contact_aware_carry_window_metadata(motion_config: Mapping[str, Any]) -> None:
@@ -100,6 +113,357 @@ def _require_exact_mapping_keys(
             f"missing={missing}, unexpected={unexpected}."
         )
     return value
+
+
+def _expected_precomputed_turn_then_forward_contract(
+    *,
+    zero_root_command_when_drop_active: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(zero_root_command_when_drop_active, bool):
+        raise PolicyContractError(
+            "zero_root_command_when_drop_active must be a boolean, "
+            f"got {zero_root_command_when_drop_active!r}."
+        )
+    contract: dict[str, Any] = {
+        "version": 1,
+        "mode": "precomputed_turn_then_forward",
+        "adapter": (
+            "holosoma_inference.policies.wbt.WholeBodyTrackingPolicy"
+        ),
+        "command_field": "policy_command_xy_yaw",
+        "phase_field": "policy_command_phase",
+        "command_layout": ["dx_m", "dy_m", "dyaw_rad"],
+        "pre_pickup_command": [0.0, 0.0, 0.0],
+        "pickup_latch": {
+            "algorithm": "object_root_rel_z_v1",
+            "lift_height_threshold_m": 0.1,
+            "lift_ratio_threshold": 0.35,
+            "consecutive_physics_steps": 5,
+            "sticky_until_episode_reset": True,
+            "requires_live_sim_object_state": True,
+        },
+        "phase_contract": {
+            "dy_always_zero": True,
+            "dx_dyaw_overlap": False,
+            "zero_phase": 0,
+            "forward_phase": 1,
+            "yaw_phase": 2,
+        },
+        "transition_padding": "zero_command_zero_phase",
+        "external_override": "disabled_by_default_explicit_diagnostic_only",
+    }
+    if zero_root_command_when_drop_active:
+        contract["version"] = 2
+        contract["drop_exclusivity"] = {
+            "drop_field": "drop_button",
+            "active_threshold": 0.5,
+            "active_root_command": [0.0, 0.0, 0.0],
+            "applied_after_external_overrides": True,
+        }
+    return contract
+
+
+def _validate_precomputed_turn_then_forward_contract(
+    metadata: Mapping[str, Any],
+    *,
+    sparse_mode: str,
+    zero_root_command_when_drop_active: bool,
+) -> None:
+    contract = metadata.get(_PRECOMPUTED_COMMAND_CONTRACT_KEY)
+    declared_digest = metadata.get(_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY)
+    required = sparse_mode == "precomputed_turn_then_forward"
+    if contract is None and declared_digest is None:
+        if required:
+            raise PolicyContractError(
+                "precomputed_turn_then_forward policy is missing its deployment adapter contract."
+            )
+        return
+    if contract is None or declared_digest is None:
+        raise PolicyContractError(
+            "Precomputed command deployment metadata must include both its contract and SHA-256."
+        )
+    if not required:
+        raise PolicyContractError(
+            "Policy metadata contains a stale precomputed command deployment contract while "
+            f"the configured sparse-root mode is {sparse_mode!r}."
+        )
+    expected = _expected_precomputed_turn_then_forward_contract(
+        zero_root_command_when_drop_active=(
+            zero_root_command_when_drop_active
+        )
+    )
+    try:
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        expected_payload = json.dumps(
+            expected,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PolicyContractError(
+            "Precomputed command deployment contract must contain strict finite JSON values."
+        ) from exc
+    if payload != expected_payload:
+        raise PolicyContractError(
+            "Precomputed command deployment contract does not match the implemented "
+            "command/latch adapter semantics."
+        )
+    if (
+        not isinstance(declared_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None
+    ):
+        raise PolicyContractError(
+            "Precomputed command deployment contract SHA-256 must be 64 lowercase hex characters."
+        )
+    computed_digest = hashlib.sha256(payload).hexdigest()
+    if declared_digest != computed_digest:
+        raise PolicyContractError(
+            "Precomputed command deployment contract SHA-256 mismatch: "
+            f"declared={declared_digest}, computed={computed_digest}."
+        )
+
+
+def _expected_rolling_reference_delta_contract(
+    *,
+    lookahead_motion_frames: int,
+    zero_yaw_threshold_deg: float,
+    zero_root_command_when_drop_active: bool,
+) -> dict[str, Any]:
+    if (
+        isinstance(lookahead_motion_frames, bool)
+        or not isinstance(lookahead_motion_frames, Integral)
+        or int(lookahead_motion_frames) < 1
+    ):
+        raise PolicyContractError(
+            "rolling reference-delta lookahead must be a positive integer, "
+            f"got {lookahead_motion_frames!r}."
+        )
+    if (
+        isinstance(zero_yaw_threshold_deg, bool)
+        or not isinstance(zero_yaw_threshold_deg, Real)
+        or not math.isfinite(float(zero_yaw_threshold_deg))
+        or not 0.0 <= float(zero_yaw_threshold_deg) <= 180.0
+    ):
+        raise PolicyContractError(
+            "rolling reference-delta zero-yaw threshold must be a finite real "
+            f"in [0, 180], got {zero_yaw_threshold_deg!r}."
+        )
+    if not isinstance(zero_root_command_when_drop_active, bool):
+        raise PolicyContractError(
+            "zero_root_command_when_drop_active must be a boolean, "
+            f"got {zero_root_command_when_drop_active!r}."
+        )
+    contract: dict[str, Any] = {
+        "version": 1,
+        "mode": "rolling_reference_delta",
+        "adapter": "holosoma_inference.policies.wbt.WholeBodyTrackingPolicy",
+        "command_layout": ["dx_m", "dy_m", "dyaw_rad"],
+        "lookahead_motion_frames": int(lookahead_motion_frames),
+        "zero_yaw_threshold_deg": float(zero_yaw_threshold_deg),
+        "update_rule": "recompute_every_policy_step",
+        "delta_source": "reference_frame_t_to_reference_frame_t_plus_lookahead",
+        "coordinate_frame": "reference_root_heading_at_frame_t",
+        "robot_state_feedback_used": False,
+        "active_window": "carry_t1_inclusive_to_t2_exclusive",
+        "invalid_endpoint": "zero_if_t_plus_lookahead_reaches_t2_or_clip_end",
+        "external_override": "disabled_by_default_explicit_diagnostic_only",
+    }
+    if zero_root_command_when_drop_active:
+        contract["version"] = 2
+        contract["drop_exclusivity"] = {
+            "drop_field": "drop_button",
+            "active_threshold": 0.5,
+            "active_root_command": [0.0, 0.0, 0.0],
+            "applied_after_external_overrides": True,
+        }
+    return contract
+
+
+def _validate_rolling_reference_delta_contract(
+    metadata: Mapping[str, Any],
+    *,
+    sparse_mode: str,
+    motion_config: Mapping[str, Any],
+    zero_root_command_when_drop_active: bool,
+) -> None:
+    contract = metadata.get(_ROLLING_REFERENCE_DELTA_CONTRACT_KEY)
+    declared_digest = metadata.get(_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY)
+    required = sparse_mode == "rolling_reference_delta"
+    if contract is None and declared_digest is None:
+        if required:
+            raise PolicyContractError(
+                "rolling_reference_delta policy is missing its deployment adapter contract."
+            )
+        return
+    if contract is None or declared_digest is None:
+        raise PolicyContractError(
+            "Rolling reference-delta deployment metadata must include both its "
+            "contract and SHA-256."
+        )
+    if not required:
+        raise PolicyContractError(
+            "Policy metadata contains a stale rolling reference-delta deployment "
+            f"contract while the configured sparse-root mode is {sparse_mode!r}."
+        )
+    expected = _expected_rolling_reference_delta_contract(
+        lookahead_motion_frames=motion_config.get(
+            "contact_aware_sparse_root_segment_steps",
+            30,
+        ),
+        zero_yaw_threshold_deg=motion_config.get(
+            "contact_aware_sparse_root_zero_yaw_threshold_deg",
+            0.0,
+        ),
+        zero_root_command_when_drop_active=zero_root_command_when_drop_active,
+    )
+    try:
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        expected_payload = json.dumps(
+            expected,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PolicyContractError(
+            "Rolling reference-delta deployment contract must contain strict "
+            "finite JSON values."
+        ) from exc
+    if payload != expected_payload:
+        raise PolicyContractError(
+            "Rolling reference-delta deployment contract does not match the "
+            "implemented per-step adapter semantics."
+        )
+    if (
+        not isinstance(declared_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None
+    ):
+        raise PolicyContractError(
+            "Rolling reference-delta deployment contract SHA-256 must be 64 "
+            "lowercase hex characters."
+        )
+    computed_digest = hashlib.sha256(payload).hexdigest()
+    if declared_digest != computed_digest:
+        raise PolicyContractError(
+            "Rolling reference-delta deployment contract SHA-256 mismatch: "
+            f"declared={declared_digest}, computed={computed_digest}."
+        )
+
+
+def _validate_precomputed_onnx_validation_contract(
+    metadata: Mapping[str, Any],
+    *,
+    input_shapes: Mapping[str, Sequence[Any]],
+    output_shapes: Mapping[str, Sequence[Any]],
+) -> None:
+    """Require the exporter-authenticated graph/runtime parity attestation."""
+
+    validation = _require_exact_mapping_keys(
+        metadata.get(_ONNX_VALIDATION_CONTRACT_KEY),
+        expected={
+            "version",
+            "checker",
+            "runtime",
+            "pytorch_vs_ort",
+            "input_names",
+            "output_names",
+            "probe_rows",
+            "rtol",
+            "atol",
+            "max_abs_error",
+            "max_rel_error",
+            "completed_iteration",
+            "actor_graph_semantics",
+            "precomputed_command_contract_sha256",
+            "rolling_reference_delta_contract_sha256",
+        },
+        path=f"Policy metadata {_ONNX_VALIDATION_CONTRACT_KEY}",
+    )
+    completed_iteration = validation["completed_iteration"]
+    metadata_iteration = metadata.get("iteration")
+    if (
+        isinstance(completed_iteration, bool)
+        or not isinstance(completed_iteration, Integral)
+        or isinstance(metadata_iteration, bool)
+        or not isinstance(metadata_iteration, Integral)
+        or int(completed_iteration) != int(metadata_iteration)
+        or int(completed_iteration) < -1
+    ):
+        raise PolicyContractError(
+            "ONNX validation completed_iteration must equal the policy metadata iteration."
+        )
+    exact_fields = {
+        "version": 1,
+        "checker": "onnx.checker.check_model",
+        "runtime": "onnxruntime_cpu",
+        "pytorch_vs_ort": True,
+        "actor_graph_semantics": (
+            "raw_actor_observation_plus_authenticated_external_observation_adapter"
+        ),
+        "precomputed_command_contract_sha256": metadata.get(
+            _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
+        ),
+        "rolling_reference_delta_contract_sha256": metadata.get(
+            _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY
+        ),
+    }
+    for field_name, expected in exact_fields.items():
+        if validation[field_name] != expected:
+            raise PolicyContractError(
+                f"ONNX validation field {field_name!r} must be {expected!r}, "
+                f"got {validation[field_name]!r}."
+            )
+    if validation["input_names"] != list(input_shapes):
+        raise PolicyContractError(
+            "ONNX validation input names do not match the loaded graph: "
+            f"validated={validation['input_names']!r}, graph={list(input_shapes)!r}."
+        )
+    if validation["output_names"] != list(output_shapes):
+        raise PolicyContractError(
+            "ONNX validation output names do not match the loaded graph: "
+            f"validated={validation['output_names']!r}, graph={list(output_shapes)!r}."
+        )
+    probe_rows = validation["probe_rows"]
+    if (
+        isinstance(probe_rows, bool)
+        or not isinstance(probe_rows, Integral)
+        or int(probe_rows) != 6
+    ):
+        raise PolicyContractError(
+            f"ONNX validation probe_rows must be exactly 6, got {probe_rows!r}."
+        )
+    expected_tolerances = {"rtol": 1.0e-4, "atol": 1.0e-5}
+    for field_name, expected in expected_tolerances.items():
+        actual = _finite_scalar(
+            validation[field_name],
+            label=f"ONNX validation {field_name}",
+            non_negative=True,
+        )
+        if actual != expected:
+            raise PolicyContractError(
+                f"ONNX validation {field_name} must be exactly {expected}, got {actual}."
+            )
+    for field_name in ("max_abs_error", "max_rel_error"):
+        _finite_scalar(
+            validation[field_name],
+            label=f"ONNX validation {field_name}",
+            non_negative=True,
+        )
 
 
 def _require_nonempty_canonical_string(value: Any, *, path: str) -> str:
@@ -1185,6 +1549,14 @@ def validate_onnx_policy_contract(
                     f"Policy metadata field motion_config.{compensation_key} must be boolean, "
                     f"got {compensation!r}."
                 )
+            drop_exclusivity_key = "zero_root_command_when_drop_active"
+            drop_exclusivity = motion_config.get(drop_exclusivity_key, False)
+            if not isinstance(drop_exclusivity, bool):
+                raise PolicyContractError(
+                    "Policy metadata field "
+                    f"motion_config.{drop_exclusivity_key} must be boolean, "
+                    f"got {drop_exclusivity!r}."
+                )
             sparse_mode_key = "contact_aware_sparse_root_command_mode"
             if sparse_mode_key in motion_config:
                 sparse_mode_raw = motion_config[sparse_mode_key]
@@ -1196,11 +1568,40 @@ def validate_onnx_policy_contract(
                 sparse_mode = sparse_mode_raw.strip().lower().replace("-", "_")
                 if sparse_mode in {"tracking", "default", "robot_tracking_error"}:
                     sparse_mode = "tracking_error"
-                if sparse_mode != "tracking_error":
+                if sparse_mode not in {
+                    "tracking_error",
+                    "rolling_reference_delta",
+                    "precomputed_turn_then_forward",
+                }:
                     raise PolicyContractError(
-                        "Inference implements only tracking_error/default contact-aware sparse-root "
-                        "commands; policy metadata requests "
+                        "Inference implements only tracking_error/default, "
+                        "rolling_reference_delta, and precomputed_turn_then_forward "
+                        "contact-aware sparse-root commands; "
+                        "policy metadata requests "
                         f"motion_config.{sparse_mode_key}={sparse_mode_raw!r}."
+                    )
+                _validate_precomputed_turn_then_forward_contract(
+                    metadata,
+                    sparse_mode=sparse_mode,
+                    zero_root_command_when_drop_active=drop_exclusivity,
+                )
+                _validate_rolling_reference_delta_contract(
+                    metadata,
+                    sparse_mode=sparse_mode,
+                    motion_config=motion_config,
+                    zero_root_command_when_drop_active=drop_exclusivity,
+                )
+                if sparse_mode == "precomputed_turn_then_forward":
+                    _validate_precomputed_onnx_validation_contract(
+                        metadata,
+                        input_shapes=input_shapes,
+                        output_shapes=output_shapes,
+                    )
+                elif sparse_mode == "rolling_reference_delta":
+                    _validate_precomputed_onnx_validation_contract(
+                        metadata,
+                        input_shapes=input_shapes,
+                        output_shapes=output_shapes,
                     )
 
         saved_action = experiment.get("action")

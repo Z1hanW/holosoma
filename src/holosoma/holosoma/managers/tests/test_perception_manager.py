@@ -1,8 +1,11 @@
 import copy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from yourdfpy import URDF
 
 from holosoma.config_values import perception as perception_presets
 from holosoma.managers.perception import manager as perception_manager_module
@@ -13,6 +16,87 @@ from holosoma.managers.randomization.terms.locomotion import (
 )
 from holosoma.utils.rotations import quat_from_euler_xyz
 from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.simulator_config import SimulatorType
+
+
+def test_camera_depth_d435i_matches_rev1_urdf_and_neutral_ankle_midpoint_pose() -> None:
+    cfg = perception_presets.camera_depth_d435i
+    assert cfg.sensor_offset == pytest.approx([0.0576235, 0.01753, 0.42987])
+
+    urdf_path = Path(__file__).resolve().parents[2] / "data/robots/g1/g1_29dof.urdf"
+    robot_urdf = URDF.load(str(urdf_path), load_meshes=False)
+    robot_urdf.update_cfg({name: 0.0 for name in robot_urdf.actuated_joint_names})
+
+    torso_to_camera = robot_urdf.get_transform("d435_link", "torso_link")
+    np.testing.assert_allclose(
+        torso_to_camera[:3, 3],
+        cfg.sensor_offset,
+        atol=1.0e-9,
+        rtol=0.0,
+    )
+
+    left_foot = robot_urdf.get_transform("left_ankle_roll_link")[:3, 3]
+    right_foot = robot_urdf.get_transform("right_ankle_roll_link")[:3, 3]
+    camera = robot_urdf.get_transform("d435_link")[:3, 3]
+    midfeet_to_camera = camera - 0.5 * (left_foot + right_foot)
+    np.testing.assert_allclose(
+        midfeet_to_camera,
+        [0.05366232609678057, 0.01753, 1.230733752422211],
+        atol=1.0e-9,
+        rtol=0.0,
+    )
+
+    mount_rpy = torch.tensor([0.0, 0.8307767239493009, 0.0])
+    expected_mount_quat = quat_from_euler_xyz(
+        mount_rpy[0],
+        mount_rpy[1],
+        mount_rpy[2],
+    )
+    assert torch.allclose(
+        torch.tensor(cfg.camera_mount_quat),
+        expected_mount_quat,
+        atol=1.0e-7,
+        rtol=0.0,
+    )
+    assert cfg.camera_frame_quat == [-0.5, 0.5, -0.5, 0.5]
+
+
+def test_camera_depth_d435i_corl_freezes_historical_mount_and_residual_pitch() -> None:
+    cfg = perception_presets.camera_depth_d435i_corl
+
+    assert cfg.camera_body_name == "torso_link"
+    assert cfg.sensor_offset == pytest.approx([0.01, 0.01, 0.44])
+    assert cfg.camera_mount_quat == pytest.approx(
+        [0.00644801, 0.23350163, 0.00644801, 0.97231365]
+    )
+    assert cfg.camera_frame_quat == [-0.5, 0.5, -0.5, 0.5]
+    assert cfg.camera_pitch_deg == pytest.approx(10.0)
+
+
+def test_strict_camera_mount_rotation_is_derived_from_configured_quaternion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        perception_manager_module,
+        "get_simulator_type",
+        lambda: SimulatorType.ISAACSIM,
+    )
+    cfg = replace(
+        perception_presets.camera_depth_d435i,
+        camera_warp_enable_holes=False,
+    )
+    manager = PerceptionManager(
+        cfg,
+        SimpleNamespace(num_envs=1, logger=None, randomization_manager=None),
+        "cpu",
+    )
+
+    assert torch.allclose(
+        manager._strict_camera_mount_rotation_deg,
+        torch.tensor([0.0, 47.6, 0.0]),
+        atol=1.0e-5,
+        rtol=0.0,
+    )
 
 
 def _make_checkpoint_perception_manager() -> PerceptionManager:
@@ -381,6 +465,19 @@ def test_training_geometry_support_unions_rank_shards_and_direct_checks_membersh
     _set_single_object_geometry(unknown, digest="d" * 64, size_bytes=17)
     with pytest.raises(ValueError, match="not a member"):
         unknown.validate_deployment_geometry_support(aggregated)
+    assert (
+        unknown.validate_deployment_geometry_support(
+            aggregated,
+            allow_unknown_object_geometry=True,
+        )
+        == aggregated
+    )
+
+    with pytest.raises(TypeError, match="must be a bool"):
+        unknown.validate_deployment_geometry_support(
+            aggregated,
+            allow_unknown_object_geometry=1,
+        )
 
 
 def test_direct_manager_publishes_exact_onnx_contract_only_after_live_validation() -> None:

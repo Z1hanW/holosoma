@@ -704,24 +704,46 @@ def _render_frame(
                     scale=0.44,
                     color=(230, 230, 230),
                 )
+        elif state:
+            cmd = state.get("observer_published_root_command")
+            drop = state.get("observer_published_drop_button")
+            gate = "TRIGGERED" if bool(state.get("observer_lift_triggered", False)) else "WAITING"
+            _put(
+                img,
+                f"lift_gate={gate} rel_z={float(state.get('observer_object_rel_z') or 0.0):.3f}m",
+                (16, 76),
+                scale=0.44,
+                color=(230, 230, 230),
+            )
+            if isinstance(cmd, list):
+                _put(
+                    img,
+                    "actor_cmd=[" + ", ".join(f"{float(v):.3f}" for v in cmd[:3]) + f"] drop={float(drop or 0.0):.1f}",
+                    (16, 98),
+                    scale=0.44,
+                    color=(230, 230, 230),
+                )
         if state:
             obj = _state_pos(state, "object")
             root = _state_pos(state, "root")
             contacts = state.get("object_robot_contact_count", 0)
             obj_z = float(obj[2]) if obj is not None else math.nan
             root_z = float(root[2]) if root is not None else math.nan
+            state_x = render_w + 14 if render_w < width else max(600, int(width * 0.56))
+            state_color = (30, 30, 30) if render_w < width else (230, 230, 230)
             _put(
                 img,
                 f"sim_ms={state.get('sim_time_ms')} root_z={root_z:.3f} obj_z={obj_z:.3f} contacts={contacts}",
-                (render_w + 14, 28),
+                (state_x, 28),
                 scale=0.45,
-                color=(30, 30, 30),
+                color=state_color,
             )
             bodies = ",".join((state.get("object_robot_contact_bodies") or [])[:4])
-            _put(img, f"contact_bodies={bodies or '<none>'}", (render_w + 14, 50), scale=0.42)
-        panel_width = max(1, width - render_w)
-        panel = _depth_panel(depth, width=panel_width, height=height - 90, depth_shape=depth_shape)
-        img[90 : 90 + panel.shape[0], render_w : render_w + panel.shape[1]] = panel
+            _put(img, f"contact_bodies={bodies or '<none>'}", (state_x, 50), scale=0.42, color=state_color)
+        if render_w < width:
+            panel_width = width - render_w
+            panel = _depth_panel(depth, width=panel_width, height=height - 90, depth_shape=depth_shape)
+            img[90 : 90 + panel.shape[0], render_w : render_w + panel.shape[1]] = panel
         return img
 
     img = _blank(width, height)
@@ -826,7 +848,7 @@ def main() -> None:
 
         mujoco_renderer = MujocoStateRenderer(
             args.mujoco_xml,
-            width=max(320, min(int(args.render_width), size[0] - 160)),
+            width=max(320, min(int(args.render_width), size[0])),
             height=size[1],
         )
         metadata: list[dict[str, Any]] = []

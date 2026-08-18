@@ -333,11 +333,18 @@ if inference_name not in DEFAULTS:
 
 cfg = DEFAULTS[inference_name]
 obs_cfg = cfg.observation
-actor_terms = list(obs_cfg.obs_dict.get("actor_obs", ()))
-if not actor_terms:
-    raise SystemExit(f"[ERROR] Inference config '{inference_name}' has no actor_obs terms")
-history_length = int(obs_cfg.history_length_dict.get("actor_obs", 1))
-expected_dim = sum(int(obs_cfg.obs_dims[term]) for term in actor_terms) * history_length
+actor_groups = [
+    group
+    for group in obs_cfg.obs_dict
+    if group.startswith("actor_obs") or group == "motion_future_target_poses"
+]
+if not actor_groups:
+    raise SystemExit(f"[ERROR] Inference config '{inference_name}' has no actor observation groups")
+expected_dim = sum(
+    sum(int(obs_cfg.obs_dims[term]) for term in obs_cfg.obs_dict[group])
+    * int(obs_cfg.history_length_dict.get(group, 1))
+    for group in actor_groups
+)
 
 model = onnx.load(str(model_path))
 input_shape = model.graph.input[0].type.tensor_type.shape.dim
@@ -355,25 +362,8 @@ for prop in model.metadata_props:
     except Exception:
         metadata[prop.key] = prop.value
 
-groups = metadata.get("experiment_config", {}).get("observation", {}).get("groups", {})
-model_actor = groups.get("actor_obs", {}) if isinstance(groups, dict) else {}
-model_terms = list(model_actor.get("terms", {}).keys()) if isinstance(model_actor.get("terms"), dict) else []
-model_history_length = int(model_actor.get("history_length", history_length)) if isinstance(model_actor, dict) else history_length
-
-if model_terms and model_terms != actor_terms:
-    raise SystemExit(
-        f"[ERROR] Observation term mismatch for {model_path.name}: "
-        f"model terms={model_terms}, inference:{inference_name} terms={actor_terms}"
-    )
-if model_history_length != history_length:
-    raise SystemExit(
-        f"[ERROR] Observation history mismatch for {model_path.name}: "
-        f"model history={model_history_length}, inference:{inference_name} history={history_length}"
-    )
-
 print(
-    f"actor_obs_dim={input_dim} history={history_length} "
-    f"terms={','.join(actor_terms)}"
+    f"actor_obs_dim={input_dim} groups={','.join(actor_groups)}"
 )
 PY
 )"

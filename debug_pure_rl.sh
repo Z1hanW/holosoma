@@ -149,10 +149,6 @@ STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root_contact_aware','a
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
-ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
-DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
-ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
-DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
 ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${REFERENCE_ROOT}/clips"}
 
@@ -179,6 +175,7 @@ cmd=(
   --master_port="${MASTER_PORT}"
   src/holosoma/holosoma/train_agent.py
   exp:g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref
+  randomization:g1_29dof_wbt_w_object_pure_rl
   --algo.config.distill.enabled=False
   --training.num-envs="${NUM_ENVS}"
   --training.project="${TRAINING_PROJECT}"
@@ -203,10 +200,11 @@ cmd=(
   --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion=False
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob="${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale="${RESET_NOISE_SCALE}"
-  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append="${ENABLE_DEFAULT_POSE_APPEND}"
-  --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s="${DEFAULT_POSE_APPEND_DURATION_S}"
-  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${ENABLE_DEFAULT_POSE_PREPEND}"
-  --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
+  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=False
+  --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=0.0
+  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=False
+  --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=0.0
+  --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation=False
   --robot.object.enabled=True
   --robot.object.object-urdf-path "${OBJECT_URDF}"
   perception:camera_depth_d435i
@@ -276,6 +274,8 @@ if [[ "${LOGGER}" != "logger:disabled" ]]; then
 fi
 
 echo "[INFO] pure_rl=1 distill_enabled=False"
+echo "[INFO] motion_transitions prepend=False/0.0s append=False/0.0s"
+echo "[INFO] randomization=g1_29dof_wbt_w_object_pure_rl joint_bias_pd_gain_dr=enabled torque_rfi=disabled action_delay=disabled"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] reference_root=${REFERENCE_ROOT}"

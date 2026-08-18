@@ -69,7 +69,7 @@ class LayerConfig:
     """Output dimension for perception encoder."""
 
     perception_encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', 'defm_vit_s14', 'defm_regnet_y_800mf', or 'time_gru'."""
+    """Perception encoder type, including far-tracking GAP and spatial-softmax CNN variants."""
 
     perception_input_height: int | None = None
     """Optional input height for structured perception encoders."""
@@ -400,7 +400,16 @@ class PPOConfig:
     """Value loss coefficient."""
 
     entropy_coef: float = 0.01
-    """Entropy coefficient for exploration."""
+    """Initial entropy coefficient for exploration."""
+
+    entropy_coef_end: float | None = None
+    """Final entropy coefficient. ``None`` keeps ``entropy_coef`` fixed."""
+
+    entropy_coef_decay_start_iteration: int = 0
+    """First absolute learning iteration of the linear entropy decay."""
+
+    entropy_coef_decay_end_iteration: int = 0
+    """Absolute learning iteration at which ``entropy_coef_end`` is reached."""
 
     actor_learning_rate: float = 1e-5
     """Learning rate for actor network."""

@@ -44,6 +44,8 @@ from holosoma.utils.motion_transition_source import (
 )
 from holosoma.utils.rank_local_shards import current_rank_local_shard_metadata, resolve_rank_local_motion_path
 from holosoma.utils.rotations import (
+    calc_heading,
+    calc_heading_quat_inv,
     get_euler_xyz,
     normalize_angle,
     quat_apply,
@@ -578,6 +580,8 @@ def _probability_mass_on_intervals(
 ## MotionLoader and AdaptiveTimestepsSampler
 #########################################################################################################
 class MotionLoader:
+    _PRECOMPUTED_ROOT_COMMAND_KEY = "policy_command_xy_yaw"
+    _PRECOMPUTED_ROOT_COMMAND_PHASE_KEY = "policy_command_phase"
     _OBJECT_SIZE_KEYS = (
         "object_size",
         "box_size",
@@ -620,6 +624,8 @@ class MotionLoader:
         self.clip_offsets = torch.zeros(0, dtype=torch.long, device=device)
         self.clip_lengths = torch.zeros(0, dtype=torch.long, device=device)
         self.num_clips = 0
+        self._precomputed_root_command: torch.Tensor | None = None
+        self._precomputed_root_command_phase: torch.Tensor | None = None
         self.motion_clip_id = motion_clip_id
         self.motion_clip_name = motion_clip_name
         if motion_path.is_dir():
@@ -818,6 +824,63 @@ class MotionLoader:
                 "object_size/box_size extents; scale and size are not interchangeable."
             )
         return np.ones((length, 3), dtype=np.float32)
+
+    @classmethod
+    def _extract_precomputed_root_command_np(
+        cls,
+        data: Any,
+        length: int,
+        *,
+        source: str,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        command_present = cls._PRECOMPUTED_ROOT_COMMAND_KEY in data
+        phase_present = cls._PRECOMPUTED_ROOT_COMMAND_PHASE_KEY in data
+        if command_present != phase_present:
+            raise ValueError(
+                f"Motion file {source} must contain both {cls._PRECOMPUTED_ROOT_COMMAND_KEY!r} "
+                f"and {cls._PRECOMPUTED_ROOT_COMMAND_PHASE_KEY!r}."
+            )
+        if not command_present:
+            return None
+
+        command = np.asarray(data[cls._PRECOMPUTED_ROOT_COMMAND_KEY])
+        phase = np.asarray(data[cls._PRECOMPUTED_ROOT_COMMAND_PHASE_KEY])
+        if command.dtype.kind != "f" or command.shape != (length, 3):
+            raise ValueError(
+                f"Motion field {cls._PRECOMPUTED_ROOT_COMMAND_KEY} in {source} must be a "
+                f"floating array with shape ({length}, 3), got {command.dtype} {command.shape}."
+            )
+        if phase.dtype.kind not in "iu" or phase.shape != (length,):
+            raise ValueError(
+                f"Motion field {cls._PRECOMPUTED_ROOT_COMMAND_PHASE_KEY} in {source} must be an "
+                f"integer array with shape ({length},), got {phase.dtype} {phase.shape}."
+            )
+        if not np.all(np.isfinite(command)):
+            raise ValueError(f"Precomputed root command in {source} contains non-finite values.")
+
+        phase_i64 = phase.astype(np.int64, copy=False)
+        if not np.all(np.isin(phase_i64, (0, 1, 2))):
+            invalid = np.unique(phase_i64[~np.isin(phase_i64, (0, 1, 2))]).tolist()
+            raise ValueError(f"Precomputed root command phase in {source} contains invalid values: {invalid}")
+
+        zero_phase = phase_i64 == 0
+        forward_phase = phase_i64 == 1
+        yaw_phase = phase_i64 == 2
+        if np.any(command[:, 1] != 0.0):
+            raise ValueError(f"Precomputed turn-then-forward command in {source} must keep dy exactly zero.")
+        if np.any((command[:, 0] != 0.0) & (command[:, 2] != 0.0)):
+            raise ValueError(f"Precomputed turn-then-forward command in {source} couples dx and dyaw.")
+        if np.any(command[zero_phase] != 0.0):
+            raise ValueError(f"Zero-phase precomputed command rows in {source} must be zero.")
+        if np.any(command[forward_phase, 0] <= 0.0) or np.any(command[forward_phase, 2] != 0.0):
+            raise ValueError(f"Forward-phase precomputed command rows in {source} are inconsistent.")
+        if np.any(command[yaw_phase, 0] != 0.0) or np.any(command[yaw_phase, 2] == 0.0):
+            raise ValueError(f"Yaw-phase precomputed command rows in {source} are inconsistent.")
+        if np.any(command[:, 0] < 0.0) or np.any(command[:, 0] > 10.0):
+            raise ValueError(f"Precomputed forward command in {source} must lie in [0, 10] metres.")
+        if np.any(np.abs(command[:, 2]) > math.pi):
+            raise ValueError(f"Precomputed yaw command in {source} must lie in [-pi, pi].")
+        return command.astype(np.float32, copy=False), phase_i64.astype(np.uint8, copy=False)
 
     @staticmethod
     def _scalar_str(value: Any) -> str:
@@ -1019,6 +1082,19 @@ class MotionLoader:
                 self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
                 self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
 
+                precomputed_command = self._extract_precomputed_root_command_np(
+                    data,
+                    int(self._joint_pos.shape[0]),
+                    source=motion_file,
+                )
+                if precomputed_command is not None:
+                    self._precomputed_root_command = torch.tensor(
+                        precomputed_command[0], dtype=torch.float32, device=device
+                    )
+                    self._precomputed_root_command_phase = torch.tensor(
+                        precomputed_command[1], dtype=torch.uint8, device=device
+                    )
+
                 # add object pos and quat
                 self.has_object = "object_pos_w" in data
                 if self.has_object:
@@ -1161,6 +1237,9 @@ class MotionLoader:
         object_quat_list: list[np.ndarray] = []
         object_lin_vel_list: list[np.ndarray] = []
         object_size_list: list[np.ndarray] = []
+        precomputed_command_list: list[np.ndarray] = []
+        precomputed_phase_list: list[np.ndarray] = []
+        clips_without_precomputed_command: list[str] = []
 
         clip_object_names: list[str] = []
         clip_object_urdfs: list[str] = []
@@ -1213,6 +1292,16 @@ class MotionLoader:
 
                     joint_pos = np.asarray(data["joint_pos"])
                     length = int(joint_pos.shape[0])
+                    precomputed_command = self._extract_precomputed_root_command_np(
+                        data,
+                        length,
+                        source=str(file_path),
+                    )
+                    if precomputed_command is None:
+                        clips_without_precomputed_command.append(file_path.stem)
+                    else:
+                        precomputed_command_list.append(precomputed_command[0])
+                        precomputed_phase_list.append(precomputed_command[1])
 
                     clip_ids.append(file_path.stem)
                     offsets.append(offset)
@@ -1273,6 +1362,13 @@ class MotionLoader:
                 f"Examples: {issue_summary}"
             )
 
+        if precomputed_command_list and clips_without_precomputed_command:
+            sample = clips_without_precomputed_command[:5]
+            raise ValueError(
+                "Precomputed root command coverage is partial across the motion directory; "
+                f"missing={sample}, missing_count={len(clips_without_precomputed_command)}."
+            )
+
         self.fps = float(fps_ref) if fps_ref is not None else 30.0
         self._set_clip_metadata(
             clip_ids,
@@ -1302,6 +1398,17 @@ class MotionLoader:
 
         self._body_lin_vel_w = torch.tensor(body_lin_vel_w, dtype=torch.float32, device=device)
         self._body_ang_vel_w = torch.tensor(body_ang_vel_w, dtype=torch.float32, device=device)
+        if precomputed_command_list:
+            self._precomputed_root_command = torch.tensor(
+                np.concatenate(precomputed_command_list, axis=0),
+                dtype=torch.float32,
+                device=device,
+            )
+            self._precomputed_root_command_phase = torch.tensor(
+                np.concatenate(precomputed_phase_list, axis=0),
+                dtype=torch.uint8,
+                device=device,
+            )
 
         self.has_object = bool(has_object)
         if self.has_object:
@@ -1830,6 +1937,22 @@ class MotionLoader:
     def object_size(self) -> torch.Tensor:
         return self._object_size[:]
 
+    @property
+    def has_precomputed_root_command(self) -> bool:
+        return self._precomputed_root_command is not None
+
+    @property
+    def precomputed_root_command(self) -> torch.Tensor:
+        if self._precomputed_root_command is None:
+            raise RuntimeError("The loaded motion bank does not contain a precomputed root command.")
+        return self._precomputed_root_command
+
+    @property
+    def precomputed_root_command_phase(self) -> torch.Tensor:
+        if self._precomputed_root_command_phase is None:
+            raise RuntimeError("The loaded motion bank does not contain a precomputed root command phase.")
+        return self._precomputed_root_command_phase
+
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
         concat_targets = [
@@ -1854,6 +1977,31 @@ class MotionLoader:
             existing = getattr(self, attr_name)
             tensors = (segments[seg_key], existing) if prepend else (existing, segments[seg_key])
             setattr(self, attr_name, torch.cat(tensors, dim=0))
+
+        if self._precomputed_root_command is not None:
+            segment_length = int(segments["joint_pos"].shape[0])
+            command_padding = torch.zeros(
+                (segment_length, 3),
+                dtype=self._precomputed_root_command.dtype,
+                device=self._precomputed_root_command.device,
+            )
+            phase_padding = torch.zeros(
+                (segment_length,),
+                dtype=self.precomputed_root_command_phase.dtype,
+                device=self.precomputed_root_command_phase.device,
+            )
+            command_tensors = (
+                (command_padding, self._precomputed_root_command)
+                if prepend
+                else (self._precomputed_root_command, command_padding)
+            )
+            phase_tensors = (
+                (phase_padding, self._precomputed_root_command_phase)
+                if prepend
+                else (self._precomputed_root_command_phase, phase_padding)
+            )
+            self._precomputed_root_command = torch.cat(command_tensors, dim=0)
+            self._precomputed_root_command_phase = torch.cat(phase_tensors, dim=0)
 
         self.time_step_total = self._joint_pos.shape[0]
         if self.num_clips == 1:
@@ -2917,10 +3065,21 @@ class MotionCommand(CommandTermBase):
         self._manual_forward_after_lift_command_m = 0.0
         self._manual_forward_after_lift_rel_z_delta_m = 0.0
         self._manual_forward_after_lift_consecutive_steps = 0
+        self._manual_forward_after_lift_preserve_native_contact_buttons = False
+        self._manual_forward_after_lift_preserve_native_pickup_button = False
+        self._manual_forward_after_lift_preserve_native_drop_button = False
         self._manual_forward_after_lift_baseline_object_z: torch.Tensor | None = None
         self._manual_forward_after_lift_consecutive_count: torch.Tensor | None = None
         self._manual_forward_after_lift_triggered: torch.Tensor | None = None
         self._manual_forward_after_lift_trigger_episode_step: torch.Tensor | None = None
+        self._manual_forward_after_lift_command_semantics = (
+            "legacy_constant_robot_heading_frame"
+        )
+        self._manual_forward_heading_lock_enabled = False
+        self._manual_forward_heading_lock_command_m = 0.0
+        self._manual_forward_heading_lock_active: torch.Tensor | None = None
+        self._manual_forward_heading_lock_origin_xy_w: torch.Tensor | None = None
+        self._manual_forward_heading_lock_yaw_w: torch.Tensor | None = None
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w: torch.Tensor | None = None
         self.manual_object_reset_rpy_offset: torch.Tensor | None = None
@@ -2934,10 +3093,16 @@ class MotionCommand(CommandTermBase):
         self._fixed_clip_group_env_mask: torch.Tensor | None = None
         self._fixed_clip_group_clip_mask: torch.Tensor | None = None
         self._fixed_clip_complement_clip_mask: torch.Tensor | None = None
+        self.hybrid_stage2_task_env_mask: torch.Tensor | None = None
+        self.hybrid_velocity_task_env_mask: torch.Tensor | None = None
+        self._hybrid_velocity_task_priority: torch.Tensor | None = None
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
+        self.pickup_anchor_object_pos_b: torch.Tensor | None = None
+        self.pickup_anchor_object_quat_b: torch.Tensor | None = None
         self.pickup_object_rel_z_baseline: torch.Tensor | None = None
+        self.hybrid_velocity_object_z_baseline: torch.Tensor | None = None
         self.pickup_consecutive_counter: torch.Tensor | None = None
         self._multi_object_enabled = False
         self._sim_object_names: list[str] = []
@@ -3552,6 +3717,367 @@ class MotionCommand(CommandTermBase):
                 "Resample the motion bank or configure simulator fps/control_decimation to match."
             )
 
+    def _build_hybrid_stage2_task_env_mask(self) -> torch.Tensor:
+        """Build a deterministic task assignment, stratified by fixed clip when available."""
+
+        enabled = bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False))
+        mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        if not enabled:
+            return mask
+
+        fraction = float(getattr(self.motion_cfg, "hybrid_stage2_task_env_fraction", 0.5))
+
+        def assign_evenly(env_ids: torch.Tensor) -> int:
+            group_size = int(env_ids.numel())
+            group_task_count = min(max(int(round(group_size * fraction)), 0), group_size)
+            if group_task_count == 0:
+                return 0
+            if group_task_count == group_size:
+                mask[env_ids] = True
+                return group_task_count
+            row_ids = torch.arange(group_size, device=self.device, dtype=torch.long)
+            selected = ((row_ids + 1) * group_task_count // group_size) > (
+                row_ids * group_task_count // group_size
+            )
+            mask[env_ids[selected]] = True
+            return group_task_count
+
+        # With object banks, envs are pinned to compatible clips. Stratifying
+        # here prevents the alternating 50/50 assignment from becoming
+        # perfectly correlated with a two-clip round-robin (one whole clip in
+        # task mode and the other in tracking mode).
+        fixed_clip_ids = getattr(self, "_fixed_clip_ids", None)
+        task_count = 0
+        if isinstance(fixed_clip_ids, torch.Tensor) and fixed_clip_ids.shape == (self.num_envs,):
+            for clip_id in torch.unique(fixed_clip_ids, sorted=True):
+                env_ids = torch.nonzero(fixed_clip_ids == clip_id, as_tuple=False).squeeze(-1)
+                task_count += assign_evenly(env_ids)
+        else:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            task_count = assign_evenly(env_ids)
+
+        logger.info(
+            "Enabled hybrid stage-2 assignment: task_envs={}/{} ({:.3f}), "
+            "tracking_envs={}, forward_command_m={:.3f}, stratified_by_fixed_clip={}.",
+            task_count,
+            self.num_envs,
+            task_count / float(self.num_envs),
+            self.num_envs - task_count,
+            float(getattr(self.motion_cfg, "hybrid_stage2_forward_command_m", 0.15)),
+            isinstance(fixed_clip_ids, torch.Tensor)
+            and fixed_clip_ids.shape == (self.num_envs,),
+        )
+        return mask
+
+    def hybrid_velocity_enabled(self) -> bool:
+        return bool(getattr(self.motion_cfg, "hybrid_velocity_enabled", False))
+
+    def _validate_hybrid_velocity_config(self) -> None:
+        if not self.hybrid_velocity_enabled():
+            return
+        if bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False)):
+            raise ValueError("hybrid_velocity and hybrid_stage2 are mutually exclusive.")
+        if self.pure_rl_policy_command_after_lift_enabled():
+            raise ValueError(
+                "hybrid_velocity and pure_rl_policy_command_after_lift are mutually exclusive."
+            )
+        if not self.motion.has_object:
+            raise ValueError("hybrid_velocity requires motion clips with object trajectories.")
+
+        command_frame = str(
+            getattr(self.motion_cfg, "hybrid_velocity_command_frame", "heading")
+        ).strip().lower()
+        if command_frame not in {"heading", "world"}:
+            raise ValueError(
+                "hybrid_velocity_command_frame must be 'heading' or 'world', "
+                f"got {command_frame!r}."
+            )
+
+        start_fraction = float(self.motion_cfg.hybrid_velocity_task_env_fraction_start)
+        end_fraction = float(self.motion_cfg.hybrid_velocity_task_env_fraction_end)
+        start_iter = int(self.motion_cfg.hybrid_velocity_task_env_fraction_start_iter)
+        end_iter = int(self.motion_cfg.hybrid_velocity_task_env_fraction_end_iter)
+        if end_fraction < start_fraction:
+            raise ValueError(
+                "hybrid_velocity task fraction must be monotonic: "
+                f"start={start_fraction}, end={end_fraction}."
+            )
+        if end_fraction != start_fraction and end_iter <= start_iter:
+            raise ValueError(
+                "hybrid_velocity task-fraction ramp requires end_iter > start_iter: "
+                f"start_iter={start_iter}, end_iter={end_iter}."
+            )
+
+    def _current_hybrid_velocity_task_env_fraction(self) -> float:
+        if not self.hybrid_velocity_enabled():
+            return 0.0
+        return self._scheduled_reset_prob(
+            float(self.motion_cfg.hybrid_velocity_task_env_fraction_start),
+            end_value=float(self.motion_cfg.hybrid_velocity_task_env_fraction_end),
+            start_iter=int(self.motion_cfg.hybrid_velocity_task_env_fraction_start_iter),
+            end_iter=int(self.motion_cfg.hybrid_velocity_task_env_fraction_end_iter),
+        )
+
+    def _configure_hybrid_velocity_task_assignment(self) -> None:
+        """Create a monotonic, RNG-free task priority within every fixed clip."""
+
+        self._validate_hybrid_velocity_config()
+        if not self.hybrid_velocity_enabled():
+            if self.hybrid_velocity_task_env_mask is not None:
+                self.hybrid_velocity_task_env_mask.zero_()
+            return
+
+        priority = torch.ones((self.num_envs,), device=self.device, dtype=torch.float32)
+        fixed_clip_ids = getattr(self, "_fixed_clip_ids", None)
+        if isinstance(fixed_clip_ids, torch.Tensor) and fixed_clip_ids.shape == (self.num_envs,):
+            groups = [
+                torch.nonzero(fixed_clip_ids == clip_id, as_tuple=False).squeeze(-1)
+                for clip_id in torch.unique(fixed_clip_ids, sorted=True)
+            ]
+        else:
+            groups = [torch.arange(self.num_envs, device=self.device, dtype=torch.long)]
+
+        # Golden-ratio ordering gives each monotonic prefix an evenly spread
+        # subset without consuming or perturbing the training RNG stream.
+        golden_ratio_conjugate = 0.6180339887498949
+        for env_ids in groups:
+            group_size = int(env_ids.numel())
+            if group_size == 0:
+                continue
+            row_ids = torch.arange(group_size, device=self.device, dtype=torch.float64)
+            keys = torch.remainder((row_ids + 1.0) * golden_ratio_conjugate, 1.0)
+            order = torch.argsort(keys, stable=True)
+            ranks = torch.empty_like(order)
+            ranks[order] = torch.arange(group_size, device=self.device, dtype=torch.long)
+            priority[env_ids] = (
+                (ranks.to(dtype=torch.float32) + 0.5) / float(group_size)
+            )
+
+        self._hybrid_velocity_task_priority = priority
+        self._refresh_hybrid_velocity_task_env_mask()
+        active_count = int(self.get_hybrid_velocity_task_env_mask().sum().item())
+        logger.info(
+            "Enabled hybrid velocity assignment: active_task_envs={}/{} ({:.3f}), "
+            "fraction_schedule={:.3f}->{:.3f} over iterations {}->{}, "
+            "forward_command_mps={:.3f}, lift_height_m={:.3f}, "
+            "mode_changes_only_on_reset=True, stratified_by_fixed_clip={}.",
+            active_count,
+            self.num_envs,
+            active_count / float(self.num_envs),
+            float(self.motion_cfg.hybrid_velocity_task_env_fraction_start),
+            float(self.motion_cfg.hybrid_velocity_task_env_fraction_end),
+            int(self.motion_cfg.hybrid_velocity_task_env_fraction_start_iter),
+            int(self.motion_cfg.hybrid_velocity_task_env_fraction_end_iter),
+            float(self.motion_cfg.hybrid_velocity_forward_command_mps),
+            float(self.motion_cfg.hybrid_velocity_lift_height_m),
+            isinstance(fixed_clip_ids, torch.Tensor)
+            and fixed_clip_ids.shape == (self.num_envs,),
+        )
+
+    def _refresh_hybrid_velocity_task_env_mask(
+        self,
+        env_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Apply the current curriculum only to rows beginning a new episode."""
+
+        if not self.hybrid_velocity_enabled():
+            return
+        if self.hybrid_velocity_task_env_mask is None or self._hybrid_velocity_task_priority is None:
+            raise RuntimeError("hybrid_velocity task assignment was not configured.")
+        selected_env_ids = self._ensure_index_tensor(env_ids)
+        fraction = self._current_hybrid_velocity_task_env_fraction()
+        desired = self._hybrid_velocity_task_priority[selected_env_ids] <= fraction
+        self.hybrid_velocity_task_env_mask[selected_env_ids] = desired
+
+    def get_hybrid_velocity_task_env_mask(self) -> torch.Tensor:
+        mask = self.hybrid_velocity_task_env_mask
+        if mask is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        return mask
+
+    def get_hybrid_velocity_task_active_mask(self) -> torch.Tensor:
+        task_mask = self.get_hybrid_velocity_task_env_mask()
+        if self.pickup_anchor_set is None:
+            return torch.zeros_like(task_mask)
+        return task_mask & self.pickup_anchor_set
+
+    def get_hybrid_velocity_tracking_reward_mask(self) -> torch.Tensor:
+        return ~self.get_hybrid_velocity_task_env_mask()
+
+    def get_hybrid_velocity_command(self) -> torch.Tensor:
+        """Return the unified ``[vx, vy, yaw_rate]`` actor/critic command."""
+
+        if not self.hybrid_velocity_enabled():
+            raise RuntimeError("hybrid velocity command requires hybrid_velocity_enabled=True.")
+
+        command_frame = str(
+            getattr(self.motion_cfg, "hybrid_velocity_command_frame", "heading")
+        ).strip().lower()
+        if getattr(self, "manual_control_enabled", False):
+            expected_semantics = (
+                "robot_heading_velocity_mps"
+                if command_frame == "heading"
+                else "world_velocity_mps"
+            )
+            actual_semantics = getattr(
+                self,
+                "_manual_forward_after_lift_command_semantics",
+                "legacy_constant_robot_heading_frame",
+            )
+            if actual_semantics != expected_semantics:
+                raise RuntimeError(
+                    "Manual hybrid-velocity evaluation command semantics mismatch: "
+                    f"actual={actual_semantics!r}, expected={expected_semantics!r}."
+                )
+            if self.manual_xy_rel is None or self.manual_yaw_rel is None:
+                raise RuntimeError("Manual hybrid-velocity command tensors are not initialized.")
+            return torch.cat((self.manual_xy_rel, self.manual_yaw_rel), dim=-1)
+        if command_frame == "heading":
+            heading_inv = calc_heading_quat_inv(self.robot_root_quat_w, w_last=True)
+            reference_velocity_xy = quat_apply(
+                heading_inv,
+                self.root_lin_vel_w,
+                w_last=True,
+            )[:, :2]
+        elif command_frame == "world":
+            reference_velocity_xy = self.root_lin_vel_w[:, :2]
+        else:
+            raise RuntimeError(
+                "hybrid_velocity_command_frame was not validated: "
+                f"{command_frame!r}."
+            )
+        tracking_command = torch.stack(
+            (
+                reference_velocity_xy[:, 0],
+                reference_velocity_xy[:, 1],
+                self.root_ang_vel_w[:, 2],
+            ),
+            dim=-1,
+        )
+
+        task_command = torch.zeros_like(tracking_command)
+        task_active = self.get_hybrid_velocity_task_active_mask()
+        task_command[:, 0] = torch.where(
+            task_active,
+            torch.full_like(
+                task_command[:, 0],
+                float(self.motion_cfg.hybrid_velocity_forward_command_mps),
+            ),
+            torch.zeros_like(task_command[:, 0]),
+        )
+        task_mask = self.get_hybrid_velocity_task_env_mask()
+        return torch.where(task_mask.unsqueeze(-1), task_command, tracking_command)
+
+    def pure_rl_policy_command_after_lift_enabled(self) -> bool:
+        return bool(
+            getattr(
+                self.motion_cfg,
+                "pure_rl_policy_command_after_lift_enabled",
+                False,
+            )
+        )
+
+    def precomputed_turn_then_forward_enabled(self) -> bool:
+        mode = str(
+            getattr(
+                self.motion_cfg,
+                "contact_aware_sparse_root_command_mode",
+                "tracking_error",
+            )
+        ).strip().lower().replace("-", "_")
+        return mode == "precomputed_turn_then_forward"
+
+    def _validate_precomputed_turn_then_forward_config(self) -> None:
+        if not self.precomputed_turn_then_forward_enabled():
+            return
+        conflicting_modes = {
+            "pure_rl_policy_command_after_lift": self.pure_rl_policy_command_after_lift_enabled(),
+            "hybrid_stage2": bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False)),
+            "hybrid_velocity": self.hybrid_velocity_enabled(),
+        }
+        enabled_conflicts = [name for name, enabled in conflicting_modes.items() if enabled]
+        if enabled_conflicts:
+            raise ValueError(
+                "precomputed_turn_then_forward is an exclusive actor-command mode; "
+                f"disable {enabled_conflicts}."
+            )
+        if not self.motion.has_object:
+            raise ValueError("precomputed_turn_then_forward requires object motion clips.")
+        if not self.motion.has_precomputed_root_command:
+            raise ValueError(
+                "precomputed_turn_then_forward requires every selected motion NPZ to contain "
+                "policy_command_xy_yaw and policy_command_phase."
+            )
+        command = self.motion.precomputed_root_command
+        phase = self.motion.precomputed_root_command_phase
+        if command.shape != (self.motion.time_step_total, 3) or phase.shape != (
+            self.motion.time_step_total,
+        ):
+            raise ValueError(
+                "Precomputed command tensors do not align with the loaded motion timeline: "
+                f"command={tuple(command.shape)}, phase={tuple(phase.shape)}, "
+                f"motion_steps={self.motion.time_step_total}."
+            )
+        phase_counts = torch.bincount(phase.to(dtype=torch.long), minlength=3)
+        logger.info(
+            "Enabled immutable precomputed turn-then-forward actor command: "
+            "zero_frames={}, forward_frames={}, yaw_frames={}, dy_always_zero=True, "
+            "dx_dyaw_overlap=False, runtime_pickup_latch=True, rewards_and_terminations_unchanged=True.",
+            int(phase_counts[0].item()),
+            int(phase_counts[1].item()),
+            int(phase_counts[2].item()),
+        )
+
+    def get_precomputed_turn_then_forward_command(self) -> torch.Tensor:
+        if not self.precomputed_turn_then_forward_enabled():
+            raise RuntimeError(
+                "Precomputed turn-then-forward command requested while its command mode is disabled."
+            )
+        motion_indices = self._get_motion_indices(self.time_steps)
+        command = self.motion.precomputed_root_command.index_select(0, motion_indices)
+        if self.pickup_anchor_set is None:
+            return torch.zeros_like(command)
+        return torch.where(
+            self.pickup_anchor_set.unsqueeze(-1),
+            command,
+            torch.zeros_like(command),
+        )
+
+    def get_precomputed_turn_then_forward_phase(self) -> torch.Tensor:
+        if not self.precomputed_turn_then_forward_enabled():
+            raise RuntimeError(
+                "Precomputed turn-then-forward phase requested while its command mode is disabled."
+            )
+        motion_indices = self._get_motion_indices(self.time_steps)
+        phase = self.motion.precomputed_root_command_phase.index_select(0, motion_indices)
+        if self.pickup_anchor_set is None:
+            return torch.zeros_like(phase)
+        return torch.where(self.pickup_anchor_set, phase, torch.zeros_like(phase))
+
+    def get_pure_rl_policy_command_after_lift_active_mask(self) -> torch.Tensor:
+        if not self.pure_rl_policy_command_after_lift_enabled():
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        if self.pickup_anchor_set is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        return self.pickup_anchor_set
+
+    def get_hybrid_stage2_task_env_mask(self) -> torch.Tensor:
+        mask = self.hybrid_stage2_task_env_mask
+        if mask is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        return mask
+
+    def get_hybrid_stage2_task_active_mask(self) -> torch.Tensor:
+        task_mask = self.get_hybrid_stage2_task_env_mask()
+        if self.pickup_anchor_set is None:
+            return torch.zeros_like(task_mask)
+        return task_mask & self.pickup_anchor_set
+
+    def get_hybrid_stage2_tracking_reward_mask(self) -> torch.Tensor:
+        """Keep imitation for tracking envs and for task envs before pickup."""
+
+        return ~self.get_hybrid_stage2_task_active_mask()
+
     def setup(self) -> None:
         self._validate_reset_sampling_curriculum_config(self.motion_cfg)
         self.num_envs = self._env.num_envs
@@ -3568,10 +4094,18 @@ class MotionCommand(CommandTermBase):
         self._manual_forward_after_lift_command_m = 0.0
         self._manual_forward_after_lift_rel_z_delta_m = 0.0
         self._manual_forward_after_lift_consecutive_steps = 0
+        self._manual_forward_after_lift_preserve_native_contact_buttons = False
+        self._manual_forward_after_lift_preserve_native_pickup_button = False
+        self._manual_forward_after_lift_preserve_native_drop_button = False
         self._manual_forward_after_lift_baseline_object_z = None
         self._manual_forward_after_lift_consecutive_count = None
         self._manual_forward_after_lift_triggered = None
         self._manual_forward_after_lift_trigger_episode_step = None
+        self._manual_forward_heading_lock_enabled = False
+        self._manual_forward_heading_lock_command_m = 0.0
+        self._manual_forward_heading_lock_active = None
+        self._manual_forward_heading_lock_origin_xy_w = None
+        self._manual_forward_heading_lock_yaw_w = None
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.manual_object_reset_rpy_offset = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
@@ -3585,11 +4119,30 @@ class MotionCommand(CommandTermBase):
         self._fixed_clip_group_env_mask = None
         self._fixed_clip_group_clip_mask = None
         self._fixed_clip_complement_clip_mask = None
+        self.hybrid_stage2_task_env_mask = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.bool
+        )
+        self.hybrid_velocity_task_env_mask = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.bool
+        )
+        self._hybrid_velocity_task_priority = torch.ones(
+            (self.num_envs,), device=self.device, dtype=torch.float32
+        )
         self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w[:, 3] = 1.0
+        self.pickup_anchor_object_pos_b = torch.zeros(
+            (self.num_envs, 3), device=self.device, dtype=torch.float32
+        )
+        self.pickup_anchor_object_quat_b = torch.zeros(
+            (self.num_envs, 4), device=self.device, dtype=torch.float32
+        )
+        self.pickup_anchor_object_quat_b[:, 3] = 1.0
         self.pickup_object_rel_z_baseline = torch.zeros((self.num_envs,), device=self.device, dtype=torch.float32)
+        self.hybrid_velocity_object_z_baseline = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.float32
+        )
         self.pickup_consecutive_counter = torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
 
         init_state = self._env.robot_config.init_state
@@ -3648,6 +4201,7 @@ class MotionCommand(CommandTermBase):
             object_size_scale=self.motion_cfg.object_size_scale,
             allowed_object_categories=self.motion_cfg.allowed_object_categories,
         )
+        self._validate_precomputed_turn_then_forward_config()
         self._validate_kinematic_button_motion_object()
         self._validate_motion_control_timebase()
         # Rank-local AS shards may intentionally contain only one clip even
@@ -3700,6 +4254,30 @@ class MotionCommand(CommandTermBase):
             self._configure_debug_representative_clips()
         else:
             self.object_indices_in_simulator = None
+        # Fixed env-to-clip assignment is not known until object mapping is
+        # configured. Build the hybrid split only now so every clip receives
+        # the requested tracking/task fraction independently.
+        self.hybrid_stage2_task_env_mask = self._build_hybrid_stage2_task_env_mask()
+        self._configure_hybrid_velocity_task_assignment()
+        if self.pure_rl_policy_command_after_lift_enabled():
+            if bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False)):
+                raise ValueError(
+                    "pure_rl_policy_command_after_lift and hybrid_stage2 are mutually exclusive."
+                )
+            logger.info(
+                "Enabled pure-RL policy-input command override for all {} environments: "
+                "pre_lift_actor_command=[0,0,0], post_lift_actor_command="
+                "[{:.3f},0,0], rewards_and_terminations_unchanged=True, "
+                "reference_tracking_offset_in_actor_command=False.",
+                self.num_envs,
+                float(
+                    getattr(
+                        self.motion_cfg,
+                        "pure_rl_policy_forward_command_m",
+                        0.5,
+                    )
+                ),
+            )
         self._configure_runtime_default_pose_prepend()
         self._configure_contact_prior_regions()
         # The valid reset range depends on future-target lookahead and must be
@@ -4828,6 +5406,11 @@ class MotionCommand(CommandTermBase):
                         0, self._terrain_row_count, (env_ids.numel(),), device=self.device
                     )
 
+        # Task/tracking identity is sampled only at an episode boundary.  A
+        # curriculum update can therefore never change an in-flight row's
+        # command, reward, critic mask, or termination contract.
+        self._refresh_hybrid_velocity_task_env_mask(env_ids)
+
         # 0. Sample the time steps.  start_at_timestep_zero_prob is applied below
         # as an explicit delta-at-zero mixture, so the base reset distribution
         # samples nonzero timesteps whenever the clip has one.
@@ -5056,6 +5639,7 @@ class MotionCommand(CommandTermBase):
                 root_pos_w=target_root_pos,
                 root_quat_w=target_root_rot,
                 object_pos_w=target_obj_pos,
+                object_quat_w=target_obj_ori,
             )
 
         if (
@@ -5197,6 +5781,7 @@ class MotionCommand(CommandTermBase):
         # triggered value is visible in the observation computed immediately
         # after this method returns.  Training never enters this branch.
         self._update_manual_forward_after_lift()
+        self._update_manual_forward_heading_lock()
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
@@ -5261,6 +5846,11 @@ class MotionCommand(CommandTermBase):
         command_m: float,
         rel_z_delta_m: float,
         consecutive_steps: int,
+        preserve_native_contact_buttons: bool = False,
+        preserve_native_pickup_button: bool = False,
+        preserve_native_drop_button: bool = False,
+        heading_lock: bool = False,
+        command_semantics: str = "legacy_constant_robot_heading_frame",
     ) -> None:
         """Hold a zero manual root command, then switch after a stable lift.
 
@@ -5269,18 +5859,57 @@ class MotionCommand(CommandTermBase):
         add to the reference root command: manual mode replaces the actor's
         sparse-root command with zero until the object has remained above its
         initial world-z by ``rel_z_delta_m`` for ``consecutive_steps`` control
-        steps, then replaces it with ``[command_m, 0, 0]``.
+        steps.  By default the replacement remains the deployment-faithful
+        constant ``[command_m, 0, 0]``.  The optional ``heading_lock`` mode is
+        a simulator diagnostic: it latches world heading at the transition
+        and recomputes the same actor slots every control step.  It must not
+        be presented as policy-only behavior or used for deployment-faithful
+        evaluation.
         """
 
         command = float(command_m)
         lift_delta = float(rel_z_delta_m)
         stable_steps = int(consecutive_steps)
+        semantics = str(command_semantics).strip().lower()
+        allowed_semantics = {
+            "legacy_constant_robot_heading_frame",
+            "robot_heading_velocity_mps",
+            "world_velocity_mps",
+            "world_root_error_m",
+        }
+        if semantics not in allowed_semantics:
+            raise ValueError(
+                "command_semantics must identify the checkpoint's actor command "
+                f"contract, got {command_semantics!r}."
+            )
+        if type(heading_lock) is not bool:
+            raise ValueError(f"heading_lock must be a bool, got {heading_lock!r}.")
+        if type(preserve_native_contact_buttons) is not bool:
+            raise ValueError(
+                "preserve_native_contact_buttons must be a bool, got "
+                f"{preserve_native_contact_buttons!r}."
+            )
+        if type(preserve_native_pickup_button) is not bool:
+            raise ValueError(
+                "preserve_native_pickup_button must be a bool, got "
+                f"{preserve_native_pickup_button!r}."
+            )
+        if type(preserve_native_drop_button) is not bool:
+            raise ValueError(
+                "preserve_native_drop_button must be a bool, got "
+                f"{preserve_native_drop_button!r}."
+            )
+        if heading_lock and semantics != "legacy_constant_robot_heading_frame":
+            raise ValueError(
+                "heading_lock is defined only for the legacy heading-frame "
+                "relative-pose command."
+            )
         if not np.isfinite(command):
             raise ValueError(f"command_m must be finite, got {command_m!r}.")
         if not np.isfinite(lift_delta) or lift_delta <= 0.0:
             raise ValueError(f"rel_z_delta_m must be finite and positive, got {rel_z_delta_m!r}.")
-        if isinstance(consecutive_steps, bool) or stable_steps <= 0 or stable_steps != consecutive_steps:
-            raise ValueError(f"consecutive_steps must be a positive integer, got {consecutive_steps!r}.")
+        if isinstance(consecutive_steps, bool) or stable_steps < 0 or stable_steps != consecutive_steps:
+            raise ValueError(f"consecutive_steps must be a non-negative integer, got {consecutive_steps!r}.")
         if not self.motion.has_object:
             raise RuntimeError("manual forward-after-lift requires an object motion.")
         if self.manual_xy_rel is None or self.manual_yaw_rel is None or self.manual_drop_button is None:
@@ -5296,13 +5925,25 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = True
         self.manual_xy_rel.zero_()
         self.manual_yaw_rel.zero_()
-        self.manual_drop_button_override_enabled = True
-        self.manual_drop_button.zero_()
+        self.manual_pickup_button_override_enabled = False
+        preserve_pickup = (
+            preserve_native_contact_buttons or preserve_native_pickup_button
+        )
+        preserve_drop = preserve_native_contact_buttons or preserve_native_drop_button
+        self.manual_drop_button_override_enabled = not preserve_drop
+        if self.manual_drop_button_override_enabled:
+            self.manual_drop_button.zero_()
 
         self._manual_forward_after_lift_enabled = True
         self._manual_forward_after_lift_command_m = command
         self._manual_forward_after_lift_rel_z_delta_m = lift_delta
         self._manual_forward_after_lift_consecutive_steps = stable_steps
+        self._manual_forward_after_lift_preserve_native_contact_buttons = (
+            preserve_native_contact_buttons
+        )
+        self._manual_forward_after_lift_preserve_native_pickup_button = preserve_pickup
+        self._manual_forward_after_lift_preserve_native_drop_button = preserve_drop
+        self._manual_forward_after_lift_command_semantics = semantics
         self._manual_forward_after_lift_baseline_object_z = current_object_z
         self._manual_forward_after_lift_consecutive_count = torch.zeros(
             (self.num_envs,),
@@ -5320,6 +5961,101 @@ class MotionCommand(CommandTermBase):
             device=self.device,
             dtype=torch.long,
         )
+        if heading_lock:
+            self._prepare_manual_forward_heading_lock(command)
+        else:
+            # Deployment-faithful mode: reproduce the externally supplied
+            # constant body-frame command without simulator-state feedback.
+            self._manual_forward_heading_lock_enabled = False
+            self._manual_forward_heading_lock_command_m = command
+            self._manual_forward_heading_lock_active = None
+            self._manual_forward_heading_lock_origin_xy_w = None
+            self._manual_forward_heading_lock_yaw_w = None
+
+    def configure_manual_heading_locked_forward(self, *, command_m: float) -> None:
+        """Enable an immediate world-heading-locked manual forward command.
+
+        ``command_m`` preserves the existing external command and actor
+        interfaces.  It specifies a constant lookahead along the robot's world
+        heading at configuration time.  The actor still receives exactly
+        ``[dx, dy, dyaw]`` in its current heading frame.
+        """
+
+        command = float(command_m)
+        if not np.isfinite(command):
+            raise ValueError(f"command_m must be finite, got {command_m!r}.")
+        if self.manual_xy_rel is None or self.manual_yaw_rel is None:
+            raise RuntimeError("MotionCommand manual-control tensors are not initialized.")
+
+        self.manual_control_enabled = True
+        self.manual_xy_rel.zero_()
+        self.manual_yaw_rel.zero_()
+        self._prepare_manual_forward_heading_lock(command)
+        active = self._manual_forward_heading_lock_active
+        if active is None:
+            raise RuntimeError("Manual forward heading-lock state was not initialized.")
+        active.fill_(True)
+        self._capture_manual_forward_heading_lock(active)
+        self._update_manual_forward_heading_lock()
+
+    def _prepare_manual_forward_heading_lock(self, command_m: float) -> None:
+        self._manual_forward_heading_lock_enabled = True
+        self._manual_forward_heading_lock_command_m = float(command_m)
+        self._manual_forward_heading_lock_active = torch.zeros(
+            (self.num_envs,),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        self._manual_forward_heading_lock_origin_xy_w = torch.zeros(
+            (self.num_envs, 2),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._manual_forward_heading_lock_yaw_w = torch.zeros(
+            (self.num_envs,),
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def _capture_manual_forward_heading_lock(self, env_mask: torch.Tensor) -> None:
+        active = self._manual_forward_heading_lock_active
+        origin_xy_w = self._manual_forward_heading_lock_origin_xy_w
+        anchor_yaw_w = self._manual_forward_heading_lock_yaw_w
+        if active is None or origin_xy_w is None or anchor_yaw_w is None:
+            raise RuntimeError("Manual forward heading-lock state is incomplete.")
+        if env_mask.shape != (self.num_envs,) or env_mask.dtype != torch.bool:
+            raise RuntimeError(
+                "Manual forward heading-lock activation mask must be bool[num_envs], "
+                f"got dtype={env_mask.dtype}, shape={tuple(env_mask.shape)}."
+            )
+        if not torch.any(env_mask):
+            return
+        origin_xy_w[env_mask] = self.robot_root_pos_w[env_mask, :2].detach()
+        anchor_yaw_w[env_mask] = calc_heading(self.robot_root_quat_w[env_mask]).detach()
+
+    def _update_manual_forward_heading_lock(self) -> None:
+        if not self._manual_forward_heading_lock_enabled:
+            return
+        active = self._manual_forward_heading_lock_active
+        anchor_yaw_w = self._manual_forward_heading_lock_yaw_w
+        if active is None or anchor_yaw_w is None:
+            raise RuntimeError("Manual forward heading-lock state is incomplete.")
+        if self.manual_xy_rel is None or self.manual_yaw_rel is None:
+            raise RuntimeError("MotionCommand manual-control tensors are not initialized.")
+        if not torch.any(active):
+            return
+
+        current_yaw_w = calc_heading(self.robot_root_quat_w)
+        heading_error = normalize_angle(anchor_yaw_w - current_yaw_w)
+        command = self._manual_forward_heading_lock_command_m
+
+        # Express a constant world-heading lookahead in the robot's current
+        # heading frame.  A yaw disturbance therefore produces both a lateral
+        # translation component and a restoring relative-yaw command while the
+        # actor input shape/order stays unchanged.
+        self.manual_xy_rel[active, 0] = command * torch.cos(heading_error[active])
+        self.manual_xy_rel[active, 1] = command * torch.sin(heading_error[active])
+        self.manual_yaw_rel[active, 0] = heading_error[active]
 
     def _update_manual_forward_after_lift(self) -> None:
         if not self._manual_forward_after_lift_enabled:
@@ -5330,19 +6066,36 @@ class MotionCommand(CommandTermBase):
         trigger_step = self._manual_forward_after_lift_trigger_episode_step
         if baseline is None or counter is None or triggered is None or trigger_step is None:
             raise RuntimeError("manual forward-after-lift state is incomplete.")
-        if self.manual_xy_rel is None:
-            raise RuntimeError("manual_xy_rel is unavailable during forward-after-lift evaluation.")
+        heading_lock_active = self._manual_forward_heading_lock_active
+        if self._manual_forward_heading_lock_enabled and heading_lock_active is None:
+            raise RuntimeError("manual forward-after-lift heading-lock state is incomplete.")
+        if self.manual_xy_rel is None or self.manual_yaw_rel is None:
+            raise RuntimeError("MotionCommand manual-control tensors are not initialized.")
 
         object_z = self.simulator_object_state_snapshot[:, 2]
         above_threshold = (object_z - baseline) >= self._manual_forward_after_lift_rel_z_delta_m
         waiting = ~triggered
         counter.copy_(torch.where(waiting & above_threshold, counter + 1, torch.zeros_like(counter)))
-        newly_triggered = waiting & (counter >= self._manual_forward_after_lift_consecutive_steps)
+        if self._manual_forward_after_lift_consecutive_steps == 0:
+            # Zero disables debounce, but it must not bypass the lift threshold:
+            # trigger on the first threshold-qualified control step.
+            newly_triggered = waiting & above_threshold
+        else:
+            newly_triggered = waiting & (counter >= self._manual_forward_after_lift_consecutive_steps)
         if torch.any(newly_triggered):
-            self.manual_xy_rel[newly_triggered, 0] = self._manual_forward_after_lift_command_m
-            self.manual_xy_rel[newly_triggered, 1] = 0.0
+            if self._manual_forward_heading_lock_enabled:
+                if heading_lock_active is None:
+                    raise RuntimeError("manual forward-after-lift heading-lock state is incomplete.")
+                heading_lock_active.logical_or_(newly_triggered)
+                self._capture_manual_forward_heading_lock(newly_triggered)
+            else:
+                self.manual_xy_rel[newly_triggered, 0] = self._manual_forward_after_lift_command_m
+                self.manual_xy_rel[newly_triggered, 1] = 0.0
+                self.manual_yaw_rel[newly_triggered, 0] = 0.0
             triggered.logical_or_(newly_triggered)
             trigger_step[newly_triggered] = self._env.episode_length_buf[newly_triggered].to(dtype=torch.long)
+            if self._manual_forward_heading_lock_enabled:
+                self._update_manual_forward_heading_lock()
 
     def get_manual_forward_after_lift_status(self, env_id: int = 0) -> dict[str, Any] | None:
         """Return a compact audit record for the evaluation recorder."""
@@ -5358,17 +6111,73 @@ class MotionCommand(CommandTermBase):
         if baseline is None or counter is None or triggered is None or trigger_step is None:
             raise RuntimeError("manual forward-after-lift state is incomplete.")
         object_z = self.simulator_object_state_snapshot[env_id, 2]
+        heading_lock_status = self.get_manual_forward_heading_lock_status(env_id)
         return {
             "phase": "forward" if bool(triggered[env_id].item()) else "pickup_zero",
+            "command_semantics": (
+                "world_heading_locked_lookahead"
+                if self._manual_forward_heading_lock_enabled
+                else self._manual_forward_after_lift_command_semantics
+            ),
             "configured_forward_command_m": float(self._manual_forward_after_lift_command_m),
             "active_forward_command_m": float(self.manual_xy_rel[env_id, 0].item()),
             "rel_z_delta_m": float(object_z.item() - baseline[env_id].item()),
             "trigger_rel_z_delta_m": float(self._manual_forward_after_lift_rel_z_delta_m),
             "consecutive_count": int(counter[env_id].item()),
             "required_consecutive_steps": int(self._manual_forward_after_lift_consecutive_steps),
+            "preserve_native_contact_buttons": bool(
+                self._manual_forward_after_lift_preserve_native_contact_buttons
+            ),
+            "preserve_native_pickup_button": bool(
+                self._manual_forward_after_lift_preserve_native_pickup_button
+            ),
+            "preserve_native_drop_button": bool(
+                self._manual_forward_after_lift_preserve_native_drop_button
+            ),
             "triggered": bool(triggered[env_id].item()),
             "trigger_episode_step": int(trigger_step[env_id].item()),
+            "heading_lock": heading_lock_status,
         }
+
+    def get_manual_forward_heading_lock_status(self, env_id: int = 0) -> dict[str, Any] | None:
+        """Return the external command and effective actor command for audit."""
+
+        if not self._manual_forward_heading_lock_enabled:
+            return None
+        if env_id < 0 or env_id >= self.num_envs:
+            raise IndexError(f"env_id {env_id} is outside [0, {self.num_envs}).")
+        active = self._manual_forward_heading_lock_active
+        origin_xy_w = self._manual_forward_heading_lock_origin_xy_w
+        anchor_yaw_w = self._manual_forward_heading_lock_yaw_w
+        if active is None or origin_xy_w is None or anchor_yaw_w is None:
+            raise RuntimeError("Manual forward heading-lock state is incomplete.")
+
+        is_active = bool(active[env_id].item())
+        status: dict[str, Any] = {
+            "semantics": "world_heading_locked_lookahead",
+            "active": is_active,
+            "configured_forward_command_m": float(self._manual_forward_heading_lock_command_m),
+            "actor_command_xy_m": self.manual_xy_rel[env_id].detach().cpu().tolist(),
+            "actor_command_yaw_rad": float(self.manual_yaw_rel[env_id, 0].item()),
+        }
+        if not is_active:
+            return status
+
+        current_xy_w = self.robot_root_pos_w[env_id, :2]
+        anchor_yaw = anchor_yaw_w[env_id]
+        current_yaw = calc_heading(self.robot_root_quat_w[env_id : env_id + 1])[0]
+        displacement = current_xy_w - origin_xy_w[env_id]
+        forward_w = torch.stack((torch.cos(anchor_yaw), torch.sin(anchor_yaw)))
+        left_w = torch.stack((-torch.sin(anchor_yaw), torch.cos(anchor_yaw)))
+        status.update(
+            {
+                "anchor_yaw_w_rad": float(anchor_yaw.item()),
+                "heading_error_rad": float(normalize_angle(anchor_yaw - current_yaw).item()),
+                "along_track_displacement_m": float(torch.dot(displacement, forward_w).item()),
+                "cross_track_error_m": float(torch.dot(displacement, left_w).item()),
+            }
+        )
+        return status
 
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
@@ -6450,6 +7259,7 @@ class MotionCommand(CommandTermBase):
         root_pos_w: torch.Tensor | None = None,
         root_quat_w: torch.Tensor | None = None,
         object_pos_w: torch.Tensor | None = None,
+        object_quat_w: torch.Tensor | None = None,
     ) -> None:
         if (
             self.pickup_anchor_set is None
@@ -6466,12 +7276,24 @@ class MotionCommand(CommandTermBase):
         self.pickup_anchor_root_quat_w[env_ids] = 0.0
         self.pickup_anchor_root_quat_w[env_ids, 3] = 1.0
         self.pickup_object_rel_z_baseline[env_ids] = 0.0
+        hybrid_object_z_baseline = getattr(self, "hybrid_velocity_object_z_baseline", None)
+        if hybrid_object_z_baseline is not None:
+            hybrid_object_z_baseline[env_ids] = 0.0
+        anchor_object_pos_b = getattr(self, "pickup_anchor_object_pos_b", None)
+        anchor_object_quat_b = getattr(self, "pickup_anchor_object_quat_b", None)
+        if anchor_object_pos_b is not None:
+            anchor_object_pos_b[env_ids] = 0.0
+        if anchor_object_quat_b is not None:
+            anchor_object_quat_b[env_ids] = 0.0
+            anchor_object_quat_b[env_ids, 3] = 1.0
 
         if root_pos_w is None or root_quat_w is None or object_pos_w is None:
             return
         self.pickup_anchor_root_pos_w[env_ids] = root_pos_w
         self.pickup_anchor_root_quat_w[env_ids] = root_quat_w
         self.pickup_object_rel_z_baseline[env_ids] = object_pos_w[:, 2] - root_pos_w[:, 2]
+        if hybrid_object_z_baseline is not None:
+            hybrid_object_z_baseline[env_ids] = object_pos_w[:, 2]
 
         # If reset starts after the clip's pickup phase, treat the object as already
         # picked at reset time.
@@ -6484,6 +7306,39 @@ class MotionCommand(CommandTermBase):
         self.pickup_consecutive_counter[env_ids] = already_picked_mask.to(
             dtype=self.pickup_consecutive_counter.dtype
         ) * _RUNTIME_PICKUP_CONSECUTIVE_STEPS
+        if hybrid_object_z_baseline is not None and self.hybrid_velocity_enabled():
+            lift_height = float(self.motion_cfg.hybrid_velocity_lift_height_m)
+            hybrid_object_z_baseline[env_ids] = torch.where(
+                already_picked_mask,
+                object_pos_w[:, 2] - lift_height,
+                hybrid_object_z_baseline[env_ids],
+            )
+        if (
+            anchor_object_pos_b is not None
+            and anchor_object_quat_b is not None
+            and object_quat_w is not None
+        ):
+            root_quat_inv = quat_inverse(root_quat_w, w_last=True)
+            candidate_object_pos_b = quat_apply(
+                root_quat_inv,
+                object_pos_w - root_pos_w,
+                w_last=True,
+            )
+            candidate_object_quat_b = quat_mul(
+                root_quat_inv,
+                object_quat_w,
+                w_last=True,
+            )
+            anchor_object_pos_b[env_ids] = torch.where(
+                already_picked_mask.unsqueeze(-1),
+                candidate_object_pos_b,
+                anchor_object_pos_b[env_ids],
+            )
+            anchor_object_quat_b[env_ids] = torch.where(
+                already_picked_mask.unsqueeze(-1),
+                candidate_object_quat_b,
+                anchor_object_quat_b[env_ids],
+            )
 
     def _update_pickup_anchor_state(self) -> None:
         if (
@@ -6518,6 +7373,27 @@ class MotionCommand(CommandTermBase):
         self.pickup_anchor_root_quat_w.copy_(
             torch.where(update_pos_mask, self.robot_root_quat_w, self.pickup_anchor_root_quat_w)
         )
+        anchor_object_pos_b = getattr(self, "pickup_anchor_object_pos_b", None)
+        anchor_object_quat_b = getattr(self, "pickup_anchor_object_quat_b", None)
+        if anchor_object_pos_b is not None and anchor_object_quat_b is not None:
+            root_quat_inv = quat_inverse(self.robot_root_quat_w, w_last=True)
+            candidate_object_pos_b = quat_apply(
+                root_quat_inv,
+                self.simulator_object_pos_w - self.robot_root_pos_w,
+                w_last=True,
+            )
+            candidate_object_quat_b = quat_mul(
+                root_quat_inv,
+                self.simulator_object_quat_w,
+                w_last=True,
+            )
+            update_object_mask = newly_picked.unsqueeze(-1)
+            anchor_object_pos_b.copy_(
+                torch.where(update_object_mask, candidate_object_pos_b, anchor_object_pos_b)
+            )
+            anchor_object_quat_b.copy_(
+                torch.where(update_object_mask, candidate_object_quat_b, anchor_object_quat_b)
+            )
         self.pickup_anchor_set.logical_or_(newly_picked)
 
     def _update_contact_prior_state(self) -> None:
@@ -6769,6 +7645,20 @@ class MotionCommand(CommandTermBase):
         return quat
 
     @property
+    def root_lin_vel_w(self) -> torch.Tensor:
+        vel = self._raw_motion_body_lin_vel_w()[:, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
+
+    @property
+    def root_ang_vel_w(self) -> torch.Tensor:
+        vel = self._raw_motion_body_ang_vel_w()[:, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
+
+    @property
     def ref_lin_vel_w(self) -> torch.Tensor:
         vel = self._raw_motion_body_lin_vel_w()[:, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
@@ -7008,8 +7898,15 @@ class MotionCommand(CommandTermBase):
         if self.pickup_anchor_root_quat_w is not None:
             self.pickup_anchor_root_quat_w.zero_()
             self.pickup_anchor_root_quat_w[:, 3] = 1.0
+        if self.pickup_anchor_object_pos_b is not None:
+            self.pickup_anchor_object_pos_b.zero_()
+        if self.pickup_anchor_object_quat_b is not None:
+            self.pickup_anchor_object_quat_b.zero_()
+            self.pickup_anchor_object_quat_b[:, 3] = 1.0
         if self.pickup_object_rel_z_baseline is not None:
             self.pickup_object_rel_z_baseline.zero_()
+        if self.hybrid_velocity_object_z_baseline is not None:
+            self.hybrid_velocity_object_z_baseline.zero_()
         if self.pickup_consecutive_counter is not None:
             self.pickup_consecutive_counter.zero_()
         if self._runtime_default_pose_prepend_active is not None:
@@ -7643,6 +8540,41 @@ class MotionCommand(CommandTermBase):
         else:
             zeros = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
             self._update_empty_lift_diagnostic_metrics(zeros)
+
+        if self.hybrid_velocity_enabled():
+            task_mask = self.get_hybrid_velocity_task_env_mask()
+            task_active = self.get_hybrid_velocity_task_active_mask()
+            task_count = task_mask.to(dtype=torch.float32).sum().clamp_min(1.0)
+            lifted_fraction_of_task = (
+                task_active.to(dtype=torch.float32).sum() / task_count
+            )
+            self.metrics["hybrid_velocity/task_env_fraction_active"] = task_mask.to(
+                dtype=torch.float32
+            )
+            self.metrics["hybrid_velocity/task_env_fraction_target"] = torch.full(
+                (self.num_envs,),
+                self._current_hybrid_velocity_task_env_fraction(),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.metrics["hybrid_velocity/lifted_fraction_of_task"] = (
+                lifted_fraction_of_task.expand(self.num_envs)
+            )
+
+        if self.precomputed_turn_then_forward_enabled():
+            phase = self.get_precomputed_turn_then_forward_phase()
+            command = self.get_precomputed_turn_then_forward_command()
+            self.metrics["precomputed_command/zero_phase"] = (phase == 0).to(
+                dtype=torch.float32
+            )
+            self.metrics["precomputed_command/forward_phase"] = (phase == 1).to(
+                dtype=torch.float32
+            )
+            self.metrics["precomputed_command/yaw_phase"] = (phase == 2).to(
+                dtype=torch.float32
+            )
+            self.metrics["precomputed_command/forward_value_m"] = command[:, 0]
+            self.metrics["precomputed_command/abs_yaw_value_rad"] = command[:, 2].abs()
 
         self.metrics["motion/reset_start_at_timestep_zero_prob"] = torch.full(
             (self.num_envs,),

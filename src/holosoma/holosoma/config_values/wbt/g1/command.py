@@ -62,6 +62,40 @@ motion_config_w_object_generalist = replace(
     freeze_at_timestep_zero_prob=0.0,
 )
 
+motion_config_w_object_hybrid_stage2 = replace(
+    motion_config_w_object_generalist,
+    hybrid_stage2_enabled=True,
+    hybrid_stage2_task_env_fraction=0.5,
+    hybrid_stage2_forward_command_m=0.15,
+)
+
+motion_config_w_object_hybrid_velocity = replace(
+    motion_config_w_object_generalist,
+    hybrid_velocity_enabled=True,
+    hybrid_velocity_task_env_fraction_start=0.0,
+    hybrid_velocity_task_env_fraction_end=0.5,
+    hybrid_velocity_task_env_fraction_start_iter=0,
+    hybrid_velocity_task_env_fraction_end_iter=5000,
+    hybrid_velocity_forward_command_mps=0.5,
+    hybrid_velocity_lift_height_m=0.10,
+)
+
+motion_config_w_object_hybrid_world_velocity = replace(
+    motion_config_w_object_hybrid_velocity,
+    hybrid_velocity_command_frame="world",
+)
+
+motion_config_w_object_pure_rl_policy_command_after_lift = replace(
+    motion_config_w_object_generalist,
+    pure_rl_policy_command_after_lift_enabled=True,
+    pure_rl_policy_forward_command_m=0.5,
+    enable_default_pose_prepend=False,
+    default_pose_prepend_duration_s=0.0,
+    enable_default_pose_append=False,
+    default_pose_append_duration_s=0.0,
+    contact_interval_runtime_prepend_compensation=False,
+)
+
 g1_29dof_wbt_command = CommandManagerCfg(
     params={},
     setup_terms={
@@ -120,9 +154,61 @@ g1_29dof_wbt_command_w_object_generalist = replace(
     },
 )
 
+g1_29dof_wbt_command_w_object_hybrid_stage2 = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_hybrid_stage2,
+            },
+        )
+    },
+)
+
+g1_29dof_wbt_command_w_object_hybrid_velocity = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_hybrid_velocity,
+            },
+        )
+    },
+)
+
+g1_29dof_wbt_command_w_object_hybrid_world_velocity = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_hybrid_world_velocity,
+            },
+        )
+    },
+)
+
+g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_pure_rl_policy_command_after_lift,
+            },
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_motion_tracking",
     "g1_29dof_wbt_command_w_object",
     "g1_29dof_wbt_command_w_object_generalist",
+    "g1_29dof_wbt_command_w_object_hybrid_stage2",
+    "g1_29dof_wbt_command_w_object_hybrid_velocity",
+    "g1_29dof_wbt_command_w_object_hybrid_world_velocity",
+    "g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift",
 ]

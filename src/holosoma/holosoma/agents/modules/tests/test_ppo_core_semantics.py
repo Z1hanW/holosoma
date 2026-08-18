@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import itertools
+import json
 import math
 import random
 from contextlib import nullcontext
@@ -12,7 +13,9 @@ from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
 import numpy as np
+import onnx
 import torch
+from onnx import TensorProto, helper
 from torch import nn
 from torch.distributions import Normal
 
@@ -163,6 +166,10 @@ def _loss_stub(*, use_symmetry: bool = False) -> PPO:
         symmetry_critic_coef=1.0 if use_symmetry else 0.0,
         value_loss_coef=1.0,
     )
+    ppo._entropy_coef_start = 0.0
+    ppo._entropy_coef_end = 0.0
+    ppo._entropy_coef_decay_start_iteration = 0
+    ppo._entropy_coef_decay_end_iteration = 0
     return ppo
 
 
@@ -1509,6 +1516,31 @@ def test_training_boundary_checks_all_floating_rollout_buffers():
 
     with pytest.raises(FloatingPointError, match=r"filled rollout.*rewards"):
         ppo._assert_rollout_storage_finite()
+
+
+def test_training_boundary_checks_large_buffers_one_rollout_step_at_a_time(monkeypatch):
+    ppo = object.__new__(PPO)
+    ppo.device = "cpu"
+    ppo.is_multi_gpu = False
+    perception = torch.zeros(3, 2, 4)
+    perception[2, 1, 3] = float("nan")
+    ppo.storage = SimpleNamespace(
+        step=3,
+        _buffers={"actor_perception": perception},
+    )
+    original_isfinite = torch.isfinite
+    checked_shapes = []
+
+    def tracked_isfinite(tensor):
+        checked_shapes.append(tuple(tensor.shape))
+        return original_isfinite(tensor)
+
+    monkeypatch.setattr(torch, "isfinite", tracked_isfinite)
+
+    with pytest.raises(FloatingPointError, match=r"filled rollout.*actor_perception"):
+        ppo._assert_rollout_storage_finite()
+
+    assert checked_shapes == [(2, 4), (2, 4), (2, 4)]
 
 
 def test_every_actor_optimizer_step_hard_projects_max_noise_std():
@@ -3762,6 +3794,43 @@ def test_t1_aligned_sparse_root_required_onnx_fails_before_any_training_work():
     ppo.env.reset_all.assert_not_called()
 
 
+def test_rolling_reference_delta_required_onnx_accepts_exact_live_adapter():
+    ppo = object.__new__(PPO)
+    ppo.use_time_gru = False
+    ppo.actor = SimpleNamespace(
+        supports_flow_matching=False,
+        actor_module=SimpleNamespace(module=SimpleNamespace(inference_noise_std=0.0)),
+    )
+    motion_config = SimpleNamespace(
+        contact_aware_sparse_root_command_mode="rolling_reference_delta",
+        contact_aware_sparse_root_segment_steps=30,
+        contact_aware_sparse_root_zero_yaw_threshold_deg=0.0,
+        zero_root_command_when_drop_active=True,
+    )
+    ppo._experiment_config = SimpleNamespace(
+        training=SimpleNamespace(export_onnx=True),
+        command=SimpleNamespace(
+            setup_terms={
+                "motion_command": SimpleNamespace(
+                    params={"motion_config": motion_config}
+                )
+            }
+        ),
+    )
+    live_motion_command = SimpleNamespace(
+        motion=SimpleNamespace(has_object=True)
+    )
+    ppo.env = SimpleNamespace(
+        command_manager=SimpleNamespace(
+            get_state=lambda name: (
+                live_motion_command if name == "motion_command" else None
+            )
+        )
+    )
+
+    ppo._validate_actor_onnx_compatibility(training_preflight=True)
+
+
 def test_learn_applies_resumed_iteration_schedule_before_initial_reset():
     events: list[tuple[str, int | None, int | None]] = []
     ppo = object.__new__(PPO)
@@ -4162,6 +4231,208 @@ def test_successful_onnx_export_returns_sha256_of_published_bytes(tmp_path) -> N
     assert artifact.read_bytes() == payload
 
 
+def test_required_policy_pair_publishes_resumable_pt_last_and_preserves_rng(
+    tmp_path,
+) -> None:
+    original_rng = capture_rng_checkpoint_state()
+    try:
+        ppo = object.__new__(PPO)
+        ppo.is_main_process = True
+        ppo._synchronize_training_phase_error = MethodType(
+            lambda self, error, *, operation: (
+                (_ for _ in ()).throw(error) if error is not None else None
+            ),
+            ppo,
+        )
+        checkpoint_path = tmp_path / "model_00010.pt"
+        onnx_path = tmp_path / "model_00010.onnx"
+        manifest_path = tmp_path / "model_00010.pair.json"
+        digest = "a" * 64
+
+        def noisy_save(*_args, **_kwargs):
+            random.random()
+            np.random.random()
+            torch.rand(1)
+
+        def noisy_export(*_args, **_kwargs):
+            random.random()
+            np.random.random()
+            torch.rand(1)
+            return digest
+
+        ppo._save_checkpoint_with_distributed_outcome = Mock(side_effect=noisy_save)
+        ppo._export_final_onnx_with_distributed_outcome = Mock(
+            side_effect=noisy_export
+        )
+        ppo._write_policy_artifact_pair_manifest = Mock(
+            return_value=str(manifest_path)
+        )
+        uploads: list[str] = []
+        ppo.logging_helper = SimpleNamespace(save_to_wandb=uploads.append)
+
+        random.seed(214)
+        np.random.seed(215)
+        torch.manual_seed(216)
+        boundary = capture_rng_checkpoint_state()
+        expected = (random.random(), float(np.random.random()), torch.rand(2))
+        restore_rng_checkpoint_state(boundary)
+
+        actual = ppo._save_policy_artifact_pair_with_distributed_outcome(
+            checkpoint_path=str(checkpoint_path),
+            onnx_path=str(onnx_path),
+            next_iteration=10,
+        )
+
+        assert actual == digest
+        ppo._save_checkpoint_with_distributed_outcome.assert_called_once_with(
+            str(checkpoint_path),
+            next_iteration=10,
+            upload=False,
+        )
+        ppo._export_final_onnx_with_distributed_outcome.assert_called_once_with(
+            str(onnx_path),
+            iteration=9,
+            upload=False,
+        )
+        assert uploads == [
+            str(onnx_path),
+            str(manifest_path),
+            str(checkpoint_path),
+        ]
+        assert random.random() == expected[0]
+        assert float(np.random.random()) == expected[1]
+        assert torch.equal(torch.rand(2), expected[2])
+    finally:
+        restore_rng_checkpoint_state(original_rng)
+
+
+def test_required_policy_pair_removes_pt_when_onnx_export_fails(tmp_path) -> None:
+    ppo = object.__new__(PPO)
+    ppo.is_main_process = True
+    checkpoint_path = tmp_path / "model_00010.pt"
+    onnx_path = tmp_path / "model_00010.onnx"
+    manifest_path = tmp_path / "model_00010.pair.json"
+
+    def write_pt(*_args, **_kwargs):
+        checkpoint_path.write_bytes(b"pt")
+
+    def fail_onnx(*_args, **_kwargs):
+        onnx_path.write_bytes(b"partial")
+        manifest_path.write_text("partial", encoding="utf-8")
+        raise RuntimeError("synthetic required ONNX failure")
+
+    ppo._save_checkpoint_with_distributed_outcome = Mock(side_effect=write_pt)
+    ppo._export_final_onnx_with_distributed_outcome = Mock(side_effect=fail_onnx)
+
+    with pytest.raises(RuntimeError, match="synthetic required ONNX failure"):
+        ppo._save_policy_artifact_pair_with_distributed_outcome(
+            checkpoint_path=str(checkpoint_path),
+            onnx_path=str(onnx_path),
+            next_iteration=10,
+        )
+
+    assert not checkpoint_path.exists()
+    assert not onnx_path.exists()
+    assert not manifest_path.exists()
+
+
+def test_policy_pair_manifest_binds_source_config_and_iterations(tmp_path) -> None:
+    checkpoint_path = tmp_path / "model_00010.pt"
+    onnx_path = tmp_path / "model_00010.onnx"
+    experiment_config = {"training": {"seed": 42}, "command": {}}
+    training_provenance = {
+        "source_snapshot_id": "src-fixture",
+        "motion_view_sha256": "1" * 64,
+        "rank_shard_sha256": "2" * 64,
+    }
+    torch.save(
+        {
+            "iter": 9,
+            "next_iter": 10,
+            "experiment_config": experiment_config,
+            "training_provenance": training_provenance,
+        },
+        checkpoint_path,
+    )
+
+    actor_obs = helper.make_tensor_value_info(
+        "actor_obs", TensorProto.FLOAT, ["batch", 1]
+    )
+    action = helper.make_tensor_value_info(
+        "action", TensorProto.FLOAT, ["batch", 1]
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Identity", ["actor_obs"], ["action"])],
+            "pair",
+            [actor_obs],
+            [action],
+        )
+    )
+    validation = {
+        "version": 1,
+        "checker": "onnx.checker.check_model",
+        "runtime": "onnxruntime_cpu",
+        "pytorch_vs_ort": True,
+        "input_names": ["actor_obs"],
+        "output_names": ["action"],
+        "probe_rows": 6,
+        "rtol": 1.0e-4,
+        "atol": 1.0e-5,
+        "max_abs_error": 0.0,
+        "max_rel_error": 0.0,
+        "completed_iteration": 9,
+        "actor_graph_semantics": (
+            "raw_actor_observation_plus_authenticated_external_observation_adapter"
+        ),
+        "precomputed_command_contract_sha256": None,
+        "rolling_reference_delta_contract_sha256": None,
+    }
+    for key, value in (
+        ("iteration", 9),
+        ("experiment_config", experiment_config),
+        ("training_provenance", training_provenance),
+        ("onnx_validation_contract", validation),
+    ):
+        entry = model.metadata_props.add()
+        entry.key = key
+        entry.value = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    onnx.save(model, onnx_path)
+
+    ppo = object.__new__(PPO)
+    ppo._experiment_config = {}
+    onnx_sha256 = ppo._stable_onnx_sha256(str(onnx_path))
+    manifest_path = ppo._write_policy_artifact_pair_manifest(
+        checkpoint_path=str(checkpoint_path),
+        onnx_path=str(onnx_path),
+        next_iteration=10,
+        onnx_sha256=onnx_sha256,
+    )
+
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["completed_iteration"] == 9
+    assert manifest["next_iteration"] == 10
+    assert manifest["pt"]["sha256"] == hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
+    assert manifest["onnx"]["sha256"] == onnx_sha256
+    assert manifest["training_provenance_sha256"] == hashlib.sha256(
+        json.dumps(
+            training_provenance,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert len(manifest["bound_metadata_sha256"]) == 64
+
+
 def test_time_gru_policy_export_fails_closed_until_hidden_state_is_explicit_io() -> None:
     ppo = object.__new__(PPO)
     ppo.use_time_gru = True
@@ -4414,6 +4685,74 @@ def test_evaluation_retains_all_rank_perception_geometry_for_export() -> None:
     assert support["training_rank_count"] == 2
     assert len(support["object_mesh_support"]) == 2
     manager.validate_deployment_geometry_support.assert_called_once_with(support)
+
+
+def test_explicit_evaluation_ood_geometry_is_audited_before_actor_commit() -> None:
+    ppo = _checkpoint_load_stub(normalize_actor=False)
+    ppo.actor_perception_key = "perception_obs"
+    ppo._policy_load_runtime_config = SimpleNamespace(
+        to_serializable_dict=lambda: {"runtime": "actor-contract"}
+    )
+    ppo._evaluation_only = True
+    ppo.enable_evaluation_only_ood_object_geometry()
+    manager = object.__new__(PerceptionManager)
+    manager.enabled = True
+    live_support = PerceptionManager._normalize_training_geometry_support(
+        {
+            "version": 1,
+            "camera_source": "far_tracking_warp",
+            "training_rank_count": 1,
+            "robot_mesh_bindings": [],
+            "object_mesh_support": [
+                {
+                    "source_name": "object",
+                    "mesh": {
+                        "suffix": ".obj",
+                        "size_bytes": 17,
+                        "sha256": "d" * 64,
+                    },
+                    "training_active_env_count": 1,
+                }
+            ],
+        }
+    )
+    manager.get_local_geometry_support = Mock(return_value=live_support)
+    manager.validate_deployment_geometry_support = Mock()
+    ppo.env._perception_checkpoint_topology = Mock(
+        return_value=(
+            {"actor": "actor", "teacher": None, "critic": "actor"},
+            {"actor": manager},
+        )
+    )
+    checkpoint = {
+        "actor_model_state_dict": ppo.actor.state_dict(),
+        "experiment_config": {"algo": {"config": {"normalize_actor_obs": False}}},
+        "env_state_by_rank": {
+            "0": _perception_rank_env_state(object_digest="b" * 64)
+        },
+        "iter": 12,
+        "next_iter": 13,
+    }
+
+    with (
+        patch(
+            "holosoma.agents.ppo.ppo.load_verified_torch_checkpoint",
+            return_value=(checkpoint, "a" * 64),
+        ),
+        patch("holosoma.agents.ppo.ppo.validate_policy_init_payload_identity"),
+    ):
+        ppo.load_evaluation("evaluation.pt")
+
+    support = ppo._actor_perception_training_geometry_support
+    manager.validate_deployment_geometry_support.assert_called_once_with(
+        support,
+        allow_unknown_object_geometry=True,
+    )
+    audit = ppo.evaluation_ood_object_geometry_audit()
+    assert audit is not None
+    assert audit["training_object_mesh_count"] == 1
+    assert audit["live_object_mesh_count"] == 1
+    assert audit["unknown_live_objects"][0]["mesh"]["sha256"] == "d" * 64
 
 
 def _finalized_test_training_provenance() -> dict:
@@ -7142,11 +7481,27 @@ def test_standalone_export_metadata_uses_completed_iteration():
         patch.object(PPO, "actor_onnx_wrapper", new_callable=PropertyMock, return_value=object()),
         patch("holosoma.agents.ppo.ppo.export_policy_as_onnx"),
         patch("holosoma.agents.ppo.ppo.get_control_gains_from_config", return_value=([], [])),
-        patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value={}),
-        patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),
-        patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
-    ):
-        ppo.export("policy.onnx")
+            patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value={}),
+            patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),
+            patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
+            patch(
+                "holosoma.agents.ppo.ppo.validate_exported_policy_onnx",
+                return_value={
+                    "version": 1,
+                    "checker": "onnx.checker.check_model",
+                    "runtime": "onnxruntime_cpu",
+                    "pytorch_vs_ort": True,
+                    "input_names": ["actor_obs"],
+                    "output_names": ["action"],
+                    "probe_rows": 6,
+                    "rtol": 1.0e-4,
+                    "atol": 1.0e-5,
+                    "max_abs_error": 0.0,
+                    "max_rel_error": 0.0,
+                },
+            ),
+        ):
+            ppo.export("policy.onnx")
 
     assert seen_iterations == [39999]
 
@@ -7174,11 +7529,27 @@ def test_evaluation_export_metadata_uses_source_checkpoint_iteration():
         patch.object(PPO, "actor_onnx_wrapper", new_callable=PropertyMock, return_value=object()),
         patch("holosoma.agents.ppo.ppo.export_policy_as_onnx"),
         patch("holosoma.agents.ppo.ppo.get_control_gains_from_config", return_value=([], [])),
-        patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value={}),
-        patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),
-        patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
-    ):
-        ppo.export("policy.onnx")
+            patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value={}),
+            patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),
+            patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
+            patch(
+                "holosoma.agents.ppo.ppo.validate_exported_policy_onnx",
+                return_value={
+                    "version": 1,
+                    "checker": "onnx.checker.check_model",
+                    "runtime": "onnxruntime_cpu",
+                    "pytorch_vs_ort": True,
+                    "input_names": ["actor_obs"],
+                    "output_names": ["action"],
+                    "probe_rows": 6,
+                    "rtol": 1.0e-4,
+                    "atol": 1.0e-5,
+                    "max_abs_error": 0.0,
+                    "max_rel_error": 0.0,
+                },
+            ),
+        ):
+            ppo.export("policy.onnx")
 
     assert seen_iterations == [12]
 

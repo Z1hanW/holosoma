@@ -107,12 +107,14 @@ camera_depth_d435i = PerceptionConfig(
     camera_hfov_deg=89.5,
     camera_pitch_deg=0.0,
     camera_target_pitch_deg=None,
-    # Strict warp_sensors chain:
-    # world_cam = world_torso * mount(offset_rot=[1,27,1]) * sensor_frame(offset_rot_base=[-90,0,-90]).
-    camera_mount_quat=[0.00644801, 0.23350163, 0.00644801, 0.97231365],
+    # Rev-1.0 G1 URDF d435_joint, followed by the strict warp sensor frame.
+    # In the q=0 neutral pose this places the camera at
+    # [0.053662326, 0.01753, 1.230733752] m from the two ankle-roll origins' midpoint.
+    # world_cam = world_torso * mount(rpy=[0,47.6,0]) * sensor_frame(rpy=[-90,0,-90]).
+    camera_mount_quat=[0.0, 0.40354529635239006, 0.0, 0.9149596678498247],
     camera_frame_quat=[-0.5, 0.5, -0.5, 0.5],
     camera_body_name="torso_link",
-    sensor_offset=[0.01, 0.01, 0.44],
+    sensor_offset=[0.0576235, 0.01753, 0.42987],
     camera_include_robot_mesh=True,
     camera_mesh_allowlist=WARP_SENSORS_G1_D435_MESH_ALLOWLIST,
     camera_mesh_file_map=WARP_SENSORS_G1_D435_MESH_FILE_MAP,
@@ -152,6 +154,16 @@ camera_depth_d435i = PerceptionConfig(
     encoder_output_dim=32,
     encoder_type="far_tracking_cnn_small",
     encoder_fusion="concat",
+)
+
+# Historical CORL/SW setup: a torso-relative ~27 degree physical mount plus a
+# 10 degree software residual pitch.  Keep it as an explicit preset so camera
+# A/B runs cannot inherit an ambient CAMERA_PITCH_DEG override.
+camera_depth_d435i_corl = replace(
+    camera_depth_d435i,
+    camera_pitch_deg=10.0,
+    camera_mount_quat=[0.00644801, 0.23350163, 0.00644801, 0.97231365],
+    sensor_offset=[0.01, 0.01, 0.44],
 )
 
 camera_depth_d435i_17x17 = replace(
@@ -242,6 +254,7 @@ DEFAULTS = {
     "none": none,
     "heightmap": heightmap,
     "camera_depth_d435i": camera_depth_d435i,
+    "camera_depth_d435i_corl": camera_depth_d435i_corl,
     "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
     "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
     "camera_depth_d435i_defm_regnet_y_800mf": camera_depth_d435i_defm_regnet_y_800mf,
@@ -254,6 +267,7 @@ __all__ = [
     "none",
     "heightmap",
     "camera_depth_d435i",
+    "camera_depth_d435i_corl",
     "camera_depth_d435i_17x17",
     "camera_depth_d435i_defm_vit_s14",
     "camera_depth_d435i_defm_regnet_y_800mf",

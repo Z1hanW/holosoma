@@ -70,6 +70,7 @@ from holosoma.simulator.isaacsim.joint_hotpath import (
     cached_dof_selector,
     select_dof_write_batch,
 )
+from holosoma.simulator.isaacsim.usd_cache import resolve_robot_usd_conversion_dir
 from holosoma.simulator.isaacsim.usd_file_loader import USDFileLoader
 from holosoma.simulator.isaacsim.registry_utils import register_objects
 from holosoma.simulator.isaacsim.proxy_utils import AllRootStatesProxy, RootStatesProxy
@@ -1303,11 +1304,15 @@ class IsaacSim(BaseSimulator):
             # Use the pre-remap local rank when each torchrun child exposes only one GPU.
             # This keeps per-rank URDF conversion directories unique on a node.
             local_rank = int(os.environ.get("HOLOSOMA_ORIGINAL_LOCAL_RANK", os.environ.get("LOCAL_RANK", "0")))
-            usd_conversion_dir = os.path.abspath(os.path.join(asset_root, f"converted_rank{local_rank}"))
+            usd_conversion_path = resolve_robot_usd_conversion_dir(asset_root, local_rank)
+            usd_conversion_dir = str(usd_conversion_path)
             if _env_flag("HOLOSOMA_CLEAN_ROBOT_USD_CACHE", default=True):
-                conversion_path = pathlib.Path(usd_conversion_dir).resolve()
-                asset_root_path = pathlib.Path(asset_root).resolve()
-                if conversion_path.parent != asset_root_path or not conversion_path.name.startswith("converted_rank"):
+                conversion_path = usd_conversion_path.resolve()
+                conversion_root = usd_conversion_path.parent.resolve()
+                if (
+                    conversion_path.parent != conversion_root
+                    or conversion_path.name != f"converted_rank{local_rank}"
+                ):
                     raise RuntimeError(f"Refusing to clear unexpected robot USD conversion directory: {conversion_path}")
                 if conversion_path.exists():
                     shutil.rmtree(conversion_path)

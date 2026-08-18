@@ -190,6 +190,12 @@ def test_episode_stats_update(logging_helper):
         "raw_episode": {
             "raw_test_metric": torch.tensor([2.0], device=logging_helper.device),
         },
+        "episode_rate": {
+            "rew_test_metric": torch.tensor([0.25], device=logging_helper.device),
+        },
+        "raw_episode_mean": {
+            "raw_rew_test_metric": torch.tensor([0.75], device=logging_helper.device),
+        },
         "to_log": {
             "env_metric": torch.tensor([2.0], device=logging_helper.device),
         },
@@ -213,6 +219,8 @@ def test_episode_stats_update(logging_helper):
     # Verify raw episode info was stored
     assert len(logging_helper.raw_ep_infos) == 1
     assert logging_helper.raw_ep_infos[0]["raw_test_metric"].item() == 2.0
+    assert logging_helper.episode_rate_infos[0]["rew_test_metric"].item() == 0.25
+    assert logging_helper.raw_episode_mean_infos[0]["raw_rew_test_metric"].item() == 0.75
 
 
 def test_episode_stats_reuses_reset_ids_and_keeps_later_nonempty_episode_metrics(
@@ -226,6 +234,8 @@ def test_episode_stats_reuses_reset_ids_and_keeps_later_nonempty_episode_metrics
     empty_infos = {
         "episode": {},
         "raw_episode": {},
+        "episode_rate": {},
+        "raw_episode_mean": {},
         "reset_env_ids": torch.empty(0, dtype=torch.long, device=logging_helper.device),
         "to_log": {},
     }
@@ -242,6 +252,8 @@ def test_episode_stats_reuses_reset_ids_and_keeps_later_nonempty_episode_metrics
     reset_infos = {
         "episode": {"success": torch.tensor([1.0], device=logging_helper.device)},
         "raw_episode": {"raw_success": torch.tensor([2.0], device=logging_helper.device)},
+        "episode_rate": {"rew_success": torch.tensor([0.5], device=logging_helper.device)},
+        "raw_episode_mean": {"raw_rew_success": torch.tensor([0.75], device=logging_helper.device)},
         "reset_env_ids": torch.tensor([1], dtype=torch.long, device=logging_helper.device),
         "to_log": {},
     }
@@ -255,6 +267,8 @@ def test_episode_stats_reuses_reset_ids_and_keeps_later_nonempty_episode_metrics
     assert logging_helper.ep_infos[0]["success"].item() == 1.0
     assert len(logging_helper.raw_ep_infos) == 1
     assert logging_helper.raw_ep_infos[0]["raw_success"].item() == 2.0
+    assert logging_helper.episode_rate_infos[0]["rew_success"].item() == 0.5
+    assert logging_helper.raw_episode_mean_infos[0]["raw_rew_success"].item() == 0.75
     assert list(logging_helper.rewbuffer) == [6.0]
     assert list(logging_helper.lenbuffer) == [2.0]
 
@@ -313,6 +327,12 @@ def test_tensor_metric_summaries_bulk_copy_preserves_exact_order_schema_and_coun
         {"raw": torch.tensor([1.5, -0.25], dtype=torch.float32)},
         {"raw": 2, "raw_late": torch.tensor(7.0)},
     ]
+    logging_helper.episode_rate_infos = [
+        {"rate": torch.tensor([0.5, 1.5], dtype=torch.float32)},
+    ]
+    logging_helper.raw_episode_mean_infos = [
+        {"raw_mean": torch.tensor([0.25], dtype=torch.float32)},
+    ]
     logging_helper.episode_env_tensors.add(
         {
             "env_first": torch.tensor([1.0, 2.0]),
@@ -329,6 +349,8 @@ def test_tensor_metric_summaries_bulk_copy_preserves_exact_order_schema_and_coun
     expected = {
         "episode": _historical_tensor_dict_summary(logging_helper.ep_infos),
         "raw_episode": _historical_tensor_dict_summary(logging_helper.raw_ep_infos),
+        "episode_rate": _historical_tensor_dict_summary(logging_helper.episode_rate_infos),
+        "raw_episode_mean": _historical_tensor_dict_summary(logging_helper.raw_episode_mean_infos),
         "env": _historical_env_tensor_summary(logging_helper),
     }
     original_cpu = torch.Tensor.cpu
@@ -349,9 +371,11 @@ def test_tensor_metric_summaries_bulk_copy_preserves_exact_order_schema_and_coun
         actual = logging_helper._summarize_iteration_tensors()
 
     assert actual == expected
-    assert [*actual] == ["episode", "raw_episode", "env"]
+    assert [*actual] == ["episode", "raw_episode", "episode_rate", "raw_episode_mean", "env"]
     assert [*actual["episode"]] == ["cancellation", "shared", "late"]
     assert [*actual["raw_episode"]] == ["raw", "raw_late"]
+    assert [*actual["episode_rate"]] == ["rate"]
+    assert [*actual["raw_episode_mean"]] == ["raw_mean"]
     assert [*actual["env"]] == ["env_first", "env_late"]
     assert actual["episode"]["cancellation"] == (0.0, 3)
     assert actual["episode"]["shared"][1] == 3
@@ -359,7 +383,7 @@ def test_tensor_metric_summaries_bulk_copy_preserves_exact_order_schema_and_coun
     assert actual["env"]["env_first"][1] == 3
     assert "empty" not in actual["episode"]
     assert "env_empty" not in actual["env"]
-    assert cpu_calls == [(torch.device("cpu"), (12,), torch.float64)]
+    assert cpu_calls == [(torch.device("cpu"), (14,), torch.float64)]
 
     # Keep the private category helpers behaviorally identical for callers that
     # summarize only one category rather than a complete iteration payload.
@@ -370,6 +394,8 @@ def test_tensor_metric_summaries_bulk_copy_preserves_exact_order_schema_and_coun
 def test_distributed_metric_sync_uses_global_counts_and_one_shot_episode_deltas(logging_helper):
     logging_helper.ep_infos = [{"success": torch.tensor([1.0, 0.0])}]
     logging_helper.raw_ep_infos = [{"raw": torch.tensor([2.0])}]
+    logging_helper.episode_rate_infos = [{"rate": torch.tensor([0.5])}]
+    logging_helper.raw_episode_mean_infos = [{"raw_mean": torch.tensor([0.25])}]
     logging_helper.episode_env_tensors.add({"contact_mass": torch.tensor([0.2, 0.4])})
     logging_helper.rewbuffer.extend([1.0])
     logging_helper.lenbuffer.extend([5.0])
@@ -385,6 +411,8 @@ def test_distributed_metric_sync_uses_global_counts_and_one_shot_episode_deltas(
         "loss_weight": 0.5,
         "episode": {"success": (2.0, 2)},
         "raw_episode": {"raw": (8.0, 2)},
+        "episode_rate": {"rate": (3.0, 2)},
+        "raw_episode_mean": {"raw_mean": (4.0, 2)},
         "env": {"contact_mass": (1.8, 2)},
         "completed_reward_sum": 7.0,
         "completed_length_sum": 9.0,
@@ -410,6 +438,12 @@ def test_distributed_metric_sync_uses_global_counts_and_one_shot_episode_deltas(
     assert merged_loss["Value"] == pytest.approx((1.0 * 1.5 + 3.0 * 0.5) / 2.0)
     assert logging_helper.ep_infos[0]["success"].item() == pytest.approx((1.0 * 1.5 + 2.0 * 0.5) / 4.0)
     assert logging_helper.raw_ep_infos[0]["raw"].item() == pytest.approx((2.0 * 1.5 + 8.0 * 0.5) / 2.5)
+    assert logging_helper.episode_rate_infos[0]["rate"].item() == pytest.approx(
+        (0.5 * 1.5 + 3.0 * 0.5) / 2.5
+    )
+    assert logging_helper.raw_episode_mean_infos[0]["raw_mean"].item() == pytest.approx(
+        (0.25 * 1.5 + 4.0 * 0.5) / 2.5
+    )
     assert logging_helper.episode_env_tensors.mean()["contact_mass"].item() == pytest.approx(
         (0.6 * 1.5 + 1.8 * 0.5) / 4.0
     )
@@ -527,6 +561,12 @@ def test_wandb_logging(prefixed_logging_helper, mock_wandb):
     prefixed_logging_helper.raw_ep_infos = [
         {"raw_test_metric": torch.tensor([2.0], device=prefixed_logging_helper.device)}
     ]
+    prefixed_logging_helper.episode_rate_infos = [
+        {"rew_test_metric": torch.tensor([0.25], device=prefixed_logging_helper.device)}
+    ]
+    prefixed_logging_helper.raw_episode_mean_infos = [
+        {"raw_rew_test_metric": torch.tensor([0.75], device=prefixed_logging_helper.device)}
+    ]
     mock_wandb.run = MagicMock()
 
     # Call post_epoch_logging with some test data
@@ -543,6 +583,8 @@ def test_wandb_logging(prefixed_logging_helper, mock_wandb):
     assert "test_prefix/test_section/test_metric" in logged_data
     assert "test_prefix/Episode/test_metric" in logged_data
     assert "test_prefix/RawEpisode/raw_test_metric" in logged_data
+    assert "test_prefix/EpisodeRate/rew_test_metric" in logged_data
+    assert "test_prefix/RawEpisodeMean/raw_rew_test_metric" in logged_data
     assert logged_data["global_step"] == 0
 
 
@@ -555,6 +597,15 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
             "rew_offline_contact_guidance": torch.tensor([0.25], device=logging_helper.device),
             "rew_action_rate_l2": torch.tensor([-0.1], device=logging_helper.device),
             "rew_custom_success_bonus": torch.tensor([2.0], device=logging_helper.device),
+        }
+    ]
+    logging_helper.episode_rate_infos = [
+        {
+            "rew_motion_global_ref_position_error_exp": torch.tensor([0.05], device=logging_helper.device),
+            "rew_object_global_ref_position_error_exp": torch.tensor([0.1], device=logging_helper.device),
+            "rew_offline_contact_guidance": torch.tensor([0.025], device=logging_helper.device),
+            "rew_action_rate_l2": torch.tensor([-0.01], device=logging_helper.device),
+            "rew_custom_success_bonus": torch.tensor([0.2], device=logging_helper.device),
         }
     ]
     logging_helper.rewbuffer.extend([3.65])
@@ -577,6 +628,13 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
         "Reward/Rest",
         "Reward/total_episode_terms",
         "Reward/mean",
+        "Reward/mean_per_alive_step",
+        "RewardRate/Track/motion_global_ref_position_error_exp",
+        "RewardRate/Object/object_global_ref_position_error_exp",
+        "RewardRate/Contact/offline_contact_guidance",
+        "RewardRate/Regularize/action_rate_l2",
+        "RewardRate/Rest/custom_success_bonus",
+        "RewardRate/total_episode_terms",
         "Episode Length/mean",
     }
     for expected_key in expected_keys:
@@ -590,6 +648,8 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
     assert logged_data["Reward/Rest/custom_success_bonus"] == 2.0
     assert logged_data["Reward/total_episode_terms"] == pytest.approx(3.65)
     assert logged_data["Reward/mean"] == pytest.approx(3.65)
+    assert logged_data["Reward/mean_per_alive_step"] == pytest.approx(3.65 / 42.0)
+    assert logged_data["RewardRate/total_episode_terms"] == pytest.approx(0.365)
     assert logged_data["Episode Length/mean"] == pytest.approx(42.0)
 
 
@@ -619,6 +679,7 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
 
     config_metadata, summary_metadata = collect_reward_wandb_metadata(reward_cfg)
     spec = config_metadata["reward_group_spec"]
+    reporting_contract = config_metadata["reward_reporting_contract"]
 
     assert spec["Track"]["motion_global_ref_position_error_exp"]["weight"] == 0.5
     assert spec["Track"]["motion_global_ref_position_error_exp"]["sigma"] == 0.3
@@ -629,6 +690,8 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
     assert "custom_zero_reward" not in spec["Rest"]
     assert summary_metadata["RewardSpec/Track/motion_global_ref_position_error_exp/weight"] == 0.5
     assert summary_metadata["RewardSpec/Contact/offline_contact_guidance/force_threshold"] == 1.4
+    assert "actual_alive_time_s" in reporting_contract["episode_rate"]
+    assert "actual_alive_steps" in reporting_contract["raw_episode_mean"]
 
 
 def test_wandb_hidden_metrics_are_defined(logging_helper, mock_wandb):

@@ -6,6 +6,7 @@ import torch
 
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.managers.termination.terms.common import timeout_exceeded
+from holosoma.managers.termination.terms.wbt import BadTracking
 
 
 def test_timeout_triggers_at_configured_control_step_horizon() -> None:
@@ -61,3 +62,66 @@ def test_termination_logs_distinguish_raw_timeout_timeout_only_and_done() -> Non
     assert env.log_dict["termination/timeout_frac"].item() == 0.5
     assert env.log_dict["termination/timeout_only_frac"].item() == 0.25
     assert env.log_dict["termination/done_frac"].item() == 0.75
+
+
+def test_bad_tracking_exposes_each_overlapping_threshold_condition(monkeypatch) -> None:
+    monkeypatch.delenv("HOLOSOMA_DISABLE_BAD_TRACKING_RESET", raising=False)
+    motion_command = SimpleNamespace(
+        motion_cfg=SimpleNamespace(body_names_to_track=["torso"]),
+        motion=SimpleNamespace(has_object=True),
+    )
+    env = SimpleNamespace(
+        num_envs=4,
+        device="cpu",
+        is_evaluating=False,
+        command_manager=SimpleNamespace(get_state=lambda _: motion_command),
+    )
+    term = object.__new__(BadTracking)
+    term.env = env
+    term.body_names_to_track = ["torso"]
+    term._last_component_results = {}
+    expected_components = {
+        "robot_ref_position": torch.tensor([True, False, False, False]),
+        "robot_ref_orientation": torch.tensor([False, True, False, False]),
+        "robot_body_position": torch.tensor([False, False, True, False]),
+        "object_position": torch.tensor([True, False, False, False]),
+        "object_orientation": torch.tensor([False, False, False, True]),
+    }
+    term.bad_ref_pos = lambda _: expected_components["robot_ref_position"]
+    term.bad_ref_ori = lambda _: expected_components["robot_ref_orientation"]
+    term.bad_motion_body_pos = lambda _: expected_components["robot_body_position"]
+    term.bad_object_pos = lambda _: expected_components["object_position"]
+    term.bad_object_ori = lambda _: expected_components["object_orientation"]
+
+    result = term(env)
+
+    actual_components = term.get_last_component_results()
+    assert actual_components.keys() == expected_components.keys()
+    for name, expected in expected_components.items():
+        assert torch.equal(actual_components[name], expected)
+    assert torch.equal(result, torch.tensor([True, True, True, True]))
+
+
+def test_termination_logs_bad_tracking_component_fractions() -> None:
+    env = object.__new__(BaseTask)
+    env.log_dict = {}
+    term_result = torch.tensor([True, True, False, False])
+    components = {
+        "robot_ref_position": torch.tensor([True, False, False, False]),
+        "object_position": torch.tensor([True, True, False, False]),
+    }
+    env.termination_manager = SimpleNamespace(
+        _term_names=["bad_tracking"],
+        get_last_term_result=lambda _: term_result,
+        get_last_term_components=lambda _: components,
+    )
+
+    env._log_termination_masks(term_result, torch.zeros_like(term_result))
+
+    assert env.log_dict["termination/bad_tracking_frac"].item() == 0.5
+    assert env.log_dict[
+        "termination/bad_tracking/condition_robot_ref_position_frac"
+    ].item() == 0.25
+    assert env.log_dict[
+        "termination/bad_tracking/condition_object_position_frac"
+    ].item() == 0.5

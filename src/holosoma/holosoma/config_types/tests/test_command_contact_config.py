@@ -34,6 +34,8 @@ _BASE_MOTION_CONFIG = {
         ("contact_aware_sparse_root_zero_yaw_threshold_deg", 180.1),
         ("contact_aware_sparse_root_zero_yaw_threshold_deg", float("nan")),
         ("contact_aware_sparse_root_zero_yaw_threshold_deg", float("inf")),
+        ("zero_root_command_when_drop_active", 1),
+        ("zero_root_command_when_drop_active", "true"),
     ],
 )
 def test_motion_config_rejects_invalid_contact_window_contract(field, value):
@@ -69,3 +71,34 @@ def test_motion_config_preserves_legacy_button_window_default_and_accepts_kinema
 
     assert legacy.contact_aware_button_window_mode == "contact_interval"
     assert kinematic.contact_aware_button_window_mode == "kinematic_lift"
+
+
+def test_motion_config_accepts_precomputed_turn_then_forward_mode():
+    config = MotionConfig(
+        **_BASE_MOTION_CONFIG,
+        contact_aware_sparse_root_command_mode="precomputed_turn_then_forward",
+    )
+
+    assert config.contact_aware_sparse_root_command_mode == "precomputed_turn_then_forward"
+
+
+def test_motion_config_accepts_rolling_reference_delta_mode():
+    config = MotionConfig(
+        **_BASE_MOTION_CONFIG,
+        contact_aware_sparse_root_command_mode="rolling_reference_delta",
+        contact_aware_sparse_root_segment_steps=30,
+    )
+
+    assert config.contact_aware_sparse_root_command_mode == "rolling_reference_delta"
+    assert config.contact_aware_sparse_root_segment_steps == 30
+
+
+def test_drop_exclusive_root_command_is_explicit_and_legacy_safe():
+    legacy = MotionConfig(**_BASE_MOTION_CONFIG)
+    enabled = MotionConfig(
+        **_BASE_MOTION_CONFIG,
+        zero_root_command_when_drop_active=True,
+    )
+
+    assert legacy.zero_root_command_when_drop_active is False
+    assert enabled.zero_root_command_when_drop_active is True

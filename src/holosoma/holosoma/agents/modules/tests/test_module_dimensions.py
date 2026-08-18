@@ -27,6 +27,8 @@ from holosoma.agents.modules.modules import (
     DeFMRegNetY800MFEncoder,
     DeFMViTS14Encoder,
     FarTrackingDepthSmallEncoder,
+    FarTrackingDepthSpatialSoftmaxEncoder,
+    SpatialSoftmax2d,
 )
 from holosoma.agents.modules.ppo_modules import PPOActor, PPOActorEncoder, PPOCriticEncoder
 from holosoma.agents.ppo.ppo import PPO
@@ -861,6 +863,66 @@ def test_far_tracking_perception_encoder_concatenates_into_actor_input():
     input_actor, extra_input = actor._get_input(actor_obs, policy_state)
     assert input_actor.shape == (batch_size, 467 + 32)
     assert extra_input is None
+
+
+def test_spatial_softmax_preserves_horizontal_location():
+    spatial_softmax = SpatialSoftmax2d(height=8, width=11)
+    features_left = torch.full((1, 1, 8, 11), -20.0)
+    features_right = features_left.clone()
+    features_left[0, 0, 4, 1] = 20.0
+    features_right[0, 0, 4, 9] = 20.0
+
+    left_xy = spatial_softmax(features_left)
+    right_xy = spatial_softmax(features_right)
+
+    assert left_xy.shape == (1, 2)
+    assert left_xy[0, 0] < -0.7
+    assert right_xy[0, 0] > 0.7
+    assert torch.allclose(left_xy[0, 1], right_xy[0, 1], atol=1.0e-6)
+
+
+def test_far_tracking_spatial_softmax_encoder_keeps_32d_actor_interface():
+    layer_config = LayerConfig(
+        hidden_dims=[64, 32],
+        activation="ELU",
+        module_input_name=("actor_obs",),
+        perception_input_name="perception_obs",
+        perception_output_dim=32,
+        perception_encoder_type="far_tracking_cnn_spatial_softmax",
+        perception_input_height=58,
+        perception_input_width=87,
+        extra_input_to_hidden=False,
+    )
+    config = ModuleConfig(
+        type="MLPPerceptionEncoder",
+        input_dim=["actor_obs"],
+        output_dim=[29],
+        layer_config=layer_config,
+        min_noise_std=0.05,
+    )
+    actor = PPOActorEncoder(
+        obs_dim_dict={"actor_obs": 94, "perception_obs": 58 * 87},
+        module_config_dict=config,
+        num_actions=29,
+        init_noise_std=1.0,
+        history_length={"actor_obs": 1, "perception_obs": 1},
+    )
+
+    encoder = actor.actor_module.perception_encoder
+    assert isinstance(encoder, FarTrackingDepthSpatialSoftmaxEncoder)
+    assert encoder.feature_height == 8
+    assert encoder.feature_width == 11
+    assert encoder.projection.in_features == 128
+    assert encoder.projection.out_features == 32
+    assert actor.actor_module.module[0].in_features == 126
+
+    depth = torch.randn(3, 58 * 87, requires_grad=True)
+    latent = encoder(depth)
+    assert latent.shape == (3, 32)
+    assert torch.isfinite(latent).all()
+    latent.square().mean().backward()
+    assert depth.grad is not None
+    assert torch.isfinite(depth.grad).all()
 
 
 def test_apply_perception_overrides_keeps_critic_plain_for_far_tracking_preset():

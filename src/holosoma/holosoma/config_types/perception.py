@@ -262,7 +262,7 @@ class PerceptionConfig:
     """Output dimension for the perception encoder."""
 
     encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', 'defm_vit_s14', 'defm_regnet_y_800mf', or 'time_gru'."""
+    """Perception encoder type, including far-tracking GAP and spatial-softmax CNN variants."""
 
     encoder_fusion: str = "extra_input_to_hidden"
     """How encoded perception is fused into policy modules: 'extra_input_to_hidden' or 'concat'."""

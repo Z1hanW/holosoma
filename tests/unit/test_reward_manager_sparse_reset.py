@@ -18,6 +18,8 @@ _RAW_SUMS = {
     "beta": torch.tensor([-20.0, 10.0, 0.0, 30.0, 70.0]),
 }
 _MAX_EPISODE_LENGTH_S = 2.0
+_DT = 0.1
+_EPISODE_STEPS = torch.tensor([2, 4, 0, 8, 5], dtype=torch.long)
 
 
 class _StatefulResetRecorder:
@@ -31,7 +33,11 @@ class _StatefulResetRecorder:
 def _make_reward_manager() -> tuple[RewardManager, _StatefulResetRecorder]:
     stateful = _StatefulResetRecorder()
     manager = object.__new__(RewardManager)
-    manager.env = SimpleNamespace(max_episode_length_s=_MAX_EPISODE_LENGTH_S)
+    manager.env = SimpleNamespace(
+        max_episode_length_s=_MAX_EPISODE_LENGTH_S,
+        dt=_DT,
+        _pending_episode_lengths=_EPISODE_STEPS.clone(),
+    )
     manager.device = "cpu"
     manager._term_names = list(_SCALED_SUMS)
     manager._episode_sums = {name: values.clone() for name, values in _SCALED_SUMS.items()}
@@ -51,15 +57,32 @@ def _expected_extras(
         "episode_all": {},
         "raw_episode": {},
         "raw_episode_all": {},
+        "episode_rate": {},
+        "raw_episode_mean": {},
     }
+    selected_steps = _EPISODE_STEPS[selected]
+
+    def normalize_by_steps(values: torch.Tensor, *, seconds: bool) -> torch.Tensor:
+        denominator = selected_steps.to(dtype=values.dtype)
+        if seconds:
+            denominator = denominator * _DT
+        valid = denominator > 0
+        safe_denominator = torch.where(valid, denominator, torch.ones_like(denominator))
+        return (values[selected] / safe_denominator).masked_fill(~valid, 0.0)
+
     for term_name, values in _SCALED_SUMS.items():
         normalized = values / _MAX_EPISODE_LENGTH_S
         extras["episode"][f"rew_{term_name}"] = normalized[selected].clone()
+        extras["episode_rate"][f"rew_{term_name}"] = normalize_by_steps(values, seconds=True)
         if include_all:
             extras["episode_all"][f"rew_{term_name}"] = normalized.clone()
     for term_name, values in _RAW_SUMS.items():
         normalized = values / _MAX_EPISODE_LENGTH_S
         extras["raw_episode"][f"raw_rew_{term_name}"] = normalized[selected].clone()
+        extras["raw_episode_mean"][f"raw_rew_{term_name}"] = normalize_by_steps(
+            values,
+            seconds=False,
+        )
         if include_all:
             extras["raw_episode_all"][f"raw_rew_{term_name}"] = normalized.clone()
     return extras
@@ -102,7 +125,14 @@ def _assert_base_task_extras(
 ) -> None:
     actual_reward_extras = {
         section: task.extras[section]
-        for section in ("episode", "episode_all", "raw_episode", "raw_episode_all")
+        for section in (
+            "episode",
+            "episode_all",
+            "raw_episode",
+            "raw_episode_all",
+            "episode_rate",
+            "raw_episode_mean",
+        )
     }
     _assert_tensor_dicts_equal(actual_reward_extras, expected_reward_extras)
     assert task.extras["time_outs"] is task.time_out_buf
@@ -187,6 +217,31 @@ def test_sparse_subset_never_divides_or_clones_a_full_batch(monkeypatch) -> None
     assert all(size != 5 for size in cloned_sizes)
 
 
+def test_actual_duration_metrics_remove_early_termination_length_factor() -> None:
+    manager, _ = _make_reward_manager()
+    manager._term_instances = {}
+    steps = _EPISODE_STEPS.to(dtype=torch.float32)
+    for term_name in manager._term_names:
+        manager._episode_sums[term_name] = steps * _DT * 2.0
+        manager._episode_sums_raw[term_name] = steps * 3.0
+
+    actual = manager.reset(None, include_all=False)
+
+    positive_length = _EPISODE_STEPS > 0
+    for term_name in manager._term_names:
+        assert torch.equal(
+            actual["episode_rate"][f"rew_{term_name}"][positive_length],
+            torch.full((4,), 2.0),
+        )
+        assert torch.equal(
+            actual["raw_episode_mean"][f"raw_rew_{term_name}"][positive_length],
+            torch.full((4,), 3.0),
+        )
+        assert actual["episode_rate"][f"rew_{term_name}"][~positive_length].item() == 0.0
+        assert actual["raw_episode_mean"][f"raw_rew_{term_name}"][~positive_length].item() == 0.0
+        assert torch.unique(actual["episode"][f"rew_{term_name}"][positive_length]).numel() > 1
+
+
 def _make_fill_extras_task(
     reward_manager: object,
     *,
@@ -237,6 +292,8 @@ def test_base_task_supports_new_fake_signature_without_capability_marker() -> No
     assert task.extras["episode_all"] == {}
     assert task.extras["raw_episode"] == {}
     assert task.extras["raw_episode_all"] == {}
+    assert task.extras["episode_rate"] == {}
+    assert task.extras["raw_episode_mean"] == {}
 
 
 def test_base_task_preserves_legacy_reward_manager_signature() -> None:
@@ -260,6 +317,8 @@ def test_base_task_preserves_legacy_reward_manager_signature() -> None:
     assert torch.equal(task.extras["episode_all"]["rew_legacy"], torch.arange(5.0))
     assert task.extras["raw_episode"] == {}
     assert task.extras["raw_episode_all"] == {}
+    assert task.extras["episode_rate"] == {}
+    assert task.extras["raw_episode_mean"] == {}
 
 
 @pytest.mark.parametrize("invalid_value", [None, 0, 1, "false"])

@@ -42,6 +42,8 @@ class BaseAlgo:
         self._evaluation_completed_iteration: int | None = None
         self._evaluation_rng_boundary_state: dict[str, Any] | None = None
         self._evaluation_only = False
+        self._evaluation_allow_ood_object_geometry = False
+        self._evaluation_ood_object_geometry_audit: dict[str, Any] | None = None
 
     def setup(self):
         return NotImplementedError
@@ -53,6 +55,11 @@ class BaseAlgo:
         return NotImplementedError
 
     def load_policy_init(self, path):
+        return NotImplementedError
+
+    def load_stage4_init(self, path):
+        """Warm-start actor and critic while leaving continuation state fresh."""
+
         return NotImplementedError
 
     def load_evaluation(self, path):
@@ -96,6 +103,8 @@ class BaseAlgo:
         self._evaluation_completed_iteration = None
         self._evaluation_rng_boundary_state = None
         self._evaluation_only = False
+        self._evaluation_allow_ood_object_geometry = False
+        self._evaluation_ood_object_geometry_audit = None
 
     def attach_evaluation_metadata(
         self,
@@ -127,6 +136,31 @@ class BaseAlgo:
         # this boundary after the validated actor payload is committed.
         self._evaluation_rng_boundary_state = capture_rng_checkpoint_state()
         self._evaluation_only = True
+        self._evaluation_allow_ood_object_geometry = False
+        self._evaluation_ood_object_geometry_audit = None
+
+    def enable_evaluation_only_ood_object_geometry(self) -> None:
+        """Permit an explicitly labelled OOD object only for policy evaluation.
+
+        This does not relax camera-source, robot-geometry, observation, actor,
+        normalizer, checkpoint, or provenance validation.  It only allows the
+        selected live object mesh to fall outside the authenticated training
+        support, and it is unavailable to training, resume, or policy-init.
+        """
+
+        if not self._evaluation_only:
+            raise RuntimeError(
+                "OOD object geometry can only be enabled after attaching "
+                "evaluation metadata."
+            )
+        self._evaluation_allow_ood_object_geometry = True
+        self._evaluation_ood_object_geometry_audit = None
+
+    def evaluation_ood_object_geometry_audit(self) -> dict[str, Any] | None:
+        """Return a detached copy of the explicit OOD evaluation evidence."""
+
+        audit = self._evaluation_ood_object_geometry_audit
+        return copy.deepcopy(audit) if audit is not None else None
 
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
         if self._experiment_config is None:

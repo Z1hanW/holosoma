@@ -859,6 +859,157 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
     },
 )
 
+# Pure-RL critic contract without the redundant one-frame proprio copy.  The
+# base critic_obs group already contains the current base linear/angular
+# velocity and joint position/velocity, while critic_actions retains the true
+# previous-action signal.  Keep this as a separate preset so existing 377D and
+# 381D runs remain immutable and resumable under their original contracts.
+g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317 = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        group_name: group_cfg
+        for group_name, group_cfg in
+        g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups.items()
+        if group_name != "critic_proprio_history"
+    },
+)
+
+hybrid_stage2_critic_terms = critic_obs_w_object_command_distill_terms.copy()
+hybrid_stage2_critic_terms["hybrid_stage2_task_indicator"] = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:hybrid_stage2_task_indicator",
+    scale=1.0,
+    noise=0.0,
+)
+
+g1_29dof_wbt_observation_w_object_hybrid_stage2 = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups,
+        "critic_obs": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups["critic_obs"],
+            terms=hybrid_stage2_critic_terms,
+        ),
+    },
+)
+
+hybrid_velocity_command_terms = {
+    "hybrid_velocity_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:hybrid_velocity_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+policy_world_velocity_command_terms = {
+    "target_root_world_velocity_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_world_velocity_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+policy_world_root_error_command_terms = {
+    "target_root_world_xy_yaw_error_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_world_xy_yaw_error_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+hybrid_velocity_critic_terms = critic_obs_w_object_command_distill_terms.copy()
+hybrid_velocity_critic_terms["motion_command"] = replace(
+    hybrid_velocity_critic_terms["motion_command"],
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_masked_motion_command",
+)
+hybrid_velocity_critic_terms["motion_ref_pos_b"] = replace(
+    hybrid_velocity_critic_terms["motion_ref_pos_b"],
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_masked_motion_ref_pos_b",
+)
+hybrid_velocity_critic_terms["motion_ref_ori_b"] = replace(
+    hybrid_velocity_critic_terms["motion_ref_ori_b"],
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_masked_motion_ref_ori_b",
+)
+hybrid_velocity_critic_terms["obj_target_pos_b"] = replace(
+    hybrid_velocity_critic_terms["obj_target_pos_b"],
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_masked_obj_target_pos_b",
+)
+hybrid_velocity_critic_terms["obj_target_ori_b"] = replace(
+    hybrid_velocity_critic_terms["obj_target_ori_b"],
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_masked_obj_target_ori_b",
+)
+hybrid_velocity_critic_terms["hybrid_velocity_command"] = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_command",
+    scale=1.0,
+    noise=0.0,
+)
+hybrid_velocity_critic_terms["hybrid_velocity_task_indicator"] = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:hybrid_velocity_task_indicator",
+    scale=1.0,
+    noise=0.0,
+)
+
+g1_29dof_wbt_observation_w_object_hybrid_velocity = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups,
+        **{
+            group_name: replace(
+                g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups[group_name],
+                terms=hybrid_velocity_command_terms,
+            )
+            for group_name in (
+                "actor_obs_root",
+                "actor_obs_torso",
+                "actor_obs_root_contact_aware",
+                "actor_obs_torso_contact_aware",
+            )
+        },
+        "critic_obs": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups["critic_obs"],
+            terms=hybrid_velocity_critic_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_policy_world_velocity = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups,
+        "actor_obs_world_velocity_command": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups[
+                "actor_obs_root_contact_aware"
+            ],
+            terms=policy_world_velocity_command_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_policy_world_root_error = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups,
+        "actor_obs_world_root_error_command": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups[
+                "actor_obs_root_contact_aware"
+            ],
+            terms=policy_world_root_error_command_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_hybrid_world_velocity = replace(
+    g1_29dof_wbt_observation_w_object_hybrid_velocity,
+    groups={
+        **g1_29dof_wbt_observation_w_object_hybrid_velocity.groups,
+        "actor_obs_hybrid_world_velocity_command": replace(
+            g1_29dof_wbt_observation_w_object_hybrid_velocity.groups[
+                "actor_obs_root_contact_aware"
+            ],
+            terms=hybrid_velocity_command_terms,
+        ),
+    },
+)
+
 # Compatibility preset for distilling a teacher trained with privileged
 # base_lin_vel.  Only the teacher query group changes; all student actor groups
 # remain byte-for-byte equivalent to the ordinary sparse-root configuration.
@@ -1112,6 +1263,12 @@ __all__ = [
     "g1_29dof_wbt_observation_w_object_teacher_linvel",
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317",
+    "g1_29dof_wbt_observation_w_object_hybrid_stage2",
+    "g1_29dof_wbt_observation_w_object_hybrid_velocity",
+    "g1_29dof_wbt_observation_w_object_hybrid_world_velocity",
+    "g1_29dof_wbt_observation_w_object_policy_world_velocity",
+    "g1_29dof_wbt_observation_w_object_policy_world_root_error",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",

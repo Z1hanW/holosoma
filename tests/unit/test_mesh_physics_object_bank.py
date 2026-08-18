@@ -43,6 +43,9 @@ def test_source_mass_mode_changes_only_inertial_physics(tmp_path: Path) -> None:
     mesh.apply_translation(expected_com)
     mesh_path = input_bank / "offset_box.obj"
     mesh.export(mesh_path)
+    collision_mesh = trimesh.creation.box(extents=[1.2, 0.8, 0.6])
+    collision_mesh_path = input_bank / "collision_proxy.obj"
+    collision_mesh.export(collision_mesh_path)
 
     urdf_path = input_bank / "offset_box.urdf"
     urdf_path.write_text(
@@ -60,7 +63,7 @@ def test_source_mass_mode_changes_only_inertial_physics(tmp_path: Path) -> None:
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="offset_box.obj" scale="1 1 1"/></geometry>
+      <geometry><mesh filename="collision_proxy.obj" scale="1 1 1"/></geometry>
     </collision>
   </link>
 </robot>
@@ -84,6 +87,10 @@ def test_source_mass_mode_changes_only_inertial_physics(tmp_path: Path) -> None:
     (input_bank / "_scientific_stale_view").mkdir()
     (input_bank / "_single_slot_motion_bank").mkdir()
     (input_bank / "nfs_package_manifest.json").write_text("stale", encoding="utf-8")
+    (input_bank / "realmesh_rollout_manifest.json").write_text(
+        '{"teacher_checkpoint": "model_05000.pt"}\n',
+        encoding="utf-8",
+    )
 
     output_bank = tmp_path / "output"
     builder.build_bank(
@@ -122,6 +129,14 @@ def test_source_mass_mode_changes_only_inertial_physics(tmp_path: Path) -> None:
     ]
     assert clip["mesh_physics_mass_mode"] == "source_urdf"
     assert clip["mesh_physics_base_mass_kg"] == 0.1
+    report = (output_bank / "_mesh_physics_report.csv").read_text(encoding="utf-8")
+    assert ",visual," in report
     assert not (output_bank / "_scientific_stale_view").exists()
     assert not (output_bank / "_single_slot_motion_bank").exists()
     assert not (output_bank / "nfs_package_manifest.json").exists()
+    rollout_manifest = output_bank / "realmesh_rollout_manifest.json"
+    assert rollout_manifest.is_file()
+    assert not rollout_manifest.is_symlink()
+    assert json.loads(rollout_manifest.read_text(encoding="utf-8")) == {
+        "teacher_checkpoint": "model_05000.pt"
+    }

@@ -350,6 +350,18 @@ def _root_relative_xy_yaw_command(motion_command: MotionCommand) -> tuple[torch.
     return rel_xy, rel_yaw
 
 
+def _root_world_xy_yaw_error_command(
+    motion_command: MotionCommand,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference-to-robot XY/yaw error without a heading-frame rotation."""
+
+    rel_xy_w = motion_command.root_pos_w[:, :2] - motion_command.robot_root_pos_w[:, :2]
+    target_heading = calc_heading(motion_command.root_quat_w)
+    robot_heading = calc_heading(motion_command.robot_root_quat_w)
+    rel_yaw = normalize_angle(target_heading - robot_heading).unsqueeze(1)
+    return rel_xy_w, rel_yaw
+
+
 def _contact_aware_segment_root_command(motion_command: MotionCommand) -> torch.Tensor:
     """Non-overlap carry-window segment command in the segment-start root heading frame."""
     if not motion_command.motion.has_object:
@@ -398,6 +410,96 @@ def _contact_aware_segment_root_command(motion_command: MotionCommand) -> torch.
     valid_endpoint = (segment_end < carry_end) & (segment_end < clip_lengths)
     active_mask = (time_steps >= carry_start) & (time_steps < carry_end) & valid_endpoint
     return torch.where(active_mask.unsqueeze(-1), command, torch.zeros_like(command))
+
+
+def _contact_aware_rolling_reference_delta_command(
+    motion_command: MotionCommand,
+) -> torch.Tensor:
+    """Per-step rolling reference displacement in the current reference heading frame."""
+
+    if not motion_command.motion.has_object:
+        return torch.zeros(
+            (motion_command.num_envs, 3),
+            device=motion_command.device,
+            dtype=torch.float32,
+        )
+
+    lookahead_steps = int(
+        getattr(
+            motion_command.motion_cfg,
+            "contact_aware_sparse_root_segment_steps",
+            30,
+        )
+    )
+    if lookahead_steps < 1:
+        raise ValueError(
+            "contact_aware_sparse_root_segment_steps must be >= 1, "
+            f"got {lookahead_steps}"
+        )
+
+    clip_ids = motion_command.clip_ids
+    time_steps = motion_command.time_steps
+    clip_lengths = motion_command.current_clip_lengths
+    carry_window_by_clip = (
+        motion_command._get_contact_aware_carry_window_by_clip()  # noqa: SLF001
+    )
+    carry_start = carry_window_by_clip[clip_ids, 0]
+    carry_end = carry_window_by_clip[clip_ids, 1]
+    endpoint_steps = time_steps + lookahead_steps
+
+    max_step = torch.clamp(clip_lengths - 1, min=0)
+    safe_start = torch.minimum(torch.clamp(time_steps, min=0), max_step)
+    safe_endpoint = torch.minimum(torch.clamp(endpoint_steps, min=0), max_step)
+    start_motion_idx = motion_command._get_motion_indices(safe_start)  # noqa: SLF001
+    endpoint_motion_idx = motion_command._get_motion_indices(  # noqa: SLF001
+        safe_endpoint
+    )
+
+    root_pos_w = motion_command.motion.body_pos_w[:, 0]
+    root_quat_w = motion_command.motion.body_quat_w[:, 0]
+    start_pos_w = root_pos_w[start_motion_idx]
+    endpoint_pos_w = root_pos_w[endpoint_motion_idx]
+    start_quat_w = root_quat_w[start_motion_idx]
+    endpoint_quat_w = root_quat_w[endpoint_motion_idx]
+
+    heading_inv = calc_heading_quat_inv(start_quat_w, w_last=True)
+    rel_pos_b = quat_apply(
+        heading_inv,
+        endpoint_pos_w - start_pos_w,
+        w_last=True,
+    )
+    rel_xy = rel_pos_b[:, :2]
+    rel_yaw = normalize_angle(
+        calc_heading(endpoint_quat_w) - calc_heading(start_quat_w)
+    ).unsqueeze(1)
+
+    yaw_threshold_deg = float(
+        getattr(
+            motion_command.motion_cfg,
+            "contact_aware_sparse_root_zero_yaw_threshold_deg",
+            0.0,
+        )
+    )
+    if yaw_threshold_deg > 0.0:
+        yaw_threshold_rad = yaw_threshold_deg * _DEG_TO_RAD
+        rel_yaw = torch.where(
+            torch.abs(rel_yaw) <= yaw_threshold_rad,
+            torch.zeros_like(rel_yaw),
+            rel_yaw,
+        )
+
+    command = torch.cat([rel_xy, rel_yaw], dim=-1)
+    valid_endpoint = (endpoint_steps < carry_end) & (endpoint_steps < clip_lengths)
+    active_mask = (
+        (time_steps >= carry_start)
+        & (time_steps < carry_end)
+        & valid_endpoint
+    )
+    return torch.where(
+        active_mask.unsqueeze(-1),
+        command,
+        torch.zeros_like(command),
+    )
 
 
 def _clip_final_object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -597,39 +699,316 @@ def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torc
     return torch.cat([rel_xy, rel_yaw], dim=-1)
 
 
+def _effective_drop_button(
+    motion_command: MotionCommand,
+    env: WholeBodyTrackingManager,
+) -> torch.Tensor:
+    """Return the exact drop value exposed to the actor for this step."""
+
+    manual_drop_button = getattr(motion_command, "manual_drop_button", None)
+    if (
+        getattr(motion_command, "manual_drop_button_override_enabled", False)
+        and manual_drop_button is not None
+    ):
+        if manual_drop_button.device != env.device:
+            manual_drop_button = manual_drop_button.to(env.device)
+        return torch.clamp(
+            manual_drop_button.to(dtype=torch.float32),
+            0.0,
+            1.0,
+        )
+    if (
+        (
+            getattr(motion_command, "manual_control_enabled", False)
+            and not getattr(
+                motion_command,
+                "_manual_forward_after_lift_preserve_native_contact_buttons",
+                False,
+            )
+            and not getattr(
+                motion_command,
+                "_manual_forward_after_lift_preserve_native_drop_button",
+                False,
+            )
+        )
+        or not motion_command.motion.has_object
+    ):
+        return torch.zeros(
+            (env.num_envs, 1),
+            device=env.device,
+            dtype=torch.float32,
+        )
+    button = (
+        motion_command.get_contact_aware_drop_button()
+        .to(dtype=torch.float32)
+        .unsqueeze(-1)
+    )
+    if bool(getattr(motion_command.motion_cfg, "hybrid_stage2_enabled", False)):
+        task_mask = motion_command.get_hybrid_stage2_task_env_mask()
+        button = torch.where(
+            task_mask.unsqueeze(-1),
+            torch.zeros_like(button),
+            button,
+        )
+    if motion_command.hybrid_velocity_enabled():
+        task_mask = motion_command.get_hybrid_velocity_task_env_mask()
+        button = torch.where(
+            task_mask.unsqueeze(-1),
+            torch.zeros_like(button),
+            button,
+        )
+    return button
+
+
+def _zero_root_command_during_drop(
+    motion_command: MotionCommand,
+    env: WholeBodyTrackingManager,
+    command: torch.Tensor,
+) -> torch.Tensor:
+    """Apply the opt-in final actor-command/drop exclusivity gate."""
+
+    enabled = getattr(
+        motion_command.motion_cfg,
+        "zero_root_command_when_drop_active",
+        False,
+    )
+    if not isinstance(enabled, bool):
+        raise ValueError(
+            "zero_root_command_when_drop_active must be a boolean, "
+            f"got {enabled!r}."
+        )
+    if not enabled:
+        return command
+    if command.shape != (env.num_envs, 3):
+        raise RuntimeError(
+            "Drop-exclusive root command must have shape "
+            f"({env.num_envs}, 3), got {tuple(command.shape)}."
+        )
+    drop_active = _effective_drop_button(motion_command, env) >= 0.5
+    return torch.where(drop_active, torch.zeros_like(command), command)
+
+
+@reusable_observation_base_term
+def target_root_world_velocity_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Canonical per-frame root ``[vx_w, vy_w, yaw_rate_w]`` command."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_control_enabled", False):
+        semantics = getattr(
+            motion_command,
+            "_manual_forward_after_lift_command_semantics",
+            "legacy_constant_robot_heading_frame",
+        )
+        if semantics != "world_velocity_mps":
+            raise RuntimeError(
+                "Manual world-velocity command semantics mismatch: "
+                f"{semantics!r}."
+        )
+        if motion_command.manual_xy_rel is None or motion_command.manual_yaw_rel is None:
+            raise RuntimeError("Manual world-velocity command tensors are not initialized.")
+        command = torch.cat(
+            (motion_command.manual_xy_rel, motion_command.manual_yaw_rel),
+            dim=-1,
+        )
+    else:
+        command = torch.cat(
+            (
+                motion_command.root_lin_vel_w[:, :2],
+                motion_command.root_ang_vel_w[:, 2:3],
+            ),
+            dim=-1,
+        )
+    return _zero_root_command_during_drop(motion_command, env, command)
+
+
+@reusable_observation_base_term
+def target_root_world_xy_yaw_error_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Current global ``[x_ref-x_robot, y_ref-y_robot, yaw_ref-yaw_robot]``."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_control_enabled", False):
+        semantics = getattr(
+            motion_command,
+            "_manual_forward_after_lift_command_semantics",
+            "legacy_constant_robot_heading_frame",
+        )
+        if semantics != "world_root_error_m":
+            raise RuntimeError(
+                "Manual world-root-error command semantics mismatch: "
+                f"{semantics!r}."
+        )
+        if motion_command.manual_xy_rel is None or motion_command.manual_yaw_rel is None:
+            raise RuntimeError("Manual world-root-error command tensors are not initialized.")
+        command = torch.cat(
+            (motion_command.manual_xy_rel, motion_command.manual_yaw_rel),
+            dim=-1,
+        )
+    else:
+        rel_xy_w, rel_yaw = _root_world_xy_yaw_error_command(motion_command)
+        command = torch.cat((rel_xy_w, rel_yaw), dim=-1)
+    return _zero_root_command_during_drop(motion_command, env, command)
+
+
+def _hybrid_stage2_task_root_command(
+    motion_command: MotionCommand,
+    *,
+    template: torch.Tensor,
+) -> torch.Tensor:
+    """Build the zero-then-constant task command without reference feedback."""
+
+    task_active = motion_command.get_hybrid_stage2_task_active_mask()
+    task_command = torch.zeros_like(template)
+    task_command[:, 0] = torch.where(
+        task_active,
+        torch.full_like(
+            task_command[:, 0],
+            float(motion_command.motion_cfg.hybrid_stage2_forward_command_m),
+        ),
+        torch.zeros_like(task_command[:, 0]),
+    )
+    return task_command
+
+
+def _pure_rl_policy_command_after_lift(
+    motion_command: MotionCommand,
+    *,
+    template: torch.Tensor,
+) -> torch.Tensor:
+    """Build the pure-RL sample-and-hold actor input without reward feedback."""
+
+    active = motion_command.get_pure_rl_policy_command_after_lift_active_mask()
+    command = torch.zeros_like(template)
+    command[:, 0] = torch.where(
+        active,
+        torch.full_like(
+            command[:, 0],
+            float(motion_command.motion_cfg.pure_rl_policy_forward_command_m),
+        ),
+        torch.zeros_like(command[:, 0]),
+    )
+    return command
+
+
+def _evaluation_precomputed_dx_only_command(
+    motion_command: MotionCommand,
+    command: torch.Tensor,
+) -> torch.Tensor:
+    """Keep only NPZ ``dx`` for an explicitly enabled evaluation diagnostic."""
+
+    if not bool(
+        getattr(
+            motion_command,
+            "_evaluation_precomputed_dx_only_after_pickup",
+            False,
+        )
+    ):
+        return command
+    if not motion_command.precomputed_turn_then_forward_enabled():
+        raise RuntimeError(
+            "Evaluation precomputed dx-only override requires the checkpoint-native "
+            "precomputed_turn_then_forward command mode."
+        )
+    dx_only = torch.zeros_like(command)
+    dx_only[:, 0] = command[:, 0]
+    return dx_only
+
+
 def sparse_target_root_trajectory_command_contact_aware(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Sparse root command that is active only during the clip's carry phase."""
     motion_command = _get_motion_command_and_assert_type(env)
-    base_command = sparse_target_root_trajectory_command(env)
     if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
-        return base_command
+        command = sparse_target_root_trajectory_command(env)
+    elif motion_command.pure_rl_policy_command_after_lift_enabled():
+        template = motion_command.robot_root_pos_w.new_zeros((env.num_envs, 3))
+        command = _pure_rl_policy_command_after_lift(
+            motion_command,
+            template=template,
+        )
+    else:
+        hybrid_enabled = bool(
+            getattr(motion_command.motion_cfg, "hybrid_stage2_enabled", False)
+        )
 
-    command_mode = (
-        str(getattr(motion_command.motion_cfg, "contact_aware_sparse_root_command_mode", "tracking_error"))
-        .strip()
-        .lower()
-        .replace("-", "_")
-    )
-    if command_mode in {"t1_aligned_segment", "segment", "segment_30"}:
-        return _contact_aware_segment_root_command(motion_command)
-    if command_mode not in {"tracking_error", "tracking", "default", "robot_tracking_error"}:
-        raise ValueError(f"Unsupported contact-aware sparse root command mode: {command_mode!r}")
+        command_mode = (
+            str(
+                getattr(
+                    motion_command.motion_cfg,
+                    "contact_aware_sparse_root_command_mode",
+                    "tracking_error",
+                )
+            )
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if command_mode == "precomputed_turn_then_forward":
+            command = motion_command.get_precomputed_turn_then_forward_command()
+            command = _evaluation_precomputed_dx_only_command(
+                motion_command,
+                command,
+            )
+        elif command_mode in {"t1_aligned_segment", "segment", "segment_30"}:
+            command = _contact_aware_segment_root_command(motion_command)
+        elif command_mode == "rolling_reference_delta":
+            command = _contact_aware_rolling_reference_delta_command(motion_command)
+        else:
+            if command_mode not in {
+                "tracking_error",
+                "tracking",
+                "default",
+                "robot_tracking_error",
+            }:
+                raise ValueError(
+                    "Unsupported contact-aware sparse root command mode: "
+                    f"{command_mode!r}"
+                )
+            base_command = sparse_target_root_trajectory_command(env)
+            active_mask = motion_command.get_contact_aware_root_command_active_mask()
+            command = torch.where(
+                active_mask.unsqueeze(-1),
+                base_command,
+                torch.zeros_like(base_command),
+            )
 
-    active_mask = motion_command.get_contact_aware_root_command_active_mask()
-    return torch.where(active_mask.unsqueeze(-1), base_command, torch.zeros_like(base_command))
+        if hybrid_enabled:
+            task_mask = motion_command.get_hybrid_stage2_task_env_mask()
+            task_command = _hybrid_stage2_task_root_command(
+                motion_command,
+                template=command,
+            )
+            command = torch.where(task_mask.unsqueeze(-1), task_command, command)
+    return _zero_root_command_during_drop(motion_command, env, command)
+
+
+@reusable_observation_base_term
+def hybrid_velocity_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Unified actor/critic command with ``[m/s, m/s, rad/s]`` semantics."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    command = motion_command.get_hybrid_velocity_command()
+    return _zero_root_command_during_drop(motion_command, env, command)
 
 
 def drop_button(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Binary drop button: 0 before carry-end t2, 1 from t2 to clip end."""
     motion_command = _get_motion_command_and_assert_type(env)
-    manual_drop_button = getattr(motion_command, "manual_drop_button", None)
-    if getattr(motion_command, "manual_drop_button_override_enabled", False) and manual_drop_button is not None:
-        if manual_drop_button.device != env.device:
-            manual_drop_button = manual_drop_button.to(env.device)
-        return torch.clamp(manual_drop_button.to(dtype=torch.float32), 0.0, 1.0)
-    if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
-        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
-    return motion_command.get_contact_aware_drop_button().to(dtype=torch.float32).unsqueeze(-1)
+    return _effective_drop_button(motion_command, env)
+
+
+def hybrid_stage2_task_indicator(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Privileged critic-only ID: 1 for task rows and 0 for tracking rows."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_hybrid_stage2_task_env_mask().to(dtype=torch.float32).unsqueeze(-1)
+
+
+def hybrid_velocity_task_indicator(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Privileged critic-only ID for the velocity-conditioned task rows."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.hybrid_velocity_enabled():
+        raise RuntimeError("hybrid velocity task indicator requires hybrid_velocity_enabled=True.")
+    return motion_command.get_hybrid_velocity_task_env_mask().to(dtype=torch.float32).unsqueeze(-1)
 
 
 def pickup_button(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -640,7 +1019,22 @@ def pickup_button(env: WholeBodyTrackingManager) -> torch.Tensor:
         if manual_pickup_button.device != env.device:
             manual_pickup_button = manual_pickup_button.to(env.device)
         return torch.clamp(manual_pickup_button.to(dtype=torch.float32), 0.0, 1.0)
-    if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
+    if (
+        (
+            getattr(motion_command, "manual_control_enabled", False)
+            and not getattr(
+                motion_command,
+                "_manual_forward_after_lift_preserve_native_contact_buttons",
+                False,
+            )
+            and not getattr(
+                motion_command,
+                "_manual_forward_after_lift_preserve_native_pickup_button",
+                False,
+            )
+        )
+        or not motion_command.motion.has_object
+    ):
         return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
     return motion_command.get_contact_aware_pickup_button().to(dtype=torch.float32).unsqueeze(-1)
 
@@ -780,6 +1174,39 @@ def obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     )
     rot_mat = quaternion_to_matrix(ori_b, w_last=True)
     return rot_mat[..., :2].reshape(rot_mat.shape[0], -1)
+
+
+def _mask_hybrid_velocity_reference_rows(
+    env: WholeBodyTrackingManager,
+    value: torch.Tensor,
+) -> torch.Tensor:
+    """Remove reference-only critic information from task rows."""
+
+    motion_state = _get_motion_command_and_assert_type(env)
+    if not motion_state.hybrid_velocity_enabled():
+        raise RuntimeError("hybrid velocity reference masking requires hybrid_velocity_enabled=True.")
+    task_mask = motion_state.get_hybrid_velocity_task_env_mask()
+    return torch.where(task_mask.unsqueeze(-1), torch.zeros_like(value), value)
+
+
+def hybrid_velocity_masked_motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hybrid_velocity_reference_rows(env, motion_command(env))
+
+
+def hybrid_velocity_masked_motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hybrid_velocity_reference_rows(env, motion_ref_pos_b(env))
+
+
+def hybrid_velocity_masked_motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hybrid_velocity_reference_rows(env, motion_ref_ori_b(env))
+
+
+def hybrid_velocity_masked_obj_target_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hybrid_velocity_reference_rows(env, obj_target_pos_b(env))
+
+
+def hybrid_velocity_masked_obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hybrid_velocity_reference_rows(env, obj_target_ori_b(env))
 
 
 @reusable_observation_base_term

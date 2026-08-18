@@ -708,6 +708,40 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   fi
 fi
 
+AS_EXTERNAL_MATERIALIZATION_CONTRACT=0
+AS_EXPECTED_SINGLE_SLOT_DIR_ABS=""
+AS_EXTERNAL_SOLID_DIR_ABS=""
+if [[ -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST:-}" \
+      || -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST:-}" \
+      || -n "${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST:-}" \
+      || -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR:-}" \
+      || -n "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE:-}" ]]; then
+  AS_EXTERNAL_MATERIALIZATION_CONTRACT=1
+  if ! [[ "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
+        && "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
+        && "${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
+        && "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE:-}" =~ ^[1-9][0-9]*$ \
+        && -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR:-}" ]]; then
+    echo "[ERROR] Sealed external-AS materialization contract is incomplete or malformed." >&2
+    exit 2
+  fi
+  if ! AS_EXPECTED_SINGLE_SLOT_DIR_ABS=$(realpath -e -- "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR}"); then
+    echo "[ERROR] Sealed external-AS single-slot directory is missing: ${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR}" >&2
+    exit 2
+  fi
+  AS_EXPECTED_SINGLE_SLOT_SUFFIX="/_single_slot_motion_bank/by-source/${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST}"
+  if [[ "${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}" != /* \
+        || "${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}" != *"${AS_EXPECTED_SINGLE_SLOT_SUFFIX}" ]]; then
+    echo "[ERROR] Sealed external-AS single-slot path is not bound to its view digest." >&2
+    exit 2
+  fi
+  AS_EXTERNAL_SOLID_DIR_ABS=${AS_EXPECTED_SINGLE_SLOT_DIR_ABS%"${AS_EXPECTED_SINGLE_SLOT_SUFFIX}"}
+  if [[ -z "${AS_EXTERNAL_SOLID_DIR_ABS}" || ! -d "${AS_EXTERNAL_SOLID_DIR_ABS}" ]]; then
+    echo "[ERROR] Sealed external-AS solid directory is missing: ${AS_EXTERNAL_SOLID_DIR_ABS:-<empty>}" >&2
+    exit 2
+  fi
+fi
+
 LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
 OMOMO_DATA_DIR=$(realpath -m "${OMOMO_DATA_DIR}")
 OMOMO_OBJECT_MAP=$(realpath -m "${OMOMO_OBJECT_MAP}")
@@ -727,9 +761,12 @@ case "${OMOMO_DATA_DIR}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_DATA_DIR}" >&2
-    exit 2
+    if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" != "1" \
+          || "${OMOMO_DATA_DIR}" != "${AS_EXTERNAL_SOLID_DIR_ABS}" ]]; then
+      echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root or equal the sealed external solid directory." >&2
+      echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${OMOMO_DATA_DIR}" >&2
+      exit 2
+    fi
     ;;
 esac
 case "${OMOMO_OBJECT_MAP}" in
@@ -747,9 +784,12 @@ case "${OMOMO_OBJECT_MAP}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP}" >&2
-    exit 2
+    if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" != "1" \
+          || "${OMOMO_OBJECT_MAP}" != "${AS_EXTERNAL_SOLID_DIR_ABS}/_clip_object_urdf_map.json" ]]; then
+      echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root or equal the sealed external solid map." >&2
+      echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${OMOMO_OBJECT_MAP}" >&2
+      exit 2
+    fi
     ;;
 esac
 
@@ -893,9 +933,12 @@ case "${AS_SINGLE_SLOT_MOTION_BASE_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] Generated AS single-slot motion-bank base must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${AS_SINGLE_SLOT_MOTION_BASE_ABS}" >&2
-    exit 2
+    if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" != "1" \
+          || "${AS_SINGLE_SLOT_MOTION_BASE_ABS}" != "${AS_EXTERNAL_SOLID_DIR_ABS}/_single_slot_motion_bank" ]]; then
+      echo "[ERROR] Generated AS single-slot base must live under repo-local data root or equal the sealed external base." >&2
+      echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${AS_SINGLE_SLOT_MOTION_BASE_ABS}" >&2
+      exit 2
+    fi
     ;;
 esac
 
@@ -917,28 +960,10 @@ case "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" in
 esac
 
 # A direct invocation has no sealed external-AS contract and retains the
-# historical behavior.  batch_ne.sh supplies all five values together; if any
-# appears, require the complete tuple and bind the view returned by the actual
-# wrapper materialization to the controller's all-node barrier.
-AS_EXTERNAL_MATERIALIZATION_CONTRACT=0
-if [[ -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST:-}" \
-      || -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST:-}" \
-      || -n "${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST:-}" \
-      || -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR:-}" \
-      || -n "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE:-}" ]]; then
-  AS_EXTERNAL_MATERIALIZATION_CONTRACT=1
-  if ! [[ "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
-        && "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
-        && "${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST:-}" =~ ^[0-9a-f]{64}$ \
-        && "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE:-}" =~ ^[1-9][0-9]*$ \
-        && -n "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR:-}" ]]; then
-    echo "[ERROR] Sealed external-AS materialization contract is incomplete or malformed." >&2
-    exit 2
-  fi
-  if ! AS_EXPECTED_SINGLE_SLOT_DIR_ABS=$(realpath -e -- "${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR}"); then
-    echo "[ERROR] Sealed external-AS single-slot directory is missing: ${HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR}" >&2
-    exit 2
-  fi
+# historical repo-local behavior.  batch_ne.sh supplies the complete tuple;
+# bind the view returned by the actual wrapper materialization to the
+# controller's all-node barrier.
+if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" == "1" ]]; then
   if [[ "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" != "${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}" ]]; then
     echo "[ERROR] Effective AS single-slot directory changed after the all-node barrier: actual=${AS_SINGLE_SLOT_MOTION_DIR_ABS} expected=${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}" >&2
     exit 2
@@ -984,9 +1009,12 @@ case "${OMOMO_OBJECT_MAP}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] Generated AS single-slot object map must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP}" >&2
-    exit 2
+    if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" != "1" \
+          || "${OMOMO_OBJECT_MAP}" != "${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}/_clip_object_urdf_map.json" ]]; then
+      echo "[ERROR] Generated AS single-slot map must live under repo-local data root or equal the sealed external map." >&2
+      echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${OMOMO_OBJECT_MAP}" >&2
+      exit 2
+    fi
     ;;
 esac
 OMOMO_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR_ABS}"
@@ -1031,9 +1059,20 @@ if [[ "${AS_RANK_LOCAL_SHARDS}" == "1" ]]; then
   AS_GLOBAL_WORLD_SIZE=$((NPROC * AS_NNODES))
   export CUDA_VISIBLE_DEVICES
   export NPROC
+  AS_RANK_SHARD_ENV_ARGS=()
+  if [[ -n "${PER_GPU_ENVS:-}" ]]; then
+    if ! [[ "${PER_GPU_ENVS}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "[ERROR] PER_GPU_ENVS must be a positive integer before rank-shard materialization. Got: ${PER_GPU_ENVS}" >&2
+      exit 2
+    fi
+    AS_RANK_SHARD_ENV_ARGS=(--environments-per-rank "${PER_GPU_ENVS}")
+  elif [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" == "1" ]]; then
+    echo "[ERROR] Sealed external-AS materialization requires PER_GPU_ENVS before rank-shard materialization." >&2
+    exit 2
+  fi
 
   if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" == "1" \
-        && "${AS_GLOBAL_WORLD_SIZE}" != "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE}" ]]; then
+      && "${AS_GLOBAL_WORLD_SIZE}" != "${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE}" ]]; then
     echo "[ERROR] Effective AS world size changed after the all-node barrier: actual=${AS_GLOBAL_WORLD_SIZE} expected=${HOLOSOMA_EXTERNAL_AS_WORLD_SIZE}" >&2
     exit 2
   fi
@@ -1043,6 +1082,7 @@ if [[ "${AS_RANK_LOCAL_SHARDS}" == "1" ]]; then
       --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" \
       --object-map "${OMOMO_OBJECT_MAP}" \
       --world-size "${AS_GLOBAL_WORLD_SIZE}" \
+      "${AS_RANK_SHARD_ENV_ARGS[@]}" \
       --source-digest-only)
     if ! [[ "${AS_RANK_SHARD_SOURCE_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
       echo "[ERROR] Invalid AS rank-shard source digest: ${AS_RANK_SHARD_SOURCE_DIGEST}" >&2
@@ -1062,9 +1102,17 @@ if [[ "${AS_RANK_LOCAL_SHARDS}" == "1" ]]; then
       "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
         ;;
       *)
-        echo "[ERROR] AS rank-local shard root must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-        echo "[ERROR] Got: ${AS_RANK_SHARD_ROOT_ABS}" >&2
-        exit 2
+        if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" != "1" ]]; then
+          echo "[ERROR] AS rank-local shard root must live under repo-local data root or equal the sealed external rank root." >&2
+          echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${AS_RANK_SHARD_ROOT_ABS}" >&2
+          exit 2
+        fi
+        AS_SEALED_RANK_SHARD_ROOT="${AS_EXPECTED_SINGLE_SLOT_DIR_ABS}/_rank_shards/by-source/${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST}/ws${AS_GLOBAL_WORLD_SIZE}"
+        if [[ "${AS_RANK_SHARD_ROOT_ABS}" != "${AS_SEALED_RANK_SHARD_ROOT}" ]]; then
+          echo "[ERROR] AS rank-local shard root must live under repo-local data root or equal the sealed external rank root." >&2
+          echo "[ERROR] local_root=${LOCAL_DATA_ROOT} got=${AS_RANK_SHARD_ROOT_ABS}" >&2
+          exit 2
+        fi
         ;;
     esac
     if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" == "1" ]]; then
@@ -1079,6 +1127,7 @@ if [[ "${AS_RANK_LOCAL_SHARDS}" == "1" ]]; then
       --object-map "${OMOMO_OBJECT_MAP}" \
       --output-root "${AS_RANK_SHARD_ROOT_ABS}" \
       --world-size "${AS_GLOBAL_WORLD_SIZE}" \
+      "${AS_RANK_SHARD_ENV_ARGS[@]}" \
       --expected-source-digest "${AS_RANK_SHARD_SOURCE_DIGEST}")
     if [[ "${AS_EXTERNAL_MATERIALIZATION_CONTRACT}" == "1" ]]; then
       HOLOSOMA_RANK_LOCAL_MOTION_ROOT=$(realpath -e -- "${HOLOSOMA_RANK_LOCAL_MOTION_ROOT}")
@@ -1096,6 +1145,7 @@ if [[ "${AS_RANK_LOCAL_SHARDS}" == "1" ]]; then
         --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" \
         --object-map "${OMOMO_OBJECT_MAP}" \
         --world-size "${AS_GLOBAL_WORLD_SIZE}" \
+        "${AS_RANK_SHARD_ENV_ARGS[@]}" \
         --source-digest-only)
       if [[ "${AS_RANK_SHARD_SOURCE_DIGEST}" != "${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST}" ]]; then
         echo "[ERROR] Effective AS rank-shard source changed after the all-node barrier: actual=${AS_RANK_SHARD_SOURCE_DIGEST} expected=${HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST}" >&2
@@ -1110,6 +1160,15 @@ fi
 
 CONTACT_EXPORT_ROOT=""
 CONTACT_EXPORT_CLIPS_ROOT=""
+CONTACT_SIDECAR_MODE=${CONTACT_SIDECAR_MODE:-full-sidecars}
+case "${CONTACT_SIDECAR_MODE}" in
+  full-sidecars|runtime-intervals)
+    ;;
+  *)
+    echo "[ERROR] CONTACT_SIDECAR_MODE must be full-sidecars or runtime-intervals. Got: ${CONTACT_SIDECAR_MODE}" >&2
+    exit 2
+    ;;
+esac
 if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   CONTACT_EXPORT_ROOT=$(realpath -m "${RESUME_FROM_BOX_CONTACT_EXPORT_ROOT}")
   CONTACT_EXPORT_CLIPS_ROOT=$(realpath -m "${CONTACT_EXPORT_ROOT}/clips")
@@ -1128,7 +1187,7 @@ if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
       exit 2
       ;;
     *)
-      CONTACT_EXPORT_CLIPS_ROOT=$("${PYTHON_BIN}" - "${OMOMO_DATA_DIR}" "${CONTACT_EXPORT_ROOT}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
+      CONTACT_EXPORT_CLIPS_ROOT=$("${PYTHON_BIN}" - "${OMOMO_DATA_DIR}" "${CONTACT_EXPORT_ROOT}" "${OMOMO_EXPECTED_TOTAL}" "${CONTACT_SIDECAR_MODE}" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -1137,6 +1196,7 @@ from pathlib import Path
 motion_dir = Path(sys.argv[1]).expanduser().resolve()
 contact_root = Path(sys.argv[2]).expanduser().resolve()
 expected_raw = sys.argv[3].strip()
+sidecar_mode = sys.argv[4].strip()
 expected = int(expected_raw) if expected_raw else None
 clips_root = contact_root / "clips" if (contact_root / "clips").is_dir() else contact_root
 
@@ -1156,7 +1216,7 @@ def infer_clip_id(dir_name: str) -> str:
 
 contact_ids: set[str] = set()
 missing_files: list[str] = []
-required_files = (
+full_sidecar_files = (
     "teacher_rollout_reference.npz",
     "left_wrist_contact_points.npy",
     "left_wrist_contact_point_counts.npy",
@@ -1165,6 +1225,7 @@ required_files = (
     "right_wrist_contact_point_counts.npy",
     "right_wrist_contact_interval_steps.npy",
 )
+required_files = full_sidecar_files if sidecar_mode == "full-sidecars" else ("contact_intervals.json",)
 for clip_dir in sorted(path for path in clips_root.iterdir() if path.is_dir()):
     clip_id = clip_dir.name if clip_dir.name in motion_ids else infer_clip_id(clip_dir.name)
     if clip_id in contact_ids:
@@ -1180,7 +1241,7 @@ if missing_contacts:
     raise SystemExit(f"[ERROR] Contact export missing {len(missing_contacts)} active clip(s): {preview}")
 if missing_files:
     preview = ", ".join(missing_files[:20])
-    raise SystemExit(f"[ERROR] Contact export has incomplete rollout/contact sidecars: {preview}")
+    raise SystemExit(f"[ERROR] Contact export is incomplete for mode {sidecar_mode}: {preview}")
 
 print(str(clips_root))
 PY
@@ -1204,17 +1265,37 @@ PY
       --runtime-prepend-duration-s "${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}"
     )
   fi
-  CONTACT_EXPORT_CLIPS_ROOT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/validate_contact_sidecars.py" \
-    --motion-dir "${OMOMO_DATA_DIR}" \
-    --contact-root "${CONTACT_EXPORT_ROOT}" \
-    --motion-end-mode "${STUDENT_MOTION_END_MODE}" \
-    "${CONTACT_VALIDATOR_EXPECTED_ARGS[@]}" \
-    "${CONTACT_RUNTIME_PREPEND_ARGS[@]}" \
-    --tracked-body-names "${AS_ROLLOUT_TRACKED_BODY_NAMES}" \
-    --ref-body-name "${AS_ROLLOUT_REF_BODY_NAME}" \
-    --offline-contact-region-names "${OFFLINE_CONTACT_REGION_NAMES}" \
-    --offline-wrist-region-names "${OFFLINE_WRIST_REGION_NAMES}")
-  echo "[INFO] contact_sidecar_contract_verified clips_root=${CONTACT_EXPORT_CLIPS_ROOT} tracked_bodies=${AS_ROLLOUT_TRACKED_BODY_NAMES} ref_body=${AS_ROLLOUT_REF_BODY_NAME}"
+  if [[ "${CONTACT_SIDECAR_MODE}" == "runtime-intervals" ]]; then
+    case "$(echo "${ENABLE_OFFLINE_CONTACT_GUIDANCE:-True}" | tr '[:upper:]' '[:lower:]')" in
+      0|false|no|off)
+        ;;
+      *)
+        echo "[ERROR] CONTACT_SIDECAR_MODE=runtime-intervals requires ENABLE_OFFLINE_CONTACT_GUIDANCE=False." >&2
+        exit 2
+        ;;
+    esac
+    if [[ "${EXP:-}" == *"r2s-rollout-ref"* ]]; then
+      echo "[ERROR] Rollout-reference rewards require CONTACT_SIDECAR_MODE=full-sidecars." >&2
+      exit 2
+    fi
+    CONTACT_EXPORT_CLIPS_ROOT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/validate_runtime_contact_intervals.py" \
+      --motion-dir "${OMOMO_DATA_DIR}" \
+      --contact-root "${CONTACT_EXPORT_ROOT}" \
+      "${CONTACT_VALIDATOR_EXPECTED_ARGS[@]}")
+    echo "[INFO] runtime_contact_interval_contract_verified clips_root=${CONTACT_EXPORT_CLIPS_ROOT} source=hand_contact_valid"
+  else
+    CONTACT_EXPORT_CLIPS_ROOT=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/validate_contact_sidecars.py" \
+      --motion-dir "${OMOMO_DATA_DIR}" \
+      --contact-root "${CONTACT_EXPORT_ROOT}" \
+      --motion-end-mode "${STUDENT_MOTION_END_MODE}" \
+      "${CONTACT_VALIDATOR_EXPECTED_ARGS[@]}" \
+      "${CONTACT_RUNTIME_PREPEND_ARGS[@]}" \
+      --tracked-body-names "${AS_ROLLOUT_TRACKED_BODY_NAMES}" \
+      --ref-body-name "${AS_ROLLOUT_REF_BODY_NAME}" \
+      --offline-contact-region-names "${OFFLINE_CONTACT_REGION_NAMES}" \
+      --offline-wrist-region-names "${OFFLINE_WRIST_REGION_NAMES}")
+    echo "[INFO] contact_sidecar_contract_verified clips_root=${CONTACT_EXPORT_CLIPS_ROOT} tracked_bodies=${AS_ROLLOUT_TRACKED_BODY_NAMES} ref_body=${AS_ROLLOUT_REF_BODY_NAME}"
+  fi
   export CONTACT_EXPORT_ROOT
   export ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
 fi
@@ -1262,6 +1343,7 @@ HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/compute_tr
   "${PROVENANCE_SHARD_ARGS[@]}" \
   "${PROVENANCE_POLICY_INIT_ARGS[@]}" \
   "${PROVENANCE_TRAINING_RESUME_ARGS[@]}" \
+  --contact-sidecar-mode "${CONTACT_SIDECAR_MODE}" \
   --student-motion-end-mode "${STUDENT_MOTION_END_MODE}" \
   --contact-interval-runtime-prepend-compensation "${_contact_compensation_lower}" \
   --source-root "${SCRIPT_DIR}")

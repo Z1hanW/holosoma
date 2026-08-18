@@ -28,6 +28,9 @@ from holosoma.utils.contact_intervals import (
     resolve_contact_export_clip_id,
 )
 from holosoma.utils.rotations import (
+    calc_heading,
+    normalize_angle,
+    quat_apply,
     quat_apply_broadcast_left,
     quat_error_magnitude,
     quat_inverse,
@@ -61,6 +64,433 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
     assert motion_command is not None, "motion_command not found in command manager"
     assert isinstance(motion_command, MotionCommand), f"Expected MotionCommand, got {type(motion_command)}"
     return motion_command
+
+
+_FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS = frozenset(
+    {
+        "motion_global_ref_position_error_exp",
+        "motion_global_ref_orientation_error_exp",
+        "motion_relative_body_position_error_exp",
+        "motion_relative_body_orientation_error_exp",
+        "motion_global_body_lin_vel",
+        "motion_global_body_ang_vel",
+        "object_global_ref_position_error_exp",
+        "object_global_ref_orientation_error_exp",
+    }
+)
+
+
+def hybrid_stage2_tracking_reward(
+    env: WholeBodyTrackingManager,
+    reward_func: str,
+    reward_params: dict[str, object],
+) -> torch.Tensor:
+    """Apply imitation reward to tracking rows and task rows before pickup."""
+
+    if reward_func not in _FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS:
+        raise ValueError(
+            f"Unsupported hybrid stage-2 tracking reward {reward_func!r}; "
+            f"expected one of {sorted(_FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS)}."
+        )
+    func = globals().get(reward_func)
+    if not callable(func):
+        raise RuntimeError(f"Hybrid stage-2 tracking reward {reward_func!r} is unavailable.")
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not bool(getattr(motion_command.motion_cfg, "hybrid_stage2_enabled", False)):
+        raise RuntimeError("Hybrid stage-2 tracking reward requires hybrid_stage2_enabled=True.")
+    reward = func(env, **reward_params)
+    mask = motion_command.get_hybrid_stage2_tracking_reward_mask()
+    return reward * mask.to(dtype=reward.dtype)
+
+
+def hybrid_velocity_tracking_reward(
+    env: WholeBodyTrackingManager,
+    reward_func: str,
+    reward_params: dict[str, object],
+) -> torch.Tensor:
+    """Apply reference imitation only to rows assigned to tracking."""
+
+    if reward_func not in _FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS:
+        raise ValueError(
+            f"Unsupported hybrid velocity tracking reward {reward_func!r}; "
+            f"expected one of {sorted(_FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS)}."
+        )
+    func = globals().get(reward_func)
+    if not callable(func):
+        raise RuntimeError(f"Hybrid velocity tracking reward {reward_func!r} is unavailable.")
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.hybrid_velocity_enabled():
+        raise RuntimeError("Hybrid velocity tracking reward requires hybrid_velocity_enabled=True.")
+    reward = func(env, **reward_params)
+    mask = motion_command.get_hybrid_velocity_tracking_reward_mask()
+    return reward * mask.to(dtype=reward.dtype)
+
+
+def _forward_after_lift_task_state(
+    env: WholeBodyTrackingManager,
+    *,
+    contract: str,
+) -> tuple[MotionCommand, dict[str, torch.Tensor]]:
+    """Return one per-reward-step cached low-dimensional carry-task state."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if contract == "hybrid_stage2":
+        if not bool(getattr(motion_command.motion_cfg, "hybrid_stage2_enabled", False)):
+            raise RuntimeError(
+                "Hybrid stage-2 task reward requires hybrid_stage2_enabled=True."
+            )
+        active = motion_command.get_hybrid_stage2_task_active_mask()
+    else:
+        raise ValueError(f"Unsupported forward-after-lift reward contract: {contract!r}.")
+
+    cache_key = (
+        int(getattr(env, "_reward_compute_counter", -1)),
+        id(motion_command),
+        contract,
+    )
+    cache_attr = f"_{contract}_task_reward_cache"
+    cached = getattr(env, cache_attr, None)
+    if cached is not None and cached[0] == cache_key:
+        return motion_command, cached[1]
+
+    anchor_yaw = calc_heading(motion_command.pickup_anchor_root_quat_w)
+    current_yaw = calc_heading(motion_command.robot_root_quat_w)
+    forward_axis = torch.stack((torch.cos(anchor_yaw), torch.sin(anchor_yaw)), dim=-1)
+    lateral_axis = torch.stack((-forward_axis[:, 1], forward_axis[:, 0]), dim=-1)
+
+    root_velocity_xy = motion_command.robot_root_lin_vel_w[:, :2]
+    root_displacement_xy = (
+        motion_command.robot_root_pos_w[:, :2]
+        - motion_command.pickup_anchor_root_pos_w[:, :2]
+    )
+    root_quat_inv = quat_inverse(motion_command.robot_root_quat_w, w_last=True)
+    object_pos_b = quat_apply(
+        root_quat_inv,
+        motion_command.simulator_object_pos_w - motion_command.robot_root_pos_w,
+        w_last=True,
+    )
+    object_quat_b = quat_mul(
+        root_quat_inv,
+        motion_command.simulator_object_quat_w,
+        w_last=True,
+    )
+
+    state = {
+        "active": active,
+        "forward_velocity": torch.sum(root_velocity_xy * forward_axis, dim=-1),
+        "lateral_velocity": torch.sum(root_velocity_xy * lateral_axis, dim=-1),
+        "heading_error": normalize_angle(current_yaw - anchor_yaw),
+        "cross_track_error": torch.sum(root_displacement_xy * lateral_axis, dim=-1),
+        "yaw_rate": motion_command.robot_root_ang_vel_w[:, 2],
+        "object_position_error": torch.linalg.vector_norm(
+            object_pos_b - motion_command.pickup_anchor_object_pos_b,
+            dim=-1,
+        ),
+        "object_orientation_error": quat_error_magnitude(
+            object_quat_b,
+            motion_command.pickup_anchor_object_quat_b,
+        ),
+    }
+    setattr(env, cache_attr, (cache_key, state))
+    return motion_command, state
+
+
+def _masked_forward_after_lift_task_exp(
+    env: WholeBodyTrackingManager,
+    *,
+    contract: str,
+    state_name: str,
+    target: float,
+    sigma: float,
+) -> torch.Tensor:
+    if sigma <= 0.0:
+        raise ValueError(f"sigma must be positive, got {sigma}.")
+    _, state = _forward_after_lift_task_state(env, contract=contract)
+    error = state[state_name] - float(target)
+    reward = torch.exp(-torch.square(error) / float(sigma) ** 2)
+    return reward * state["active"].to(dtype=reward.dtype)
+
+
+def hybrid_stage2_forward_velocity_exp(
+    env: WholeBodyTrackingManager,
+    target_velocity: float,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="forward_velocity",
+        target=target_velocity,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_lateral_velocity_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="lateral_velocity",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_heading_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="heading_error",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_cross_track_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="cross_track_error",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_yaw_rate_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="yaw_rate",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_object_position_hold_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="object_position_error",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def hybrid_stage2_object_orientation_hold_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _masked_forward_after_lift_task_exp(
+        env,
+        contract="hybrid_stage2",
+        state_name="object_orientation_error",
+        target=0.0,
+        sigma=sigma,
+    )
+
+
+def _hybrid_velocity_task_state(
+    env: WholeBodyTrackingManager,
+) -> tuple[MotionCommand, dict[str, torch.Tensor]]:
+    """Return cached state for the fixed lift-and-carry task contract."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.hybrid_velocity_enabled():
+        raise RuntimeError("Hybrid velocity task reward requires hybrid_velocity_enabled=True.")
+
+    cache_key = (
+        int(getattr(env, "_reward_compute_counter", -1)),
+        id(motion_command),
+    )
+    cache_attr = "_hybrid_velocity_task_reward_cache"
+    cached = getattr(env, cache_attr, None)
+    if cached is not None and cached[0] == cache_key:
+        return motion_command, cached[1]
+
+    task_mask = motion_command.get_hybrid_velocity_task_env_mask()
+    lifted_mask = motion_command.get_hybrid_velocity_task_active_mask()
+    anchor_yaw = calc_heading(motion_command.pickup_anchor_root_quat_w)
+    current_yaw = calc_heading(motion_command.robot_root_quat_w)
+    root_velocity_xy = motion_command.robot_root_lin_vel_w[:, :2]
+    root_displacement_xy = (
+        motion_command.robot_root_pos_w[:, :2]
+        - motion_command.pickup_anchor_root_pos_w[:, :2]
+    )
+
+    command_frame = str(
+        getattr(motion_command.motion_cfg, "hybrid_velocity_command_frame", "heading")
+    ).strip().lower()
+    if command_frame == "heading":
+        forward_axis = torch.stack((torch.cos(anchor_yaw), torch.sin(anchor_yaw)), dim=-1)
+        lateral_axis = torch.stack((-forward_axis[:, 1], forward_axis[:, 0]), dim=-1)
+        forward_velocity = torch.sum(root_velocity_xy * forward_axis, dim=-1)
+        lateral_velocity = torch.sum(root_velocity_xy * lateral_axis, dim=-1)
+        heading_error = normalize_angle(current_yaw - anchor_yaw)
+        cross_track_error = torch.sum(root_displacement_xy * lateral_axis, dim=-1)
+    elif command_frame == "world":
+        forward_velocity = root_velocity_xy[:, 0]
+        lateral_velocity = root_velocity_xy[:, 1]
+        heading_error = normalize_angle(current_yaw)
+        cross_track_error = root_displacement_xy[:, 1]
+    else:
+        raise RuntimeError(
+            "hybrid_velocity_command_frame was not validated: "
+            f"{command_frame!r}."
+        )
+
+    root_quat_inv = quat_inverse(motion_command.robot_root_quat_w, w_last=True)
+    object_pos_b = quat_apply(
+        root_quat_inv,
+        motion_command.simulator_object_pos_w - motion_command.robot_root_pos_w,
+        w_last=True,
+    )
+    object_quat_b = quat_mul(
+        root_quat_inv,
+        motion_command.simulator_object_quat_w,
+        w_last=True,
+    )
+    command = motion_command.get_hybrid_velocity_command()
+    state = {
+        "task_mask": task_mask,
+        "lifted_mask": lifted_mask,
+        "command": command,
+        "forward_velocity": forward_velocity,
+        "lateral_velocity": lateral_velocity,
+        "heading_error": heading_error,
+        "cross_track_error": cross_track_error,
+        "yaw_rate": motion_command.robot_root_ang_vel_w[:, 2],
+        "object_position_error": torch.linalg.vector_norm(
+            object_pos_b - motion_command.pickup_anchor_object_pos_b,
+            dim=-1,
+        ),
+        "object_orientation_error": quat_error_magnitude(
+            object_quat_b,
+            motion_command.pickup_anchor_object_quat_b,
+        ),
+    }
+    setattr(env, cache_attr, (cache_key, state))
+    return motion_command, state
+
+
+def _hybrid_velocity_exp(
+    env: WholeBodyTrackingManager,
+    *,
+    state_name: str,
+    sigma: float,
+    command_index: int | None = None,
+    lifted_only: bool = False,
+) -> torch.Tensor:
+    if sigma <= 0.0:
+        raise ValueError(f"sigma must be positive, got {sigma}.")
+    _, state = _hybrid_velocity_task_state(env)
+    if command_index is None:
+        target = torch.zeros_like(state[state_name])
+    else:
+        target = state["command"][:, command_index]
+    reward = torch.exp(-torch.square(state[state_name] - target) / float(sigma) ** 2)
+    mask_name = "lifted_mask" if lifted_only else "task_mask"
+    return reward * state[mask_name].to(dtype=reward.dtype)
+
+
+def hybrid_velocity_lift_progress(
+    env: WholeBodyTrackingManager,
+) -> torch.Tensor:
+    motion_command, state = _hybrid_velocity_task_state(env)
+    baseline = motion_command.hybrid_velocity_object_z_baseline
+    if baseline is None:
+        raise RuntimeError("hybrid velocity lift baseline is unavailable.")
+    target_height = float(motion_command.motion_cfg.hybrid_velocity_lift_height_m)
+    lift_delta = motion_command.simulator_object_pos_w[:, 2] - baseline
+    progress = torch.clamp(lift_delta / target_height, min=0.0, max=1.0)
+    return progress * state["task_mask"].to(dtype=progress.dtype)
+
+
+def hybrid_velocity_forward_velocity_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(
+        env,
+        state_name="forward_velocity",
+        sigma=sigma,
+        command_index=0,
+    )
+
+
+def hybrid_velocity_lateral_velocity_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(
+        env,
+        state_name="lateral_velocity",
+        sigma=sigma,
+        command_index=1,
+    )
+
+
+def hybrid_velocity_heading_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(env, state_name="heading_error", sigma=sigma)
+
+
+def hybrid_velocity_cross_track_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(env, state_name="cross_track_error", sigma=sigma)
+
+
+def hybrid_velocity_yaw_rate_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(
+        env,
+        state_name="yaw_rate",
+        sigma=sigma,
+        command_index=2,
+    )
+
+
+def hybrid_velocity_object_position_hold_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(
+        env,
+        state_name="object_position_error",
+        sigma=sigma,
+        lifted_only=True,
+    )
+
+
+def hybrid_velocity_object_orientation_hold_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+) -> torch.Tensor:
+    return _hybrid_velocity_exp(
+        env,
+        state_name="object_orientation_error",
+        sigma=sigma,
+        lifted_only=True,
+    )
 
 
 def _rollout_reference_uses_episodic_motion_end(env: WholeBodyTrackingManager) -> bool:

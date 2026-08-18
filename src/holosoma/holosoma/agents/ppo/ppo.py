@@ -9,6 +9,7 @@ import numbers
 import os
 import random
 import stat
+import tempfile
 from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
@@ -65,6 +66,7 @@ from holosoma.utils.inference_helpers import (
     get_command_ranges_from_env,
     get_control_gains_from_config,
     get_urdf_text_from_robot_config,
+    validate_exported_policy_onnx,
 )
 from holosoma.utils.normalization import EmpiricalNormalization
 from holosoma.utils.policy_init_preflight import (
@@ -73,6 +75,7 @@ from holosoma.utils.policy_init_preflight import (
     required_policy_init_terminal_target_from_env,
     validate_policy_init_payload_identity,
     validate_policy_init_terminal_source_payload,
+    validate_stage4_init_payload_identity,
 )
 from holosoma.utils.rng_checkpoint import (
     ALLOW_NONDETERMINISTIC_RNG_RESUME_ENV,
@@ -115,6 +118,136 @@ _ALLOW_AUTHENTICATED_LEGACY_EVALUATION_MOTION_CONTRACT_ENV = (
 _ACTOR_PERCEPTION_GEOMETRY_SUPPORT_KEY = "actor_perception_training_geometry_support"
 _DAGGER_REPLAY_STATE_KEY = "dagger_replay_by_rank"
 _DAGGER_REPLAY_STATE_VERSION = 1
+_PRECOMPUTED_COMMAND_CONTRACT_KEY = (
+    "precomputed_turn_then_forward_deployment_contract"
+)
+_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY = (
+    "precomputed_turn_then_forward_deployment_contract_sha256"
+)
+_ROLLING_REFERENCE_DELTA_CONTRACT_KEY = (
+    "rolling_reference_delta_deployment_contract"
+)
+_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY = (
+    "rolling_reference_delta_deployment_contract_sha256"
+)
+
+
+def _precomputed_turn_then_forward_deployment_contract(
+    *,
+    zero_root_command_when_drop_active: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(zero_root_command_when_drop_active, bool):
+        raise ValueError(
+            "zero_root_command_when_drop_active must be a boolean, "
+            f"got {zero_root_command_when_drop_active!r}."
+        )
+    contract: dict[str, Any] = {
+        "version": 1,
+        "mode": "precomputed_turn_then_forward",
+        "adapter": (
+            "holosoma_inference.policies.wbt.WholeBodyTrackingPolicy"
+        ),
+        "command_field": "policy_command_xy_yaw",
+        "phase_field": "policy_command_phase",
+        "command_layout": ["dx_m", "dy_m", "dyaw_rad"],
+        "pre_pickup_command": [0.0, 0.0, 0.0],
+        "pickup_latch": {
+            "algorithm": "object_root_rel_z_v1",
+            "lift_height_threshold_m": 0.1,
+            "lift_ratio_threshold": 0.35,
+            "consecutive_physics_steps": 5,
+            "sticky_until_episode_reset": True,
+            "requires_live_sim_object_state": True,
+        },
+        "phase_contract": {
+            "dy_always_zero": True,
+            "dx_dyaw_overlap": False,
+            "zero_phase": 0,
+            "forward_phase": 1,
+            "yaw_phase": 2,
+        },
+        "transition_padding": "zero_command_zero_phase",
+        "external_override": "disabled_by_default_explicit_diagnostic_only",
+    }
+    if zero_root_command_when_drop_active:
+        contract["version"] = 2
+        contract["drop_exclusivity"] = {
+            "drop_field": "drop_button",
+            "active_threshold": 0.5,
+            "active_root_command": [0.0, 0.0, 0.0],
+            "applied_after_external_overrides": True,
+        }
+    payload = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return contract, hashlib.sha256(payload).hexdigest()
+
+
+def _rolling_reference_delta_deployment_contract(
+    *,
+    lookahead_motion_frames: int,
+    zero_yaw_threshold_deg: float,
+    zero_root_command_when_drop_active: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if (
+        isinstance(lookahead_motion_frames, (bool, np.bool_))
+        or not isinstance(lookahead_motion_frames, numbers.Integral)
+        or int(lookahead_motion_frames) < 1
+    ):
+        raise ValueError(
+            "lookahead_motion_frames must be a positive integer, "
+            f"got {lookahead_motion_frames!r}."
+        )
+    if (
+        isinstance(zero_yaw_threshold_deg, (bool, np.bool_))
+        or not isinstance(zero_yaw_threshold_deg, numbers.Real)
+        or not math.isfinite(float(zero_yaw_threshold_deg))
+        or not 0.0 <= float(zero_yaw_threshold_deg) <= 180.0
+    ):
+        raise ValueError(
+            "zero_yaw_threshold_deg must be a finite real in [0, 180], "
+            f"got {zero_yaw_threshold_deg!r}."
+        )
+    if not isinstance(zero_root_command_when_drop_active, bool):
+        raise ValueError(
+            "zero_root_command_when_drop_active must be a boolean, "
+            f"got {zero_root_command_when_drop_active!r}."
+        )
+    contract: dict[str, Any] = {
+        "version": 1,
+        "mode": "rolling_reference_delta",
+        "adapter": "holosoma_inference.policies.wbt.WholeBodyTrackingPolicy",
+        "command_layout": ["dx_m", "dy_m", "dyaw_rad"],
+        "lookahead_motion_frames": int(lookahead_motion_frames),
+        "zero_yaw_threshold_deg": float(zero_yaw_threshold_deg),
+        "update_rule": "recompute_every_policy_step",
+        "delta_source": "reference_frame_t_to_reference_frame_t_plus_lookahead",
+        "coordinate_frame": "reference_root_heading_at_frame_t",
+        "robot_state_feedback_used": False,
+        "active_window": "carry_t1_inclusive_to_t2_exclusive",
+        "invalid_endpoint": "zero_if_t_plus_lookahead_reaches_t2_or_clip_end",
+        "external_override": "disabled_by_default_explicit_diagnostic_only",
+    }
+    if zero_root_command_when_drop_active:
+        contract["version"] = 2
+        contract["drop_exclusivity"] = {
+            "drop_field": "drop_button",
+            "active_threshold": 0.5,
+            "active_root_command": [0.0, 0.0, 0.0],
+            "applied_after_external_overrides": True,
+        }
+    payload = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return contract, hashlib.sha256(payload).hexdigest()
 
 
 class _DaggerReplayBuffer:
@@ -850,6 +983,12 @@ class PPO(BaseAlgo):
         elif schedule == "adaptive":
             raise ValueError("PPO schedule='adaptive' requires a positive desired_kl.")
         self.max_grad_norm = self._validate_max_grad_norm(self.config.max_grad_norm)
+        (
+            self._entropy_coef_start,
+            self._entropy_coef_end,
+            self._entropy_coef_decay_start_iteration,
+            self._entropy_coef_decay_end_iteration,
+        ) = self._validate_entropy_coefficient_schedule()
         self.reset_rollout_at_checkpoint = (
             self._reset_rollout_at_checkpoint_enabled()
         )
@@ -978,6 +1117,68 @@ class PPO(BaseAlgo):
         if not math.isfinite(parsed) or parsed <= 0.0:
             raise ValueError(f"PPO max_grad_norm must be finite and > 0, got {value!r}.")
         return parsed
+
+    def _validate_entropy_coefficient_schedule(
+        self,
+    ) -> tuple[float, float, int, int]:
+        """Validate and freeze the absolute-iteration entropy schedule."""
+
+        start = self.config.entropy_coef
+        end = self.config.entropy_coef_end
+        for name, value in (("entropy_coef", start), ("entropy_coef_end", end)):
+            if value is None and name == "entropy_coef_end":
+                continue
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
+                raise ValueError(f"PPO {name} must be a finite non-negative real, got {value!r}.")
+            parsed = float(value)
+            if not math.isfinite(parsed) or parsed < 0.0:
+                raise ValueError(f"PPO {name} must be a finite non-negative real, got {value!r}.")
+
+        start_value = float(start)
+        if end is None:
+            return start_value, start_value, 0, 0
+
+        raw_start_iteration = self.config.entropy_coef_decay_start_iteration
+        raw_end_iteration = self.config.entropy_coef_decay_end_iteration
+        for name, value in (
+            ("entropy_coef_decay_start_iteration", raw_start_iteration),
+            ("entropy_coef_decay_end_iteration", raw_end_iteration),
+        ):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral):
+                raise ValueError(f"PPO {name} must be a non-negative integer, got {value!r}.")
+            if int(value) < 0:
+                raise ValueError(f"PPO {name} must be a non-negative integer, got {value!r}.")
+
+        start_iteration = int(raw_start_iteration)
+        end_iteration = int(raw_end_iteration)
+        if end_iteration <= start_iteration:
+            raise ValueError(
+                "PPO entropy decay requires entropy_coef_decay_end_iteration > "
+                "entropy_coef_decay_start_iteration, got "
+                f"{end_iteration} <= {start_iteration}."
+            )
+        return start_value, float(end), start_iteration, end_iteration
+
+    def _operational_entropy_coefficient(self, iteration: int | None = None) -> float:
+        """Return the configured coefficient at an absolute learning iteration."""
+
+        iteration = self.current_learning_iteration if iteration is None else int(iteration)
+        if iteration <= self._entropy_coef_decay_start_iteration:
+            value = self._entropy_coef_start
+        elif iteration >= self._entropy_coef_decay_end_iteration:
+            value = self._entropy_coef_end
+        else:
+            fraction = (
+                (iteration - self._entropy_coef_decay_start_iteration)
+                / (
+                    self._entropy_coef_decay_end_iteration
+                    - self._entropy_coef_decay_start_iteration
+                )
+            )
+            value = self._entropy_coef_start + fraction * (
+                self._entropy_coef_end - self._entropy_coef_start
+            )
+        return self._operational_float32_loss_weight(value)
 
     @staticmethod
     def _strict_config_int(name: str, value: Any) -> int:
@@ -1509,7 +1710,10 @@ class PPO(BaseAlgo):
         teacher_policy_evaluation = bool(
             getattr(self, "_evaluation_only", False)
             and getattr(self, "_evaluation_policy_mode", "checkpoint_actor")
-            == "distill_label_teacher"
+            in {
+                "distill_label_teacher",
+                "distill_label_teacher_bc_target",
+            }
         )
         teacher_observations_required = (
             teacher_policy_evaluation
@@ -1751,17 +1955,18 @@ class PPO(BaseAlgo):
             "HOLOSOMA_DEFM_MATERIALIZATION_MODE",
             "fresh",
         ).strip().lower()
-        if defm_restore_mode not in {"fresh", "policy_init", "full_resume"}:
+        if defm_restore_mode not in {"fresh", "policy_init", "stage4_init", "full_resume"}:
             raise ValueError(
-                "HOLOSOMA_DEFM_MATERIALIZATION_MODE must be fresh, policy_init, or full_resume."
+                "HOLOSOMA_DEFM_MATERIALIZATION_MODE must be fresh, policy_init, "
+                "stage4_init, or full_resume."
             )
         self._materialize_lazy_model_modules(
             self.actor,
-            checkpoint_restore=defm_restore_mode in {"policy_init", "full_resume"},
+            checkpoint_restore=defm_restore_mode in {"policy_init", "stage4_init", "full_resume"},
         )
         self._materialize_lazy_model_modules(
             self.critic,
-            checkpoint_restore=defm_restore_mode == "full_resume",
+            checkpoint_restore=defm_restore_mode in {"stage4_init", "full_resume"},
         )
         if debug_heartbeat:
             logger.info("Heartbeat: rank {} setup actor/critic finished", self.gpu_global_rank)
@@ -4130,6 +4335,7 @@ class PPO(BaseAlgo):
             # on which exact checkpoint was supplied to the entrypoint.
             "student": "checkpoint_actor",
             "distill_label_teacher": "distill_label_teacher",
+            "distill_label_teacher_bc_target": "distill_label_teacher_bc_target",
         }
         if raw_mode == "teacher":
             raise ValueError(
@@ -4140,7 +4346,7 @@ class PPO(BaseAlgo):
         if raw_mode not in aliases:
             raise ValueError(
                 "HOLOSOMA_EVAL_POLICY must be exactly 'checkpoint_actor', 'student', or "
-                "'distill_label_teacher', "
+                "'distill_label_teacher', or 'distill_label_teacher_bc_target', "
                 f"got {raw_mode!r}."
             )
         return aliases[raw_mode]
@@ -4226,6 +4432,31 @@ class PPO(BaseAlgo):
             getattr(distill_cfg, "strict_teacher_load", True),
         )
         self.teacher_use_stochastic_actions = False
+        source_clips_teacher_actions = self._strict_config_bool(
+            "clip_teacher_actions",
+            getattr(distill_cfg, "clip_teacher_actions", False),
+        )
+        source_clip_actions_threshold = float(
+            getattr(distill_cfg, "clip_actions_threshold", 100.0)
+        )
+        if source_clips_teacher_actions and (
+            not math.isfinite(source_clip_actions_threshold)
+            or source_clip_actions_threshold <= 0.0
+        ):
+            raise ValueError(
+                "Distillation-label teacher evaluation source config has an "
+                "invalid clip_actions_threshold: "
+                f"{source_clip_actions_threshold}."
+            )
+        self._evaluation_teacher_action_clip_enabled = bool(
+            mode == "distill_label_teacher_bc_target"
+            and source_clips_teacher_actions
+        )
+        self._evaluation_teacher_action_clip_threshold = (
+            source_clip_actions_threshold
+            if self._evaluation_teacher_action_clip_enabled
+            else None
+        )
         teacher_perception_obs_key = getattr(distill_cfg, "teacher_perception_obs_key", None)
         self.teacher_perception_obs_key = (
             str(teacher_perception_obs_key).strip() if teacher_perception_obs_key else ""
@@ -4249,9 +4480,16 @@ class PPO(BaseAlgo):
         # obtains its first observation dictionary.
         self._configure_active_observation_groups()
         logger.info(
-            "Evaluation policy selected authenticated distillation-label teacher SHA256={} with obs groups {}.",
+            "Evaluation policy selected authenticated distillation-label teacher "
+            "SHA256={} with obs groups {} and action semantics {}.",
             source_provenance.get("teacher_sha256"),
             self.teacher_obs_keys,
+            (
+                f"source BC target clamp [-{source_clip_actions_threshold:g},"
+                f"{source_clip_actions_threshold:g}]"
+                if self._evaluation_teacher_action_clip_enabled
+                else "raw deterministic teacher action"
+            ),
         )
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
@@ -5624,6 +5862,7 @@ class PPO(BaseAlgo):
         *,
         next_iteration: int,
         allow_tripped_fixed_bc_guard: bool = False,
+        upload: bool = True,
     ) -> None:
         """Keep the complete save/outcome protocol outside training RNG."""
 
@@ -5645,6 +5884,7 @@ class PPO(BaseAlgo):
                 path,
                 next_iteration=next_iteration,
                 allow_tripped_fixed_bc_guard=allow_tripped_fixed_bc_guard,
+                upload=upload,
             )
         except Exception as exc:
             save_error = exc
@@ -5672,18 +5912,30 @@ class PPO(BaseAlgo):
         *,
         next_iteration: int,
         allow_tripped_fixed_bc_guard: bool = False,
+        upload: bool = True,
     ) -> None:
         """Publish a checkpoint and make every rank's failure visible to all ranks."""
 
         if not self.is_multi_gpu or not torch.distributed.is_initialized():
             if allow_tripped_fixed_bc_guard:
-                self.save(
-                    path,
-                    next_iteration=next_iteration,
-                    allow_tripped_fixed_bc_guard=True,
-                )
+                if upload:
+                    self.save(
+                        path,
+                        next_iteration=next_iteration,
+                        allow_tripped_fixed_bc_guard=True,
+                    )
+                else:
+                    self.save(
+                        path,
+                        next_iteration=next_iteration,
+                        allow_tripped_fixed_bc_guard=True,
+                        upload=False,
+                    )
             else:
-                self.save(path, next_iteration=next_iteration)
+                if upload:
+                    self.save(path, next_iteration=next_iteration)
+                else:
+                    self.save(path, next_iteration=next_iteration, upload=False)
             return
 
         local_error: Exception | None = None
@@ -5693,13 +5945,24 @@ class PPO(BaseAlgo):
             # rank-zero I/O phase as well as post-collective failures on any
             # peer, so no worker can leave the others at the next barrier.
             if allow_tripped_fixed_bc_guard:
-                self.save(
-                    path,
-                    next_iteration=next_iteration,
-                    allow_tripped_fixed_bc_guard=True,
-                )
+                if upload:
+                    self.save(
+                        path,
+                        next_iteration=next_iteration,
+                        allow_tripped_fixed_bc_guard=True,
+                    )
+                else:
+                    self.save(
+                        path,
+                        next_iteration=next_iteration,
+                        allow_tripped_fixed_bc_guard=True,
+                        upload=False,
+                    )
             else:
-                self.save(path, next_iteration=next_iteration)
+                if upload:
+                    self.save(path, next_iteration=next_iteration)
+                else:
+                    self.save(path, next_iteration=next_iteration, upload=False)
         except Exception as exc:
             local_error = exc
 
@@ -6271,24 +6534,25 @@ class PPO(BaseAlgo):
                 self._distributed_barrier()
                 # save() contains an all-rank environment-state collective;
                 # every rank must participate even though only rank zero writes.
-                self._save_checkpoint_with_distributed_outcome(
-                    os.path.join(self.log_dir, f"model_{next_iteration:05d}.pt"),
-                    next_iteration=next_iteration,
+                checkpoint_path = os.path.join(
+                    self.log_dir,
+                    f"model_{next_iteration:05d}.pt",
                 )
                 onnx_path = os.path.join(self.log_dir, f"model_{next_iteration:05d}.onnx")
-                if next_iteration == run_end_iteration:
-                    # A requested final deployment artifact is part of the
-                    # successful run contract.  All ranks enter the outcome
-                    # envelope so a rank-zero export failure cannot strand
-                    # peers at the following barrier.
-                    final_onnx_sha256 = self._export_final_onnx_with_distributed_outcome(
-                        onnx_path,
-                        iteration=next_iteration - 1,
+                if self._should_export_onnx():
+                    pair_onnx_sha256 = (
+                        self._save_policy_artifact_pair_with_distributed_outcome(
+                            checkpoint_path=checkpoint_path,
+                            onnx_path=onnx_path,
+                            next_iteration=next_iteration,
+                        )
                     )
-                elif self.is_main_process:
-                    self._export_onnx_checkpoint(
-                        onnx_path,
-                        iteration=next_iteration - 1,
+                    if next_iteration == run_end_iteration:
+                        final_onnx_sha256 = pair_onnx_sha256
+                else:
+                    self._save_checkpoint_with_distributed_outcome(
+                        checkpoint_path,
+                        next_iteration=next_iteration,
                     )
                 self._distributed_barrier()
                 last_saved_iteration = next_iteration
@@ -6330,18 +6594,27 @@ class PPO(BaseAlgo):
         # registration without adding state, so only publish a missing final.
         if last_saved_iteration != run_end_iteration:
             self._distributed_barrier()
-            self._save_checkpoint_with_distributed_outcome(
-                os.path.join(self.log_dir, f"model_{run_end_iteration:05d}.pt"),
-                next_iteration=run_end_iteration,
+            checkpoint_path = os.path.join(
+                self.log_dir,
+                f"model_{run_end_iteration:05d}.pt",
             )
             onnx_path = os.path.join(
                 self.log_dir,
                 f"model_{run_end_iteration:05d}.onnx",
             )
-            final_onnx_sha256 = self._export_final_onnx_with_distributed_outcome(
-                onnx_path,
-                iteration=run_end_iteration - 1,
-            )
+            if self._should_export_onnx():
+                final_onnx_sha256 = (
+                    self._save_policy_artifact_pair_with_distributed_outcome(
+                        checkpoint_path=checkpoint_path,
+                        onnx_path=onnx_path,
+                        next_iteration=run_end_iteration,
+                    )
+                )
+            else:
+                self._save_checkpoint_with_distributed_outcome(
+                    checkpoint_path,
+                    next_iteration=run_end_iteration,
+                )
             self._distributed_barrier()
         final_onnx_path = os.path.join(
             self.log_dir,
@@ -6391,6 +6664,106 @@ class PPO(BaseAlgo):
                 flush=True,
             )
 
+    @staticmethod
+    def _config_field(value: Any, name: str, default: Any = None) -> Any:
+        if isinstance(value, Mapping):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    def _actor_motion_config(self) -> Any:
+        experiment_config = getattr(self, "_experiment_config", None)
+        command_config = self._config_field(experiment_config, "command")
+        setup_terms = self._config_field(command_config, "setup_terms")
+        motion_term = self._config_field(setup_terms, "motion_command")
+        motion_params = self._config_field(motion_term, "params")
+        return self._config_field(motion_params, "motion_config")
+
+    def _actor_sparse_root_command_mode(self) -> str:
+        motion_config = self._actor_motion_config()
+        sparse_mode_raw = self._config_field(
+            motion_config,
+            "contact_aware_sparse_root_command_mode",
+            "tracking_error",
+        )
+        if not isinstance(sparse_mode_raw, str):
+            raise ValueError(
+                "contact_aware_sparse_root_command_mode must be a string when ONNX export "
+                f"is required; got {sparse_mode_raw!r}."
+            )
+        sparse_mode = sparse_mode_raw.strip().lower().replace("-", "_")
+        if sparse_mode in {"tracking", "default", "robot_tracking_error"}:
+            return "tracking_error"
+        return sparse_mode
+
+    def _actor_zero_root_command_when_drop_active(self) -> bool:
+        motion_config = self._actor_motion_config()
+        value = self._config_field(
+            motion_config,
+            "zero_root_command_when_drop_active",
+            False,
+        )
+        if not isinstance(value, (bool, np.bool_)):
+            raise ValueError(
+                "zero_root_command_when_drop_active must be a boolean when ONNX "
+                f"export is required; got {value!r}."
+            )
+        return bool(value)
+
+    def _actor_rolling_reference_delta_parameters(self) -> tuple[int, float]:
+        motion_config = self._actor_motion_config()
+        lookahead = self._config_field(
+            motion_config,
+            "contact_aware_sparse_root_segment_steps",
+            30,
+        )
+        zero_yaw_threshold_deg = self._config_field(
+            motion_config,
+            "contact_aware_sparse_root_zero_yaw_threshold_deg",
+            0.0,
+        )
+        contract, _ = _rolling_reference_delta_deployment_contract(
+            lookahead_motion_frames=lookahead,
+            zero_yaw_threshold_deg=zero_yaw_threshold_deg,
+            zero_root_command_when_drop_active=(
+                self._actor_zero_root_command_when_drop_active()
+            ),
+        )
+        return (
+            int(contract["lookahead_motion_frames"]),
+            float(contract["zero_yaw_threshold_deg"]),
+        )
+
+    def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
+        metadata = super()._checkpoint_metadata(iteration=iteration)
+        if self._actor_sparse_root_command_mode() == "precomputed_turn_then_forward":
+            contract, contract_sha256 = (
+                _precomputed_turn_then_forward_deployment_contract(
+                    zero_root_command_when_drop_active=(
+                        self._actor_zero_root_command_when_drop_active()
+                    )
+                )
+            )
+            metadata[_PRECOMPUTED_COMMAND_CONTRACT_KEY] = contract
+            metadata[_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY] = contract_sha256
+        elif self._actor_sparse_root_command_mode() == "rolling_reference_delta":
+            lookahead, zero_yaw_threshold_deg = (
+                self._actor_rolling_reference_delta_parameters()
+            )
+            contract, contract_sha256 = (
+                _rolling_reference_delta_deployment_contract(
+                    lookahead_motion_frames=lookahead,
+                    zero_yaw_threshold_deg=zero_yaw_threshold_deg,
+                    zero_root_command_when_drop_active=(
+                        self._actor_zero_root_command_when_drop_active()
+                    ),
+                )
+            )
+            metadata[_ROLLING_REFERENCE_DELTA_CONTRACT_KEY] = contract
+            metadata[_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY] = (
+                contract_sha256
+            )
+        return metadata
+
     def _should_export_onnx(self) -> bool:
         if getattr(self, "_experiment_config", None) is None:
             return True
@@ -6402,6 +6775,21 @@ class PPO(BaseAlgo):
         training_preflight: bool = False,
     ) -> None:
         """Fail before work when the Python inference policy cannot be exported faithfully."""
+
+        forbidden_skip_uploads = [
+            name
+            for name in (
+                "HOLOSOMA_SKIP_WANDB_FILE_UPLOAD",
+                "HOLOSOMA_SKIP_WANDB_CHECKPOINT_UPLOAD",
+            )
+            if os.environ.get(name, "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ]
+        if forbidden_skip_uploads:
+            raise ValueError(
+                "ONNX-required training cannot disable checkpoint publication via "
+                f"{forbidden_skip_uploads}."
+            )
 
         if bool(getattr(self, "use_time_gru", False)):
             if training_preflight:
@@ -6444,64 +6832,73 @@ class PPO(BaseAlgo):
         # command semantics.  ``t1_aligned_segment`` is currently training-only;
         # without this preflight a long run can finish successfully and produce
         # an artifact that the strict inference contract must reject.
-        experiment_config = getattr(self, "_experiment_config", None)
-        command_config = (
-            experiment_config.get("command")
-            if isinstance(experiment_config, Mapping)
-            else getattr(experiment_config, "command", None)
-        )
-        setup_terms = (
-            command_config.get("setup_terms")
-            if isinstance(command_config, Mapping)
-            else getattr(command_config, "setup_terms", None)
-        )
-        motion_term = (
-            setup_terms.get("motion_command")
-            if isinstance(setup_terms, Mapping)
-            else None
-        )
-        motion_params = (
-            motion_term.get("params")
-            if isinstance(motion_term, Mapping)
-            else getattr(motion_term, "params", None)
-        )
-        motion_config = (
-            motion_params.get("motion_config")
-            if isinstance(motion_params, Mapping)
-            else None
-        )
-        sparse_mode_raw = (
-            motion_config.get(
-                "contact_aware_sparse_root_command_mode",
-                "tracking_error",
-            )
-            if isinstance(motion_config, Mapping)
-            else getattr(
-                motion_config,
-                "contact_aware_sparse_root_command_mode",
-                "tracking_error",
-            )
-        )
-        if not isinstance(sparse_mode_raw, str):
-            raise ValueError(
-                "contact_aware_sparse_root_command_mode must be a string when ONNX export is required; "
-                f"got {sparse_mode_raw!r}."
-            )
-        sparse_mode = sparse_mode_raw.strip().lower().replace("-", "_")
-        if sparse_mode in {"tracking", "default", "robot_tracking_error"}:
-            sparse_mode = "tracking_error"
-        if sparse_mode != "tracking_error":
+        sparse_mode = self._actor_sparse_root_command_mode()
+        if sparse_mode not in {
+            "tracking_error",
+            "rolling_reference_delta",
+            "precomputed_turn_then_forward",
+        }:
             if training_preflight:
                 raise ValueError(
                     "Training cannot require ONNX export with "
-                    f"contact_aware_sparse_root_command_mode={sparse_mode_raw!r}: "
-                    "holosoma_inference currently implements only tracking_error/default commands. "
+                    f"contact_aware_sparse_root_command_mode={sparse_mode!r}: "
+                    "holosoma_inference currently implements only tracking_error/default, "
+                    "rolling_reference_delta, and precomputed_turn_then_forward commands. "
                     "Set --training.export-onnx False before training or implement and validate exact "
                     "deployment parity for this command mode."
                 )
             raise ValueError(
-                "ONNX deployment currently supports only tracking_error/default contact-aware sparse-root "
-                f"commands; configured contact_aware_sparse_root_command_mode={sparse_mode_raw!r}."
+                "ONNX deployment currently supports only tracking_error/default, "
+                "rolling_reference_delta, and precomputed_turn_then_forward "
+                "contact-aware sparse-root commands; "
+                f"configured contact_aware_sparse_root_command_mode={sparse_mode!r}."
+            )
+        if sparse_mode == "precomputed_turn_then_forward":
+            command_manager = getattr(self.env, "command_manager", None)
+            motion_command = (
+                command_manager.get_state("motion_command")
+                if command_manager is not None
+                else None
+            )
+            if (
+                motion_command is None
+                or not bool(motion_command.precomputed_turn_then_forward_enabled())
+                or not bool(motion_command.motion.has_object)
+                or not bool(motion_command.motion.has_precomputed_root_command)
+            ):
+                raise ValueError(
+                    "precomputed_turn_then_forward ONNX export requires the live command manager "
+                    "to expose object motion plus complete precomputed command/phase fields."
+                )
+            _precomputed_turn_then_forward_deployment_contract(
+                zero_root_command_when_drop_active=(
+                    self._actor_zero_root_command_when_drop_active()
+                )
+            )
+        elif sparse_mode == "rolling_reference_delta":
+            command_manager = getattr(self.env, "command_manager", None)
+            motion_command = (
+                command_manager.get_state("motion_command")
+                if command_manager is not None
+                else None
+            )
+            if (
+                motion_command is None
+                or not bool(motion_command.motion.has_object)
+            ):
+                raise ValueError(
+                    "rolling_reference_delta ONNX export requires the live command "
+                    "manager to expose object motion on the authenticated timeline."
+                )
+            lookahead, zero_yaw_threshold_deg = (
+                self._actor_rolling_reference_delta_parameters()
+            )
+            _rolling_reference_delta_deployment_contract(
+                lookahead_motion_frames=lookahead,
+                zero_yaw_threshold_deg=zero_yaw_threshold_deg,
+                zero_root_command_when_drop_active=(
+                    self._actor_zero_root_command_when_drop_active()
+                ),
             )
 
     @staticmethod
@@ -6558,6 +6955,7 @@ class PPO(BaseAlgo):
         *,
         iteration: int | None = None,
         required: bool = False,
+        upload: bool = True,
     ) -> str | None:
         if not self._should_export_onnx():
             return None
@@ -6568,7 +6966,11 @@ class PPO(BaseAlgo):
             # by this exact call.
             self._remove_failed_onnx_artifact(onnx_file_path)
             try:
-                self.export(onnx_file_path=onnx_file_path, iteration=iteration)
+                self.export(
+                    onnx_file_path=onnx_file_path,
+                    iteration=iteration,
+                    upload=upload,
+                )
                 digest = self._stable_onnx_sha256(onnx_file_path)
                 logger.info("Authenticated ONNX artifact {} sha256={}", onnx_file_path, digest)
                 return digest
@@ -6592,6 +6994,7 @@ class PPO(BaseAlgo):
         onnx_file_path: str,
         *,
         iteration: int | None = None,
+        upload: bool = True,
     ) -> str | None:
         """Export final ONNX on rank zero and publish one all-rank verdict."""
 
@@ -6605,6 +7008,7 @@ class PPO(BaseAlgo):
                         onnx_file_path,
                         iteration=iteration,
                         required=True,
+                        upload=upload,
                     )
                 except Exception as exc:
                     local_error = exc
@@ -6670,6 +7074,422 @@ class PPO(BaseAlgo):
             restore_rng_checkpoint_state(
                 protocol_rng_state,
                 path="pre_final_onnx_outcome_protocol_rng_state",
+            )
+
+    def _write_policy_artifact_pair_manifest(
+        self,
+        *,
+        checkpoint_path: str,
+        onnx_path: str,
+        next_iteration: int,
+        onnx_sha256: str,
+    ) -> str:
+        """Authenticate one same-iteration PT/ONNX pair before publication."""
+
+        import onnx
+
+        checkpoint, checkpoint_sha256 = load_verified_torch_checkpoint(
+            checkpoint_path,
+            map_location="cpu",
+        )
+        if not isinstance(checkpoint, Mapping):
+            raise TypeError("Published checkpoint payload must be a mapping.")
+        completed_iteration = int(next_iteration) - 1
+        if checkpoint.get("iter") != completed_iteration or checkpoint.get(
+            "next_iter"
+        ) != int(next_iteration):
+            raise RuntimeError(
+                "PT checkpoint iteration does not match the artifact-pair boundary: "
+                f"iter={checkpoint.get('iter')!r}, next_iter={checkpoint.get('next_iter')!r}, "
+                f"expected={completed_iteration}/{next_iteration}."
+            )
+        actual_onnx_sha256 = self._stable_onnx_sha256(onnx_path)
+        if actual_onnx_sha256 != onnx_sha256:
+            raise RuntimeError(
+                "ONNX bytes changed between parity validation and pair publication."
+            )
+
+        model = onnx.load(onnx_path)
+        metadata: dict[str, Any] = {}
+        for item in model.metadata_props:
+            if not item.key or item.key in metadata:
+                raise RuntimeError(
+                    "ONNX artifact-pair validation found an empty or duplicate metadata key."
+                )
+            metadata[item.key] = json.loads(
+                item.value,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite JSON constant {value!r}")
+                ),
+            )
+
+        def strict_json_payload(value: Any, *, label: str) -> bytes:
+            try:
+                return json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"PT/ONNX pair field {label!r} is not strict finite JSON."
+                ) from exc
+
+        def require_same_json_field(field_name: str) -> bytes | None:
+            checkpoint_present = field_name in checkpoint
+            onnx_present = field_name in metadata
+            if checkpoint_present != onnx_present:
+                raise RuntimeError(
+                    "PT and ONNX artifact metadata presence differs for "
+                    f"{field_name!r}."
+                )
+            if not checkpoint_present:
+                return None
+            checkpoint_payload = strict_json_payload(
+                checkpoint[field_name],
+                label=f"pt.{field_name}",
+            )
+            onnx_payload = strict_json_payload(
+                metadata[field_name],
+                label=f"onnx.{field_name}",
+            )
+            if checkpoint_payload != onnx_payload:
+                raise RuntimeError(
+                    f"PT and ONNX artifacts serialize different {field_name!r} contracts."
+                )
+            return onnx_payload
+
+        bound_metadata_payloads = {
+            field_name: payload
+            for field_name in (
+                "experiment_config",
+                "wandb_run_path",
+                "training_provenance",
+                "source_checkpoint_sha256",
+                "motion_transition_contract",
+                "motion_transition_contract_sha256",
+                _PRECOMPUTED_COMMAND_CONTRACT_KEY,
+                _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY,
+                _ROLLING_REFERENCE_DELTA_CONTRACT_KEY,
+                _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY,
+            )
+            if (payload := require_same_json_field(field_name)) is not None
+        }
+        if metadata.get("iteration") != completed_iteration:
+            raise RuntimeError(
+                "ONNX completed iteration does not match its PT checkpoint: "
+                f"onnx={metadata.get('iteration')!r}, pt={completed_iteration}."
+            )
+        validation = metadata.get("onnx_validation_contract")
+        if (
+            not isinstance(validation, Mapping)
+            or validation.get("version") != 1
+            or validation.get("checker") != "onnx.checker.check_model"
+            or validation.get("runtime") != "onnxruntime_cpu"
+            or validation.get("pytorch_vs_ort") is not True
+            or validation.get("completed_iteration") != completed_iteration
+            or validation.get("actor_graph_semantics")
+            != "raw_actor_observation_plus_authenticated_external_observation_adapter"
+            or validation.get("precomputed_command_contract_sha256")
+            != metadata.get(_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY)
+            or validation.get("rolling_reference_delta_contract_sha256")
+            != metadata.get(_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY)
+        ):
+            raise RuntimeError(
+                "ONNX artifact is missing its same-iteration checker/ORT/parity contract."
+            )
+        for field_name in ("rtol", "atol", "max_abs_error", "max_rel_error"):
+            field_value = validation.get(field_name)
+            if (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, numbers.Real)
+                or not math.isfinite(float(field_value))
+                or float(field_value) < 0.0
+            ):
+                raise RuntimeError(
+                    "ONNX parity metadata contains an invalid non-negative finite field: "
+                    f"{field_name}={field_value!r}."
+                )
+        probe_rows = validation.get("probe_rows")
+        if (
+            isinstance(probe_rows, bool)
+            or not isinstance(probe_rows, numbers.Integral)
+            or int(probe_rows) <= 0
+        ):
+            raise RuntimeError(
+                f"ONNX parity metadata has invalid probe_rows={probe_rows!r}."
+            )
+        pt_command_digest = checkpoint.get(
+            _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
+        )
+        onnx_command_digest = metadata.get(
+            _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
+        )
+        if pt_command_digest != onnx_command_digest:
+            raise RuntimeError(
+                "PT and ONNX artifacts bind different precomputed command adapters."
+            )
+        if self._actor_sparse_root_command_mode() == "precomputed_turn_then_forward":
+            _, expected_command_digest = (
+                _precomputed_turn_then_forward_deployment_contract(
+                    zero_root_command_when_drop_active=(
+                        self._actor_zero_root_command_when_drop_active()
+                    )
+                )
+            )
+            if pt_command_digest != expected_command_digest:
+                raise RuntimeError(
+                    "PT/ONNX pair is missing the implemented precomputed command adapter digest."
+                )
+        pt_rolling_command_digest = checkpoint.get(
+            _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY
+        )
+        onnx_rolling_command_digest = metadata.get(
+            _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY
+        )
+        if pt_rolling_command_digest != onnx_rolling_command_digest:
+            raise RuntimeError(
+                "PT and ONNX artifacts bind different rolling reference-delta adapters."
+            )
+        if self._actor_sparse_root_command_mode() == "rolling_reference_delta":
+            lookahead, zero_yaw_threshold_deg = (
+                self._actor_rolling_reference_delta_parameters()
+            )
+            _, expected_rolling_command_digest = (
+                _rolling_reference_delta_deployment_contract(
+                    lookahead_motion_frames=lookahead,
+                    zero_yaw_threshold_deg=zero_yaw_threshold_deg,
+                    zero_root_command_when_drop_active=(
+                        self._actor_zero_root_command_when_drop_active()
+                    ),
+                )
+            )
+            if pt_rolling_command_digest != expected_rolling_command_digest:
+                raise RuntimeError(
+                    "PT/ONNX pair is missing the implemented rolling reference-delta "
+                    "command adapter digest."
+                )
+
+        for contract_key, digest_key in (
+            (
+                "motion_transition_contract",
+                "motion_transition_contract_sha256",
+            ),
+            (
+                _PRECOMPUTED_COMMAND_CONTRACT_KEY,
+                _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY,
+            ),
+            (
+                _ROLLING_REFERENCE_DELTA_CONTRACT_KEY,
+                _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY,
+            ),
+            (
+                "perception_observation_contract",
+                "perception_observation_contract_sha256",
+            ),
+        ):
+            contract_present = contract_key in metadata
+            digest_present = digest_key in metadata
+            if contract_present != digest_present:
+                raise RuntimeError(
+                    f"ONNX pair metadata must provide both {contract_key!r} and {digest_key!r}."
+                )
+            if contract_present:
+                computed_digest = hashlib.sha256(
+                    strict_json_payload(metadata[contract_key], label=contract_key)
+                ).hexdigest()
+                if metadata[digest_key] != computed_digest:
+                    raise RuntimeError(
+                        f"ONNX pair metadata digest mismatch for {contract_key!r}."
+                    )
+
+        checkpoint_geometry_support = checkpoint.get(
+            _ACTOR_PERCEPTION_GEOMETRY_SUPPORT_KEY
+        )
+        perception_contract = metadata.get("perception_observation_contract")
+        onnx_geometry_support = (
+            perception_contract.get("training_geometry_support")
+            if isinstance(perception_contract, Mapping)
+            else None
+        )
+        if (checkpoint_geometry_support is None) != (onnx_geometry_support is None):
+            raise RuntimeError(
+                "PT and ONNX artifacts disagree on actor perception geometry support."
+            )
+        perception_geometry_payload = None
+        if checkpoint_geometry_support is not None:
+            checkpoint_geometry_payload = strict_json_payload(
+                checkpoint_geometry_support,
+                label=f"pt.{_ACTOR_PERCEPTION_GEOMETRY_SUPPORT_KEY}",
+            )
+            perception_geometry_payload = strict_json_payload(
+                onnx_geometry_support,
+                label="onnx.perception_observation_contract.training_geometry_support",
+            )
+            if checkpoint_geometry_payload != perception_geometry_payload:
+                raise RuntimeError(
+                    "PT actor perception geometry support differs from the ONNX observation contract."
+                )
+
+        provenance_payload = bound_metadata_payloads.get("training_provenance")
+        transition_digest = metadata.get("motion_transition_contract_sha256")
+        perception_digest = metadata.get("perception_observation_contract_sha256")
+        bound_metadata_payload = strict_json_payload(
+            {
+                field_name: json.loads(payload)
+                for field_name, payload in sorted(bound_metadata_payloads.items())
+            },
+            label="bound_metadata",
+        )
+
+        experiment_payload = bound_metadata_payloads["experiment_config"]
+        checkpoint_stat = Path(checkpoint_path).stat()
+        onnx_stat = Path(onnx_path).stat()
+        manifest = {
+            "version": 1,
+            "semantics": "atomic_same_iteration_pt_onnx_policy_pair",
+            "completed_iteration": completed_iteration,
+            "next_iteration": int(next_iteration),
+            "experiment_config_sha256": hashlib.sha256(
+                experiment_payload
+            ).hexdigest(),
+            "bound_metadata_sha256": hashlib.sha256(
+                bound_metadata_payload
+            ).hexdigest(),
+            "training_provenance_sha256": (
+                None
+                if provenance_payload is None
+                else hashlib.sha256(provenance_payload).hexdigest()
+            ),
+            "motion_transition_contract_sha256": transition_digest,
+            "perception_observation_contract_sha256": perception_digest,
+            "perception_training_geometry_support_sha256": (
+                None
+                if perception_geometry_payload is None
+                else hashlib.sha256(perception_geometry_payload).hexdigest()
+            ),
+            "precomputed_command_contract_sha256": pt_command_digest,
+            "rolling_reference_delta_contract_sha256": (
+                pt_rolling_command_digest
+            ),
+            "pt": {
+                "name": Path(checkpoint_path).name,
+                "sha256": checkpoint_sha256,
+                "size_bytes": int(checkpoint_stat.st_size),
+            },
+            "onnx": {
+                "name": Path(onnx_path).name,
+                "sha256": onnx_sha256,
+                "size_bytes": int(onnx_stat.st_size),
+                "checker": validation["checker"],
+                "runtime": validation["runtime"],
+                "pytorch_vs_ort": True,
+                "max_abs_error": float(validation["max_abs_error"]),
+                "max_rel_error": float(validation["max_rel_error"]),
+            },
+        }
+        manifest_path = str(Path(checkpoint_path).with_suffix(".pair.json"))
+        parent = Path(manifest_path).parent
+        payload = json.dumps(
+            manifest,
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8") + b"\n"
+        fd, temporary_path_raw = tempfile.mkstemp(
+            dir=parent,
+            prefix=f".{Path(manifest_path).name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_path_raw)
+        try:
+            with os.fdopen(fd, "wb", closefd=True) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, manifest_path)
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return manifest_path
+
+    def _save_policy_artifact_pair_with_distributed_outcome(
+        self,
+        *,
+        checkpoint_path: str,
+        onnx_path: str,
+        next_iteration: int,
+    ) -> str:
+        """Generate, validate, and publish one required PT+ONNX boundary."""
+
+        protocol_rng_state = capture_rng_checkpoint_state()
+        onnx_ready = False
+        try:
+            self._save_checkpoint_with_distributed_outcome(
+                checkpoint_path,
+                next_iteration=next_iteration,
+                upload=False,
+            )
+            onnx_sha256 = self._export_final_onnx_with_distributed_outcome(
+                onnx_path,
+                iteration=int(next_iteration) - 1,
+                upload=False,
+            )
+            if not isinstance(onnx_sha256, str) or len(onnx_sha256) != 64:
+                raise RuntimeError(
+                    "Required ONNX pair export did not return an authenticated SHA-256."
+                )
+            onnx_ready = True
+
+            local_error: Exception | None = None
+            if self.is_main_process:
+                try:
+                    manifest_path = self._write_policy_artifact_pair_manifest(
+                        checkpoint_path=checkpoint_path,
+                        onnx_path=onnx_path,
+                        next_iteration=next_iteration,
+                        onnx_sha256=onnx_sha256,
+                    )
+                    # Publish the resumable PT last.  A partial W&B failure can
+                    # therefore leave deployment/manifest diagnostics, but it
+                    # can never advertise a resumable PT without its ONNX.
+                    self.logging_helper.save_to_wandb(onnx_path)
+                    self.logging_helper.save_to_wandb(manifest_path)
+                    self.logging_helper.save_to_wandb(checkpoint_path)
+                    logger.info(
+                        "Published required PT+ONNX pair at next_iteration={} pt={} onnx={}.",
+                        next_iteration,
+                        Path(checkpoint_path).name,
+                        Path(onnx_path).name,
+                    )
+                except Exception as exc:
+                    local_error = exc
+            self._synchronize_training_phase_error(
+                local_error,
+                operation=(
+                    f"same-iteration PT+ONNX pair publication at {next_iteration}"
+                ),
+            )
+            return onnx_sha256
+        except Exception:
+            if self.is_main_process and not onnx_ready:
+                Path(checkpoint_path).unlink(missing_ok=True)
+                Path(onnx_path).unlink(missing_ok=True)
+                Path(checkpoint_path).with_suffix(".pair.json").unlink(
+                    missing_ok=True
+                )
+            raise
+        finally:
+            restore_rng_checkpoint_state(
+                protocol_rng_state,
+                path="pre_policy_artifact_pair_protocol_rng_state",
             )
 
     def _post_epoch_logging_preserving_rng(
@@ -8386,10 +9206,22 @@ class PPO(BaseAlgo):
                 ):
                     continue
                 buffer_steps = min(filled_steps, int(buffer.shape[0]))
+                buffer_is_finite = torch.ones(
+                    (),
+                    device=buffer.device,
+                    dtype=torch.bool,
+                )
+                # Perception rollout buffers can be close to a GiB. Checking
+                # the whole filled buffer at once creates an equally shaped
+                # boolean temporary, so bound the peak to one rollout step.
+                for step in range(buffer_steps):
+                    buffer_is_finite.logical_and_(
+                        torch.isfinite(buffer[step]).all()
+                    )
                 finite_checks.append(
                     (
                         name,
-                        torch.isfinite(buffer[:buffer_steps]).all().to(device=self.device),
+                        buffer_is_finite.to(device=self.device),
                     )
                 )
         if finite_checks:
@@ -10449,7 +11281,8 @@ class PPO(BaseAlgo):
             # from the BC graph; an explicit dagger_match_std loss below can
             # still provide its intended gradient.
             entropy_loss = entropy_loss.detach()
-        actor_loss_base = surrogate_loss - self.config.entropy_coef * entropy_loss
+        entropy_coef = self._operational_entropy_coefficient()
+        actor_loss_base = surrogate_loss - entropy_coef * entropy_loss
         actor_regularizer = self.config.symmetry_actor_coef * symmetry_actor_loss
 
         critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
@@ -10613,6 +11446,7 @@ class PPO(BaseAlgo):
             "value_loss": value_loss,
             "surrogate_loss": surrogate_loss,
             "entropy_loss": entropy_loss,
+            "entropy_coef": entropy_coef,
             "distill_loss": distill_loss,
             "bc_loss": bc_loss,
             "current_bc_loss": current_bc_loss,
@@ -10740,9 +11574,10 @@ class PPO(BaseAlgo):
         symmetry_critic_loss = torch.tensor(0.0, device=self.device)
 
         entropy_loss = entropy_batch.mean()
+        entropy_coef = self._operational_entropy_coefficient()
         actor_loss_base = (
             surrogate_loss
-            - self.config.entropy_coef * entropy_loss
+            - entropy_coef * entropy_loss
             + self.config.symmetry_actor_coef * symmetry_actor_loss
         )
         actor_loss = actor_loss_base
@@ -10761,6 +11596,7 @@ class PPO(BaseAlgo):
             "value_loss": value_loss,
             "surrogate_loss": surrogate_loss,
             "entropy_loss": entropy_loss,
+            "entropy_coef": entropy_coef,
             "distill_loss": distill_loss,
             "bc_loss": bc_loss,
             "ppo_coeff": float(self.ppo_coeff),
@@ -13599,7 +14435,65 @@ class PPO(BaseAlgo):
                 raise ValueError(
                     "Checkpoint actor perception training geometry does not match env_state_by_rank."
                 )
-        self._live_actor_perception_manager().validate_deployment_geometry_support(derived)
+        manager = self._live_actor_perception_manager()
+        allow_ood_object_geometry = bool(
+            getattr(self, "_evaluation_allow_ood_object_geometry", False)
+        )
+        if allow_ood_object_geometry:
+            manager.validate_deployment_geometry_support(
+                derived,
+                allow_unknown_object_geometry=True,
+            )
+            live_support = manager.get_local_geometry_support()
+
+            def object_identity(item: Mapping[str, Any]) -> tuple[str, str, int, str]:
+                mesh = item["mesh"]
+                return (
+                    str(item["source_name"]),
+                    str(mesh["sha256"]),
+                    int(mesh["size_bytes"]),
+                    str(mesh["suffix"]),
+                )
+
+            training_objects = {
+                object_identity(item) for item in derived["object_mesh_support"]
+            }
+            live_objects = {
+                object_identity(item) for item in live_support["object_mesh_support"]
+            }
+            unknown_objects = sorted(live_objects - training_objects)
+            if not unknown_objects:
+                raise ValueError(
+                    "Explicit OOD object-geometry evaluation was requested, but the "
+                    "selected live object is already in the authenticated training support."
+                )
+            self._evaluation_ood_object_geometry_audit = {
+                "version": 1,
+                "semantics": (
+                    "evaluation_only_checkpoint_actor_with_explicit_"
+                    "out_of_training_support_object_geometry"
+                ),
+                "training_object_mesh_count": len(training_objects),
+                "live_object_mesh_count": len(live_objects),
+                "unknown_live_objects": [
+                    {
+                        "source_name": source_name,
+                        "mesh": {
+                            "sha256": digest,
+                            "size_bytes": size_bytes,
+                            "suffix": suffix,
+                        },
+                    }
+                    for source_name, digest, size_bytes, suffix in unknown_objects
+                ],
+                "training_geometry_support": derived,
+                "live_geometry_support": live_support,
+                "camera_source_exact": True,
+                "robot_mesh_bindings_exact": True,
+            }
+        else:
+            manager.validate_deployment_geometry_support(derived)
+            self._evaluation_ood_object_geometry_audit = None
         return derived
 
     def load_policy_init(self, ckpt_path: str | None) -> dict | None:
@@ -13626,6 +14520,209 @@ class PPO(BaseAlgo):
             restore_rng_checkpoint_state(
                 rng_state,
                 path="pre_policy_init_load_rng_state",
+            )
+
+    def load_stage4_init(self, ckpt_path: str | None) -> dict | None:
+        """Initialize actor+critic for Stage 4 without continuing training state.
+
+        Actor and critic parameters plus enabled observation normalizers are
+        restored.  Optimizers, iteration, RNG, environment/curriculum state,
+        DAgger replay, and W&B identity remain fresh.  Policy exploration std
+        is reset to the target run's configured ``init_noise_std``.
+        """
+
+        if ckpt_path is None:
+            return None
+        rng_state = capture_rng_checkpoint_state()
+        try:
+            live_motion_contract, live_motion_digest = (
+                self._collect_distributed_motion_transition_contract()
+            )
+            prepared: tuple[
+                dict[str, Any],
+                dict[str, Any],
+                dict[str, Any],
+                bool,
+                bool,
+                str,
+            ] | None = None
+            validation_error: Exception | None = None
+            try:
+                provenance = getattr(self, "_training_provenance", None)
+                legacy_unverified = allow_legacy_unverified_policy_load()
+                expected_sha256: str | None = None
+                if provenance is not None:
+                    provenance = validate_training_provenance(
+                        provenance,
+                        require_finalized=True,
+                    )
+                    if provenance.get("stage4_init_enabled") is not True:
+                        raise ValueError(
+                            "PPO.load_stage4_init was called while attached training "
+                            "provenance does not enable Stage-4 initialization."
+                        )
+                    expected_sha256 = provenance["stage4_init_sha256"]
+                elif not legacy_unverified:
+                    raise ValueError(
+                        "Scientific Stage-4 initialization requires finalized current "
+                        "training provenance with an authenticated stage4_init_sha256."
+                    )
+                runtime_config = getattr(self, "_policy_load_runtime_config", None)
+                current_config = (
+                    runtime_config.to_serializable_dict()
+                    if runtime_config is not None
+                    and hasattr(runtime_config, "to_serializable_dict")
+                    else None
+                )
+                if not isinstance(current_config, dict):
+                    raise ValueError(
+                        "Stage-4 initialization requires an attached runtime experiment config."
+                    )
+                loaded_dict, actual_sha256 = load_verified_torch_checkpoint(
+                    ckpt_path,
+                    expected_sha256=expected_sha256,
+                    map_location="cpu",
+                )
+                validate_stage4_init_payload_identity(loaded_dict, current_config)
+                actor_state = require_mapping(loaded_dict, "actor_model_state_dict")
+                critic_state = require_mapping(loaded_dict, "critic_model_state_dict")
+                validate_finite_tree(actor_state, path="actor_model_state_dict")
+                validate_finite_tree(critic_state, path="critic_model_state_dict")
+                validate_module_state_compatibility(
+                    actor_state,
+                    reference_state=self.actor.state_dict(),
+                    path="actor_model_state_dict",
+                )
+                self._validate_checkpoint_actor_std(
+                    actor_state,
+                    path="actor_model_state_dict",
+                )
+                validate_module_state_compatibility(
+                    critic_state,
+                    reference_state=self.critic.state_dict(),
+                    path="critic_model_state_dict",
+                )
+                actor_norm = bool(getattr(self.config, "normalize_actor_obs", False))
+                critic_norm = bool(getattr(self.config, "normalize_critic_obs", False))
+                self._validate_checkpoint_normalizers(
+                    loaded_dict,
+                    kind="actor",
+                    runtime_enabled=actor_norm,
+                    normalizers=self.actor_obs_normalizers,
+                    operation="Stage-4 init",
+                )
+                self._validate_checkpoint_normalizers(
+                    loaded_dict,
+                    kind="critic",
+                    runtime_enabled=critic_norm,
+                    normalizers=self.critic_obs_normalizers,
+                    operation="Stage-4 init",
+                )
+                # Validate source metadata, but retain the target run's live
+                # transition contract because this is a fresh lineage.
+                self._validate_checkpoint_motion_transition_contract(
+                    loaded_dict,
+                    live_contract=None,
+                    compare_live=False,
+                    operation="Stage-4 init",
+                    allow_missing_contract=True,
+                )
+                if self.current_learning_iteration != 0:
+                    raise ValueError(
+                        "Stage-4 initialization must begin at fresh iteration 0, got "
+                        f"{self.current_learning_iteration}."
+                    )
+                if self.actor_optimizer.state or self.critic_optimizer.state:
+                    raise ValueError(
+                        "Stage-4 initialization requires fresh empty optimizer state."
+                    )
+                prepared = (
+                    loaded_dict,
+                    actor_state,
+                    critic_state,
+                    actor_norm,
+                    critic_norm,
+                    actual_sha256,
+                )
+            except Exception as exc:
+                validation_error = exc
+            self._synchronize_distributed_operation_error(
+                validation_error,
+                operation="Stage-4 checkpoint deserialization/validation",
+            )
+            assert prepared is not None
+            (
+                loaded_dict,
+                actor_state,
+                critic_state,
+                actor_norm,
+                critic_norm,
+                actual_sha256,
+            ) = prepared
+
+            commit_error: Exception | None = None
+            try:
+                self.actor.load_state_dict(actor_state, strict=True)
+                self.critic.load_state_dict(critic_state, strict=True)
+                configured_std = torch.full_like(
+                    self.actor.std.data,
+                    float(self.config.init_noise_std),
+                )
+                projected_std = self._project_actor_std_constraints(configured_std)
+                if not torch.equal(projected_std, configured_std):
+                    raise ValueError(
+                        "Stage-4 init_noise_std violates actor noise constraints; "
+                        "refusing a silent projection."
+                    )
+                self.actor.std.data.copy_(configured_std)
+                if actor_norm:
+                    self._restore_checkpoint_normalizers(
+                        loaded_dict,
+                        kind="actor",
+                        runtime_enabled=True,
+                        normalizers=self.actor_obs_normalizers,
+                        operation="Stage-4 init",
+                    )
+                if critic_norm:
+                    self._restore_checkpoint_normalizers(
+                        loaded_dict,
+                        kind="critic",
+                        runtime_enabled=True,
+                        normalizers=self.critic_obs_normalizers,
+                        operation="Stage-4 init",
+                    )
+                self._reset_dagger_replay_state()
+                self._terminal_fixed_bc_eval_state = None
+                self._source_checkpoint_sha256 = actual_sha256
+                self._motion_transition_contract = live_motion_contract
+                self._motion_transition_contract_sha256 = live_motion_digest
+                if self.actor_optimizer.state or self.critic_optimizer.state:
+                    raise RuntimeError(
+                        "Stage-4 validated commit unexpectedly mutated optimizer state."
+                    )
+            except Exception as exc:
+                commit_error = exc
+            self._synchronize_distributed_operation_error(
+                commit_error,
+                operation="Stage-4 validated state commit",
+            )
+            if getattr(self, "is_multi_gpu", False):
+                self._synchronize_model_weights()
+            self._assert_model_parameters_finite(
+                phase="stage4-init validated load",
+                trainable_only=False,
+            )
+            logger.info(
+                "Stage-4 initialized actor+critic from {}; reset std to {}; ignored "
+                "checkpoint iteration, optimizers, RNG, env/curriculum, replay, and W&B identity.",
+                ckpt_path,
+                float(self.config.init_noise_std),
+            )
+            return loaded_dict.get("infos")
+        finally:
+            restore_rng_checkpoint_state(
+                rng_state,
+                path="pre_stage4_init_load_rng_state",
             )
 
     def load_evaluation(self, ckpt_path: str | None) -> dict | None:
@@ -14134,6 +15231,7 @@ class PPO(BaseAlgo):
         *,
         next_iteration: int | None = None,
         allow_tripped_fixed_bc_guard: bool = False,
+        upload: bool = True,
     ):
         # Capture the stochastic boundary before *any* checkpoint-side
         # inspection or collection.  State-dict hooks, validation,
@@ -14260,7 +15358,14 @@ class PPO(BaseAlgo):
                 checkpoint_dict,
                 path="checkpoint_publish_payload",
             )
-            self.logging_helper.save_checkpoint_artifact(checkpoint_dict, path)
+            if upload:
+                self.logging_helper.save_checkpoint_artifact(checkpoint_dict, path)
+            else:
+                self.logging_helper.save_checkpoint_artifact(
+                    checkpoint_dict,
+                    path,
+                    upload=False,
+                )
         finally:
             # torch serialization and W&B artifact publication are not part
             # of the training stochastic process.  Preserve the checkpointed
@@ -14270,7 +15375,13 @@ class PPO(BaseAlgo):
                 path=f"rng_state_by_rank[{rank}]",
             )
 
-    def export(self, onnx_file_path: str, *, iteration: int | None = None):
+    def export(
+        self,
+        onnx_file_path: str,
+        *,
+        iteration: int | None = None,
+        upload: bool = True,
+    ):
         """Export the `.onnx` of the policy to & save it to `path`.
 
         This is intended to enable deployment, but not resuming training.
@@ -14384,8 +15495,40 @@ class PPO(BaseAlgo):
                 metadata=metadata,
             )
 
+            parity_report = validate_exported_policy_onnx(
+                wrapper=self.actor_onnx_wrapper,
+                onnx_file_path=onnx_file_path,
+                example_obs_dict=example_obs_dict,
+                perception_input_name=self.actor_perception_key or None,
+            )
+            parity_report.update(
+                {
+                    "completed_iteration": completed_iteration,
+                    "actor_graph_semantics": (
+                        "raw_actor_observation_plus_authenticated_external_observation_adapter"
+                    ),
+                    "precomputed_command_contract_sha256": metadata.get(
+                        _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
+                    ),
+                    "rolling_reference_delta_contract_sha256": metadata.get(
+                        _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY
+                    ),
+                }
+            )
+            attach_onnx_metadata(
+                onnx_path=onnx_file_path,
+                metadata={"onnx_validation_contract": parity_report},
+            )
+            validate_exported_policy_onnx(
+                wrapper=self.actor_onnx_wrapper,
+                onnx_file_path=onnx_file_path,
+                example_obs_dict=example_obs_dict,
+                perception_input_name=self.actor_perception_key or None,
+            )
+
             # Upload the .onnx file to wandb
-            self.logging_helper.save_to_wandb(onnx_file_path)
+            if upload:
+                self.logging_helper.save_to_wandb(onnx_file_path)
         finally:
             # An exporter/metadata failure must not leave the live training
             # policy in eval mode for all subsequent iterations.
@@ -15311,7 +16454,10 @@ class PPO(BaseAlgo):
             self.actor.reset(reset_mask)
             self.critic.reset(reset_mask)
             if getattr(self, "_evaluation_policy_mode", "checkpoint_actor") \
-                    == "distill_label_teacher":
+                    in {
+                        "distill_label_teacher",
+                        "distill_label_teacher_bc_target",
+                    }:
                 assert self.teacher_actor is not None
                 self.teacher_actor.reset(reset_mask)
 
@@ -15470,8 +16616,15 @@ class PPO(BaseAlgo):
 
     def _pre_eval_env_step(self, actor_state: dict):
         actor_obs_raw = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
-        if getattr(self, "_evaluation_policy_mode", "checkpoint_actor") \
-                == "distill_label_teacher":
+        evaluation_policy_mode = getattr(
+            self,
+            "_evaluation_policy_mode",
+            "checkpoint_actor",
+        )
+        if evaluation_policy_mode in {
+            "distill_label_teacher",
+            "distill_label_teacher_bc_target",
+        }:
             teacher_obs_raw = self._build_teacher_obs_raw(actor_state["obs"], actor_obs_raw)
             teacher_obs = self._normalize_teacher_actor_obs(teacher_obs_raw)
             actions, _teacher_indices = self._select_teacher_actions(
@@ -15479,6 +16632,27 @@ class PPO(BaseAlgo):
                 actor_state["obs"],
                 stochastic=False,
             )
+            if bool(
+                getattr(
+                    self,
+                    "_evaluation_teacher_action_clip_enabled",
+                    False,
+                )
+            ):
+                clip_threshold = getattr(
+                    self,
+                    "_evaluation_teacher_action_clip_threshold",
+                    None,
+                )
+                if clip_threshold is None:
+                    raise RuntimeError(
+                        "Clipped distillation-label teacher evaluation is missing "
+                        "its authenticated BC target threshold."
+                    )
+                actions = self._clip_teacher_actions_preserving_non_finite(
+                    actions,
+                    float(clip_threshold),
+                )
             policy_state = {"actor_obs": teacher_obs}
             actor_obs_raw_for_debug = teacher_obs_raw
             actor_obs_for_debug = teacher_obs
@@ -15510,7 +16684,10 @@ class PPO(BaseAlgo):
             self.actor.reset(dones)
             self.critic.reset(dones)
             if getattr(self, "_evaluation_policy_mode", "checkpoint_actor") \
-                    == "distill_label_teacher":
+                    in {
+                        "distill_label_teacher",
+                        "distill_label_teacher_bc_target",
+                    }:
                 assert self.teacher_actor is not None
                 self.teacher_actor.reset(dones)
         for c in self.eval_callbacks:

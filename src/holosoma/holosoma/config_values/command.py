@@ -7,6 +7,10 @@ from holosoma.config_values.wbt.g1.command import (
     g1_29dof_wbt_command_motion_tracking,
     g1_29dof_wbt_command_w_object,
     g1_29dof_wbt_command_w_object_generalist,
+    g1_29dof_wbt_command_w_object_hybrid_stage2,
+    g1_29dof_wbt_command_w_object_hybrid_velocity,
+    g1_29dof_wbt_command_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift,
 )
 
 none = None
@@ -19,4 +23,12 @@ DEFAULTS = {
     "g1_29dof_wbt_motion_tracking": g1_29dof_wbt_command_motion_tracking,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_command_w_object,
     "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_command_w_object_generalist,
+    "g1_29dof_wbt_w_object_hybrid_stage2": g1_29dof_wbt_command_w_object_hybrid_stage2,
+    "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_command_w_object_hybrid_velocity,
+    "g1_29dof_wbt_w_object_hybrid_world_velocity": (
+        g1_29dof_wbt_command_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift": (
+        g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift
+    ),
 }

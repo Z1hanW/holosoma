@@ -227,6 +227,7 @@ for ambient_semantic in \
   CONTACT_AWARE_PEAK_HEIGHT_ALPHA CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS \
   CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS \
   CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG \
+  ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE \
   CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION STUDENT_ACTOR_INPUTS \
   STUDENT_PROPRIO_HISTORY_LENGTH STUDENT_ACTION_HISTORY_LENGTH \
   CRITIC_PROPRIO_HISTORY_LENGTH TEACHER_ACTOR_OBS_HISTORY_LENGTH \
@@ -1321,6 +1322,7 @@ grep -F 'export FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=39999' "${TMP_DIR}/batch_d
 grep -F 'export TEACHER_CHECKPOINT=wandb://zihanw22/carry-any/bcleb5oi/model_67000.pt' "${TMP_DIR}/batch_default.out" >/dev/null
 grep -F 'export TARGET_LEARNING_ITERATION=40000' "${TMP_DIR}/batch_default.out" >/dev/null
 grep -F 'export EXPORT_ONNX=False' "${TMP_DIR}/batch_default.out" >/dev/null
+grep -F 'export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False' "${TMP_DIR}/batch_default.out" >/dev/null
 grep -F 'export STUDENT_MOTION_END_MODE=episodic' "${TMP_DIR}/batch_default.out" >/dev/null
 grep -F 'export FIXED_BC_EVAL_LOG_INTERVAL=100' "${TMP_DIR}/batch_default.out" >/dev/null
 grep -F 'export FIXED_BC_GUARD_ENABLED=True' "${TMP_DIR}/batch_default.out" >/dev/null
@@ -2320,6 +2322,7 @@ ROLLBACK_ENV=(
   env
   PATH="${FAKE_BIN}:${PATH}"
   FAKE_TMUX_STATE_DIR="${FAKE_TMUX_STATE_DIR}"
+  MOTION_GENERATOR_TEACHER_EXPECTED_SHA256="$(printf 'a%.0s' {1..64})"
   NPROC=1
   NNODES=1
   PER_GPU_ENVS=1024
@@ -5883,10 +5886,15 @@ expect_failure \
 "${BATCH_ENV[@]}" \
   UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC=0.61 \
   EXPORT_ONNX=True \
+  CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed-turn-then-forward \
+  ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True \
   CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=False \
   bash batch_ne.sh launch >"${TMP_DIR}/batch_optional_forwarding.out"
 grep -F 'export UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC=0.61' "${TMP_DIR}/batch_optional_forwarding.out" >/dev/null
 grep -F 'export EXPORT_ONNX=True' "${TMP_DIR}/batch_optional_forwarding.out" >/dev/null
+grep -F 'export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward' \
+  "${TMP_DIR}/batch_optional_forwarding.out" >/dev/null
+grep -F 'export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True' "${TMP_DIR}/batch_optional_forwarding.out" >/dev/null
 grep -F 'export CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=False' "${TMP_DIR}/batch_optional_forwarding.out" >/dev/null
 
 "${BATCH_ENV[@]}" \

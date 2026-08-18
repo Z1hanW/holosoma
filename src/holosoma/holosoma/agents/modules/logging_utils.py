@@ -62,6 +62,14 @@ REWARD_LOG_PARAM_KEYS = (
     "wrist_weight",
     "contact_weight",
 )
+REWARD_REPORTING_CONTRACT = {
+    "legacy_episode": "sum(weight * raw_reward * dt) / max_episode_length_s",
+    "legacy_raw_episode": "sum(raw_reward) / max_episode_length_s",
+    "episode_rate": "sum(weight * raw_reward * dt) / actual_alive_time_s",
+    "raw_episode_mean": "sum(raw_reward) / actual_alive_steps",
+    "mean_reward_per_alive_step": "sum(actual_policy_reward) / sum(actual_alive_steps)",
+    "termination_condition_fractions": "per-env-step fractions; component conditions may overlap",
+}
 
 
 def get_reward_log_group(term_name: str) -> str:
@@ -105,7 +113,10 @@ def collect_reward_wandb_metadata(reward_cfg: Any) -> tuple[dict[str, Any], dict
     grouped_spec = {group_name: terms for group_name, terms in grouped_spec.items() if terms}
     if not grouped_spec:
         return {}, {}
-    return {"reward_group_spec": grouped_spec}, summary
+    return {
+        "reward_group_spec": grouped_spec,
+        "reward_reporting_contract": REWARD_REPORTING_CONTRACT,
+    }, summary
 
 
 class LogDict(TypedDict):
@@ -213,6 +224,8 @@ class LoggingHelper:
         # Book keeping
         self.ep_infos: list[dict[str, Any]] = []
         self.raw_ep_infos: list[dict[str, Any]] = []
+        self.episode_rate_infos: list[dict[str, Any]] = []
+        self.raw_episode_mean_infos: list[dict[str, Any]] = []
         self.rewbuffer: deque[float] = deque(maxlen=100)
         self.lenbuffer: deque[float] = deque(maxlen=100)
         self.rewweightbuffer: deque[float] = deque(maxlen=100)
@@ -271,6 +284,12 @@ class LoggingHelper:
         raw_episode_info = infos.get("raw_episode", {})
         if raw_episode_info:
             self.raw_ep_infos.append(raw_episode_info)
+        episode_rate_info = infos.get("episode_rate", {})
+        if episode_rate_info:
+            self.episode_rate_infos.append(episode_rate_info)
+        raw_episode_mean_info = infos.get("raw_episode_mean", {})
+        if raw_episode_mean_info:
+            self.raw_episode_mean_infos.append(raw_episode_mean_info)
         self.cur_reward_sum += rewards
         self.cur_episode_length += 1
 
@@ -404,6 +423,8 @@ class LoggingHelper:
             {
                 "episode": self._prepare_tensor_dict_summary_entries(self.ep_infos),
                 "raw_episode": self._prepare_tensor_dict_summary_entries(self.raw_ep_infos),
+                "episode_rate": self._prepare_tensor_dict_summary_entries(self.episode_rate_infos),
+                "raw_episode_mean": self._prepare_tensor_dict_summary_entries(self.raw_episode_mean_infos),
                 "env": self._prepare_env_summary_entries(),
             }
         )
@@ -503,6 +524,16 @@ class LoggingHelper:
             return distributed_means[1]
         return self._weighted_buffer_mean(self.lenbuffer, self.lenweightbuffer)
 
+    def _mean_reward_per_alive_step(self) -> float | None:
+        """Return actual policy reward per control step over completed episodes."""
+
+        if not self._has_reward_statistics() or not self._has_length_statistics():
+            return None
+        mean_episode_length = self._mean_episode_length()
+        if mean_episode_length <= 0.0:
+            return None
+        return self._mean_reward() / mean_episode_length
+
     def _has_reward_statistics(self) -> bool:
         return bool(self.rewbuffer) or self._distributed_episode_means() is not None
 
@@ -568,6 +599,8 @@ class LoggingHelper:
             "loss_weight": float(loss_weight),
             "episode": tensor_summaries["episode"],
             "raw_episode": tensor_summaries["raw_episode"],
+            "episode_rate": tensor_summaries["episode_rate"],
+            "raw_episode_mean": tensor_summaries["raw_episode_mean"],
             "env": tensor_summaries["env"],
             "completed_reward_sum": float(sum(self._completed_rewards_since_sync)),
             "completed_length_sum": float(sum(self._completed_lengths_since_sync)),
@@ -605,6 +638,8 @@ class LoggingHelper:
             # per-iteration data here rather than accumulating it forever.
             self.ep_infos.clear()
             self.raw_ep_infos.clear()
+            self.episode_rate_infos.clear()
+            self.raw_episode_mean_infos.clear()
             self.episode_env_tensors.clear()
             self.collection_time = 0.0
             self.learn_time = 0.0
@@ -612,6 +647,8 @@ class LoggingHelper:
 
         episode_means = self._merge_summaries(payloads, "episode")
         raw_episode_means = self._merge_summaries(payloads, "raw_episode")
+        episode_rate_means = self._merge_summaries(payloads, "episode_rate")
+        raw_episode_mean_means = self._merge_summaries(payloads, "raw_episode_mean")
         env_means = self._merge_summaries(payloads, "env")
         self.ep_infos = (
             [{key: torch.tensor([value], device=self.device) for key, value in episode_means.items()}]
@@ -621,6 +658,16 @@ class LoggingHelper:
         self.raw_ep_infos = (
             [{key: torch.tensor([value], device=self.device) for key, value in raw_episode_means.items()}]
             if raw_episode_means
+            else []
+        )
+        self.episode_rate_infos = (
+            [{key: torch.tensor([value], device=self.device) for key, value in episode_rate_means.items()}]
+            if episode_rate_means
+            else []
+        )
+        self.raw_episode_mean_infos = (
+            [{key: torch.tensor([value], device=self.device) for key, value in raw_episode_mean_means.items()}]
+            if raw_episode_mean_means
             else []
         )
         self.episode_env_tensors.clear()
@@ -724,6 +771,8 @@ class LoggingHelper:
         # Clear episode infos after logging
         self.ep_infos.clear()
         self.raw_ep_infos.clear()
+        self.episode_rate_infos.clear()
+        self.raw_episode_mean_infos.clear()
         self.learn_time = 0.0
         self.collection_time = 0.0
 
@@ -776,6 +825,27 @@ class LoggingHelper:
                 value = torch.mean(infotensor).item()
                 scalars_to_log[f"RawEpisode/{key}"] = value
                 ep_string += f"""{f"Mean raw episode {key}:":>35} {value:.4f}\n"""
+
+        # Actual-duration-normalized metrics are intended for dashboards and
+        # comparisons. Keep them out of the already long console report.
+        for infos, namespace in (
+            (self.episode_rate_infos, "EpisodeRate"),
+            (self.raw_episode_mean_infos, "RawEpisodeMean"),
+        ):
+            if not infos:
+                continue
+            for key in infos[0]:
+                infotensor = torch.tensor([], device=self.device)
+                for info in infos:
+                    value = info[key]
+                    if not isinstance(value, torch.Tensor):
+                        value = torch.Tensor([value])
+                    if len(value.shape) == 0:
+                        value = value.unsqueeze(0)
+                    infotensor = torch.cat((infotensor, value.to(self.device)))
+                if len(infotensor) == 0:
+                    continue
+                scalars_to_log[f"{namespace}/{key}"] = torch.mean(infotensor).item()
 
         return ep_string, scalars_to_log
 
@@ -832,6 +902,10 @@ class LoggingHelper:
             scalars_to_log["Train/mean_reward"] = mean_reward
             scalars_to_log["Train/mean_reward/time"] = mean_reward
             scalars_to_log["Reward/mean"] = mean_reward
+            mean_reward_per_alive_step = self._mean_reward_per_alive_step()
+            if mean_reward_per_alive_step is not None:
+                scalars_to_log["Train/mean_reward_per_alive_step"] = mean_reward_per_alive_step
+                scalars_to_log["Reward/mean_per_alive_step"] = mean_reward_per_alive_step
         if self._has_length_statistics():
             mean_episode_length = self._mean_episode_length()
             scalars_to_log["Train/mean_episode_length"] = mean_episode_length
@@ -852,28 +926,32 @@ class LoggingHelper:
 
     def _add_reward_group_aliases(self, scalars_to_log: dict[str, float]) -> None:
         """Add W&B-friendly reward panels from existing Episode/rew_* metrics."""
-        group_totals: dict[str, float] = {}
-        reward_total = 0.0
-        found_reward_terms = False
+        for source_prefix, alias_prefix, total_name in (
+            ("Episode/rew_", "Reward", "total_episode_terms"),
+            ("EpisodeRate/rew_", "RewardRate", "total_episode_terms"),
+        ):
+            group_totals: dict[str, float] = {}
+            reward_total = 0.0
+            found_reward_terms = False
 
-        for metric_name, value in list(scalars_to_log.items()):
-            if not metric_name.startswith("Episode/rew_"):
+            for metric_name, value in list(scalars_to_log.items()):
+                if not metric_name.startswith(source_prefix):
+                    continue
+                term_name = metric_name[len(source_prefix) :]
+                group_name = get_reward_log_group(term_name)
+                scalar_value = float(value)
+                scalars_to_log[f"{alias_prefix}/{group_name}/{term_name}"] = scalar_value
+                group_totals[group_name] = group_totals.get(group_name, 0.0) + scalar_value
+                reward_total += scalar_value
+                found_reward_terms = True
+
+            if not found_reward_terms:
                 continue
-            term_name = metric_name[len("Episode/rew_") :]
-            group_name = get_reward_log_group(term_name)
-            scalar_value = float(value)
-            scalars_to_log[f"Reward/{group_name}/{term_name}"] = scalar_value
-            group_totals[group_name] = group_totals.get(group_name, 0.0) + scalar_value
-            reward_total += scalar_value
-            found_reward_terms = True
 
-        if not found_reward_terms:
-            return
-
-        for group_name in REWARD_LOG_GROUP_ORDER:
-            if group_name in group_totals:
-                scalars_to_log[f"Reward/{group_name}"] = group_totals[group_name]
-        scalars_to_log["Reward/total_episode_terms"] = reward_total
+            for group_name in REWARD_LOG_GROUP_ORDER:
+                if group_name in group_totals:
+                    scalars_to_log[f"{alias_prefix}/{group_name}"] = group_totals[group_name]
+            scalars_to_log[f"{alias_prefix}/{total_name}"] = reward_total
 
     def _strip_prefix(self, metric_name: str) -> str:
         if self.prefix and metric_name.startswith(self.prefix):
@@ -1003,7 +1081,13 @@ class LoggingHelper:
 
         return log_string
 
-    def save_checkpoint_artifact(self, state_dict: dict[str, Any], path: str) -> None:
+    def save_checkpoint_artifact(
+        self,
+        state_dict: dict[str, Any],
+        path: str,
+        *,
+        upload: bool = True,
+    ) -> None:
         # Resolve the parent (rather than the final component) so an existing
         # symlink at the checkpoint name is atomically replaced instead of
         # followed.  pathlib/commonpath semantics also avoid the old string
@@ -1052,7 +1136,8 @@ class LoggingHelper:
             # published checkpoint untouched and remove only our private temp.
             temp_path.unlink(missing_ok=True)
 
-        self.save_to_wandb(str(target_path))
+        if upload:
+            self.save_to_wandb(str(target_path))
 
     def save_to_wandb(self, file_path: str) -> None:
         """Saves file to wandb if run is initialized."""

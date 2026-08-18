@@ -605,3 +605,61 @@ def test_pickup_button_observation_uses_manual_override():
     pickup_button = wbt_obs_terms.pickup_button(env)
 
     assert pickup_button.tolist() == [[1.0], [0.0], [0.0]]
+
+
+def test_manual_root_command_can_preserve_native_contact_buttons():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.motion_cfg = SimpleNamespace(hybrid_stage2_enabled=False)
+    motion_command.manual_control_enabled = True
+    motion_command._manual_forward_after_lift_preserve_native_contact_buttons = True
+    motion_command.manual_pickup_button_override_enabled = False
+    motion_command.manual_pickup_button = torch.zeros((3, 1), dtype=torch.float32)
+    motion_command.manual_drop_button_override_enabled = False
+    motion_command.manual_drop_button = torch.zeros((3, 1), dtype=torch.float32)
+    motion_command.get_contact_aware_pickup_button = lambda: torch.tensor(
+        [True, False, False]
+    )
+    motion_command.get_contact_aware_drop_button = lambda: torch.tensor(
+        [False, False, True]
+    )
+    motion_command.hybrid_velocity_enabled = lambda: False
+
+    env = SimpleNamespace(
+        num_envs=3,
+        device=torch.device("cpu"),
+        command_manager=SimpleNamespace(get_state=lambda name: motion_command),
+    )
+
+    assert wbt_obs_terms.pickup_button(env).tolist() == [[1.0], [0.0], [0.0]]
+    assert wbt_obs_terms.drop_button(env).tolist() == [[0.0], [0.0], [1.0]]
+
+
+def test_manual_root_command_can_preserve_pickup_while_forcing_drop_zero():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.motion_cfg = SimpleNamespace(hybrid_stage2_enabled=False)
+    motion_command.manual_control_enabled = True
+    motion_command._manual_forward_after_lift_preserve_native_contact_buttons = False
+    motion_command._manual_forward_after_lift_preserve_native_pickup_button = True
+    motion_command._manual_forward_after_lift_preserve_native_drop_button = False
+    motion_command.manual_pickup_button_override_enabled = False
+    motion_command.manual_pickup_button = torch.zeros((3, 1), dtype=torch.float32)
+    motion_command.manual_drop_button_override_enabled = True
+    motion_command.manual_drop_button = torch.zeros((3, 1), dtype=torch.float32)
+    motion_command.get_contact_aware_pickup_button = lambda: torch.tensor(
+        [True, False, False]
+    )
+    motion_command.get_contact_aware_drop_button = lambda: torch.tensor(
+        [False, False, True]
+    )
+    motion_command.hybrid_velocity_enabled = lambda: False
+
+    env = SimpleNamespace(
+        num_envs=3,
+        device=torch.device("cpu"),
+        command_manager=SimpleNamespace(get_state=lambda name: motion_command),
+    )
+
+    assert wbt_obs_terms.pickup_button(env).tolist() == [[1.0], [0.0], [0.0]]
+    assert wbt_obs_terms.drop_button(env).tolist() == [[0.0], [0.0], [0.0]]

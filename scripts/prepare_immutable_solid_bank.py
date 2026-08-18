@@ -41,7 +41,7 @@ _VERSION = 5
 _MARKER_NAME = ".generated_by_prepare_immutable_solid_bank"
 _MANIFEST_NAME = "manifest.json"
 _OBJECT_MAP_NAME = "_clip_object_urdf_map.json"
-_ALLOWED_CATEGORIES = {"box", "bin", "barrel", "ball"}
+_ALLOWED_CATEGORIES = {"box", "bin", "barrel", "ball", "anything"}
 _OPTIONAL_METADATA = (
     "teacher_export_summary.json",
     "teacher_export_summary.csv",
@@ -187,6 +187,8 @@ def _category_for(clip_id: str, entry: object) -> str:
         return "ball"
     if "box" in raw or "cube" in raw or "largebox" in raw:
         return "box"
+    if "anything" in raw:
+        return "anything"
     return "other"
 
 

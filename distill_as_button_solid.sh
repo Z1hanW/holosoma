@@ -316,7 +316,7 @@ from __future__ import annotations
 import json
 import sys
 
-allowed_universe = {"box", "bin", "barrel", "ball"}
+allowed_universe = {"box", "bin", "barrel", "ball", "anything"}
 aliases = {
     "boxes": "box",
     "cube": "box",

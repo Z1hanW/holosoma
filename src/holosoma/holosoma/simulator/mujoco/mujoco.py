@@ -426,7 +426,22 @@ class MuJoCo(BaseSimulator):
             if getattr(self, "scene_manager", None) is None or not hasattr(self.scene_manager.world_spec, "to_xml"):
                 raise
             path.write_text(self.scene_manager.world_spec.to_xml(), encoding="utf-8")
-        logger.info("Exported compiled MuJoCo XML to {}", path)
+
+        exported_asset_count = 0
+        if getattr(self, "scene_manager", None) is not None:
+            for asset_name, asset_bytes in self.scene_manager.world_spec.assets.items():
+                relative_asset_path = Path(str(asset_name))
+                if relative_asset_path.is_absolute() or ".." in relative_asset_path.parts:
+                    raise ValueError(f"Unsafe MuJoCo in-memory asset name: {asset_name!r}")
+                asset_path = path.parent / relative_asset_path
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                asset_path.write_bytes(bytes(asset_bytes))
+                exported_asset_count += 1
+        logger.info(
+            "Exported compiled MuJoCo XML to {} with {} in-memory asset file(s)",
+            path,
+            exported_asset_count,
+        )
 
     def _setup_scene(self) -> None:
         """Setup scene by composing terrain, lighting, materials, and robot components.

@@ -641,6 +641,43 @@ class BasePolicy:
         )
         return session, metadata
 
+    @staticmethod
+    def _effective_perception_contract_sha256(metadata: dict) -> str | None:
+        original_digest = perception_observation_contract_sha256_from_metadata(metadata)
+        override = os.environ.get(
+            "HOLOSOMA_EVAL_PERCEPTION_CONTRACT_SHA256_OVERRIDE",
+            "",
+        ).strip().lower()
+        if not override:
+            return original_digest
+        allow_override = os.environ.get(
+            "HOLOSOMA_EVAL_ALLOW_PERCEPTION_CONTRACT_OVERRIDE",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if not allow_override:
+            raise RuntimeError(
+                "HOLOSOMA_EVAL_PERCEPTION_CONTRACT_SHA256_OVERRIDE is evaluation-only and "
+                "requires HOLOSOMA_EVAL_ALLOW_PERCEPTION_CONTRACT_OVERRIDE=1"
+            )
+        if original_digest is None:
+            raise RuntimeError("Cannot override a missing ONNX perception observation contract")
+        try:
+            decoded = bytes.fromhex(override)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Evaluation perception contract override must be 64 lowercase hexadecimal characters"
+            ) from exc
+        if len(decoded) != 32 or override != override.lower():
+            raise RuntimeError(
+                "Evaluation perception contract override must be 64 lowercase hexadecimal characters"
+            )
+        logger.warning(
+            "Using explicit evaluation-only perception producer contract: original={} effective={}",
+            original_digest,
+            override,
+        )
+        return override
+
     def setup_policy(self, model_path):
         """Setup ONNX policy model and extract metadata."""
         self.onnx_policy_session, metadata = self._load_onnx_session_and_metadata(model_path)
@@ -664,7 +701,7 @@ class BasePolicy:
             runtime_motor_effort_limits=self.robot_config.motor_effort_limit,
             runtime_joint2motor=self.robot_config.joint2motor,
         )
-        self._perception_contract_sha256 = perception_observation_contract_sha256_from_metadata(metadata)
+        self._perception_contract_sha256 = self._effective_perception_contract_sha256(metadata)
 
         # Extract KP/KD from metadata (will be None if not present)
         self.onnx_kp = self._joint_values_to_motor_order(metadata["kp"], "KP") if "kp" in metadata else None

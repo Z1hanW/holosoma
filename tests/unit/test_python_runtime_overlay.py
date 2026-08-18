@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 import sysconfig
+from pathlib import PurePosixPath
+import importlib.util
 
 import pytest
 
@@ -15,6 +17,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPO_ROOT / "scripts" / "verify_python_runtime_overlay.py"
 MANIFEST = ".holosoma-runtime-manifest.sha256"
+
+
+def test_nested_namespace_package_has_auditable_import_root() -> None:
+    module_path = REPO_ROOT / "scripts" / "stage_python_runtime_overlay.py"
+    spec = importlib.util.spec_from_file_location("runtime_overlay_stage_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._import_root_for_file(
+        PurePosixPath("google/protobuf/__init__.py")
+    ) == "google"
+    assert module._import_root_for_file(
+        PurePosixPath("protobuf-1.0.dist-info/licenses/LICENSE")
+    ) is None
 
 
 def _seal_overlay(root: Path) -> str:
@@ -85,10 +102,13 @@ def _strict_overlay(
         "attrs": "__version__ = '1.0'\n",
         "numpy": (
             "__version__ = '1.0'\n"
-            "def asarray(value):\n"
+            "float32 = object()\n"
+            "def asarray(value, dtype=None):\n"
             "    return value\n"
             "def dot(left, right):\n"
             "    return sum(a * b for a, b in zip(left, right))\n"
+            "def array_equal(left, right):\n"
+            "    return left == right\n"
         ),
         "omegaconf": (
             "__version__ = '1.0'\n"
@@ -103,12 +123,44 @@ def _strict_overlay(
             "            result['resolved'] = result['base']\n"
             "        return result\n"
         ),
+        "onnx": (
+            "__version__ = '1.0'\n"
+            "class _Helper:\n"
+            "    @staticmethod\n"
+            "    def make_node(*args, **kwargs): return object()\n"
+            "    @staticmethod\n"
+            "    def make_graph(*args, **kwargs): return object()\n"
+            "    @staticmethod\n"
+            "    def make_tensor_value_info(*args, **kwargs): return object()\n"
+            "    @staticmethod\n"
+            "    def make_opsetid(*args, **kwargs): return object()\n"
+            "    @staticmethod\n"
+            "    def make_model(*args, **kwargs):\n"
+            "        class Model:\n"
+            "            def SerializeToString(self): return b'model'\n"
+            "        return Model()\n"
+            "helper = _Helper()\n"
+            "class _Checker:\n"
+            "    @staticmethod\n"
+            "    def check_model(model): return None\n"
+            "checker = _Checker()\n"
+            "class TensorProto:\n"
+            "    FLOAT = 1\n"
+        ),
+        "onnxruntime": (
+            "__version__ = '1.0'\n"
+            "class InferenceSession:\n"
+            "    def __init__(self, model, providers=None): pass\n"
+            "    def run(self, outputs, feeds): return [feeds['input']]\n"
+        ),
         "pyyaml": "__version__ = '1.0'\n",
     }
     module_names = {
         "attrs": "attrs",
         "numpy": "numpy",
         "omegaconf": "omegaconf",
+        "onnx": "onnx",
+        "onnxruntime": "onnxruntime",
         "pyyaml": "yaml",
     }
     if include_orphan_distribution:
@@ -153,8 +205,8 @@ def _strict_overlay(
                 }
             )
     contract = {
-        "version": 2,
-        "runtime_profile": "as-core-v1",
+        "version": 3,
+        "runtime_profile": "as-core-onnx-v2",
         "python_cache_tag": cache_tag or sys.implementation.cache_tag,
         "python_version": platform.python_version(),
         "python_soabi": soabi or str(sysconfig.get_config_var("SOABI") or ""),
@@ -163,6 +215,8 @@ def _strict_overlay(
             "attrs",
             "numpy",
             "omegaconf",
+            "onnx",
+            "onnxruntime",
         ],
         "distributions": records,
         "omitted_console_scripts": [],
@@ -257,7 +311,7 @@ def test_strict_distribution_closure_and_import_smokes_are_accepted(
     result = _verify(root, digest, strict=True)
 
     assert result.returncode == 0, result.stderr
-    assert "distribution_closure=4" in result.stdout
+    assert "distribution_closure=6" in result.stdout
 
 
 def test_strict_closure_rejects_metadata_fallback_to_base_environment(

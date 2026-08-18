@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -169,6 +172,165 @@ def export_policy_as_onnx(
         opset_version=14,
         dynamo=False,
     )
+
+
+def validate_exported_policy_onnx(
+    *,
+    wrapper: torch.nn.Module,
+    onnx_file_path: str,
+    example_obs_dict: dict[str, torch.Tensor],
+    perception_input_name: str | None = None,
+    rtol: float = 1.0e-3,
+    atol: float = 1.0e-5,
+) -> dict[str, Any]:
+    """Run checker and deterministic PyTorch-CPU-vs-ORT-CPU parity.
+
+    The relative tolerance is intentionally bounded at 1e-3. Deep float32
+    CNN/MLP graphs can differ at that scale between PyTorch CPU and ORT CPU
+    because the two runtimes select different reduction kernels, even when
+    the exported graph and weights are equivalent. The absolute tolerance
+    remains 1e-5 so near-zero actions stay tightly constrained.
+    """
+
+    import numpy as np
+    import onnxruntime
+
+    path = Path(onnx_file_path)
+    model = onnx.load(str(path))
+    onnx.checker.check_model(model)
+    session = onnxruntime.InferenceSession(
+        path.read_bytes(),
+        providers=["CPUExecutionProvider"],
+    )
+    expected_input_names = ["actor_obs"]
+    if perception_input_name:
+        expected_input_names.append(perception_input_name)
+    actual_input_names = [value.name for value in session.get_inputs()]
+    if actual_input_names != expected_input_names:
+        raise RuntimeError(
+            "Exported ONNX input names do not match the actor deployment contract: "
+            f"expected={expected_input_names}, actual={actual_input_names}."
+        )
+    output_names = [value.name for value in session.get_outputs()]
+    if output_names != ["action"]:
+        raise RuntimeError(
+            f"Exported ONNX must expose exactly one 'action' output, got {output_names}."
+        )
+    if not math.isfinite(float(rtol)) or not math.isfinite(float(atol)) or rtol < 0 or atol < 0:
+        raise ValueError("ONNX parity tolerances must be finite and non-negative.")
+
+    example_inputs = [example_obs_dict[name] for name in expected_input_names]
+    if any(not isinstance(value, torch.Tensor) or value.ndim < 2 for value in example_inputs):
+        raise ValueError("ONNX parity examples must be rank-2-or-higher torch tensors.")
+
+    # ORT is intentionally validated with CPUExecutionProvider.  Compare it
+    # against the exact same checkpoint weights on CPU as well; comparing
+    # against the live CUDA/TF32 training graph conflates backend rounding
+    # with an ONNX graph mismatch.  PPO actors retain the most recent Normal
+    # distribution as an unregistered non-leaf tensor cache, which vanilla
+    # deepcopy rejects even though inference never reads it.  Seed deepcopy's
+    # memo with detached copies of such caches so the live module remains
+    # entirely untouched.
+    deepcopy_memo: dict[int, Any] = {}
+    visited: set[int] = set()
+
+    def register_nonleaf_tensor_copies(value: Any) -> None:
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if isinstance(value, torch.Tensor):
+            if not value.is_leaf:
+                deepcopy_memo[value_id] = value.detach().clone()
+            return
+        if isinstance(value, torch.nn.Module):
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                register_nonleaf_tensor_copies(item)
+            return
+        if isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                register_nonleaf_tensor_copies(item)
+            return
+        if isinstance(value, torch.distributions.Distribution):
+            for item in vars(value).values():
+                register_nonleaf_tensor_copies(item)
+
+    for submodule in wrapper.modules():
+        for attribute in vars(submodule).values():
+            register_nonleaf_tensor_copies(attribute)
+    cpu_wrapper = copy.deepcopy(wrapper, deepcopy_memo).to(device=torch.device("cpu"))
+    cpu_wrapper.eval()
+
+    max_abs_error = 0.0
+    max_rel_error = 0.0
+    probe_count = 0
+    for batch_size, amplitude in ((1, 0.0), (2, 0.125), (3, 1.0)):
+        torch_inputs: list[torch.Tensor] = []
+        ort_feed: dict[str, np.ndarray] = {}
+        for input_index, (name, example) in enumerate(
+            zip(expected_input_names, example_inputs, strict=True)
+        ):
+            shape = (batch_size, *tuple(example.shape[1:]))
+            element_count = int(np.prod(shape))
+            if amplitude == 0.0:
+                probe = torch.zeros(shape, dtype=example.dtype, device="cpu")
+            else:
+                probe = torch.linspace(
+                    -amplitude,
+                    amplitude,
+                    steps=element_count,
+                    dtype=example.dtype,
+                    device="cpu",
+                ).reshape(shape)
+                if input_index:
+                    probe = torch.flip(probe, dims=(-1,))
+            torch_inputs.append(probe)
+            ort_feed[name] = probe.detach().cpu().numpy()
+
+        with torch.no_grad():
+            torch_output = cpu_wrapper(*torch_inputs)
+        if isinstance(torch_output, tuple):
+            torch_output = torch_output[0]
+        if not isinstance(torch_output, torch.Tensor):
+            raise TypeError(
+                f"PyTorch ONNX wrapper returned {type(torch_output).__name__}, expected Tensor."
+            )
+        expected = torch_output.detach().cpu().numpy()
+        actual = session.run(["action"], ort_feed)[0]
+        if expected.shape != actual.shape:
+            raise RuntimeError(
+                "PyTorch and ORT action shapes differ: "
+                f"torch={expected.shape}, ort={actual.shape}."
+            )
+        if not np.all(np.isfinite(expected)) or not np.all(np.isfinite(actual)):
+            raise RuntimeError("PyTorch/ORT parity probe produced NaN or infinity.")
+        difference = np.abs(actual - expected)
+        relative = difference / np.maximum(np.abs(expected), np.float32(atol))
+        max_abs_error = max(max_abs_error, float(np.max(difference, initial=0.0)))
+        max_rel_error = max(max_rel_error, float(np.max(relative, initial=0.0)))
+        if not np.allclose(actual, expected, rtol=rtol, atol=atol):
+            raise RuntimeError(
+                "Exported ONNX failed PyTorch-vs-ORT action parity: "
+                f"batch={batch_size}, max_abs_error={max_abs_error:.9g}, "
+                f"max_rel_error={max_rel_error:.9g}, rtol={rtol}, atol={atol}."
+            )
+        probe_count += batch_size
+
+    return {
+        "version": 1,
+        "checker": "onnx.checker.check_model",
+        "runtime": "onnxruntime_cpu",
+        "pytorch_vs_ort": True,
+        "input_names": expected_input_names,
+        "output_names": output_names,
+        "probe_rows": probe_count,
+        "rtol": float(rtol),
+        "atol": float(atol),
+        "max_abs_error": max_abs_error,
+        "max_rel_error": max_rel_error,
+    }
 
 
 def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_name, example_obs_dict, config):

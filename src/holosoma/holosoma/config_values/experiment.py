@@ -18,6 +18,13 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_videomimic_transformer,
     g1_29dof_wbt_w_object,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    g1_29dof_wbt_w_object_hybrid_stage2,
+    g1_29dof_wbt_w_object_hybrid_velocity,
+    g1_29dof_wbt_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_w_object_policy_world_root_error,
+    g1_29dof_wbt_w_object_policy_world_velocity,
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift,
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref,
@@ -50,6 +57,23 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_generalist_teacher_linvel": g1_29dof_wbt_w_object_generalist_teacher_linvel,
     "g1_29dof_wbt_w_object_generalist_legacy_obs": g1_29dof_wbt_w_object_generalist_legacy_obs,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    "g1_29dof_wbt_w_object_hybrid_stage2": g1_29dof_wbt_w_object_hybrid_stage2,
+    "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_w_object_hybrid_velocity,
+    "g1_29dof_wbt_w_object_hybrid_world_velocity": (
+        g1_29dof_wbt_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_policy_world_velocity": (
+        g1_29dof_wbt_w_object_policy_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_policy_world_root_error": (
+        g1_29dof_wbt_w_object_policy_world_root_error
+    ),
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift": (
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift
+    ),
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317": (
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317
+    ),
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel": g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref,

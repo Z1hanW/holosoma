@@ -1,5 +1,7 @@
 """Whole Body Tracking reward presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
 
 _LOWER_TRACKED_BODY_NAMES = [
@@ -461,6 +463,173 @@ g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance = RewardManager
     }
 )
 
+_FORWARD_AFTER_LIFT_TRACKING_TERM_NAMES = {
+    "motion_global_ref_position_error_exp",
+    "motion_global_ref_orientation_error_exp",
+    "motion_relative_body_position_error_exp",
+    "motion_relative_body_orientation_error_exp",
+    "motion_global_body_lin_vel",
+    "motion_global_body_ang_vel",
+    "object_global_ref_position_error_exp",
+    "object_global_ref_orientation_error_exp",
+}
+
+
+def _hybrid_stage2_tracking_term(term: RewardTermCfg) -> RewardTermCfg:
+    return RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:hybrid_stage2_tracking_reward",
+        params={
+            "reward_func": term.func.rsplit(":", 1)[-1],
+            "reward_params": dict(term.params),
+        },
+        weight=term.weight,
+        tags=[*term.tags, "hybrid_stage2_tracking"],
+    )
+
+
+def _hybrid_velocity_tracking_term(term: RewardTermCfg) -> RewardTermCfg:
+    return RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:hybrid_velocity_tracking_reward",
+        params={
+            "reward_func": term.func.rsplit(":", 1)[-1],
+            "reward_params": dict(term.params),
+        },
+        weight=term.weight,
+        tags=[*term.tags, "hybrid_velocity_tracking"],
+    )
+
+
+g1_29dof_wbt_reward_w_object_hybrid_stage2 = RewardManagerCfg(
+    terms={
+        **{
+            name: (
+                _hybrid_stage2_tracking_term(term)
+                if name in _FORWARD_AFTER_LIFT_TRACKING_TERM_NAMES
+                else term
+            )
+            for name, term in (
+                g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance.terms.items()
+            )
+        },
+        "hybrid_task_forward_velocity": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_forward_velocity_exp",
+            params={"target_velocity": 0.5, "sigma": 0.25},
+            weight=2.5,
+            tags=["hybrid_stage2_task", "straight_line"],
+        ),
+        "hybrid_task_lateral_velocity": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_lateral_velocity_exp",
+            params={"sigma": 0.20},
+            weight=1.0,
+            tags=["hybrid_stage2_task", "straight_line"],
+        ),
+        "hybrid_task_heading": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_heading_error_exp",
+            params={"sigma": 0.25},
+            weight=2.0,
+            tags=["hybrid_stage2_task", "straight_line"],
+        ),
+        "hybrid_task_cross_track": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_cross_track_error_exp",
+            params={"sigma": 0.15},
+            weight=2.0,
+            tags=["hybrid_stage2_task", "straight_line"],
+        ),
+        "hybrid_task_yaw_rate": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_yaw_rate_exp",
+            params={"sigma": 0.30},
+            weight=1.0,
+            tags=["hybrid_stage2_task", "straight_line"],
+        ),
+        "hybrid_task_object_position_hold": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_object_position_hold_exp",
+            params={"sigma": 0.12},
+            weight=2.0,
+            tags=["hybrid_stage2_task", "object_hold"],
+        ),
+        "hybrid_task_object_orientation_hold": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_stage2_object_orientation_hold_exp",
+            params={"sigma": 0.35},
+            weight=0.5,
+            tags=["hybrid_stage2_task", "object_hold"],
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact = RewardManagerCfg(
+    terms={
+        **g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance.terms,
+        "offline_contact_guidance": replace(
+            g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance.terms[
+                "offline_contact_guidance"
+            ],
+            weight=0.0,
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_hybrid_velocity = RewardManagerCfg(
+    terms={
+        **{
+            name: (
+                _hybrid_velocity_tracking_term(term)
+                if name in _FORWARD_AFTER_LIFT_TRACKING_TERM_NAMES
+                else term
+            )
+            for name, term in (
+                g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact.terms.items()
+            )
+        },
+        "hybrid_velocity_lift_progress": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_lift_progress",
+            weight=2.0,
+            tags=["hybrid_velocity_task", "pickup"],
+        ),
+        "hybrid_velocity_forward": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_forward_velocity_exp",
+            params={"sigma": 0.25},
+            weight=2.0,
+            tags=["hybrid_velocity_task", "command_tracking"],
+        ),
+        "hybrid_velocity_lateral": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_lateral_velocity_exp",
+            params={"sigma": 0.20},
+            weight=0.75,
+            tags=["hybrid_velocity_task", "command_tracking"],
+        ),
+        "hybrid_velocity_heading": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_heading_error_exp",
+            params={"sigma": 0.25},
+            weight=1.0,
+            tags=["hybrid_velocity_task", "straight_line"],
+        ),
+        "hybrid_velocity_cross_track": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_cross_track_error_exp",
+            params={"sigma": 0.15},
+            weight=1.0,
+            tags=["hybrid_velocity_task", "straight_line"],
+        ),
+        "hybrid_velocity_yaw_rate": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_yaw_rate_exp",
+            params={"sigma": 0.30},
+            weight=0.5,
+            tags=["hybrid_velocity_task", "command_tracking"],
+        ),
+        "hybrid_velocity_object_position_hold": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_object_position_hold_exp",
+            params={"sigma": 0.12},
+            weight=1.5,
+            tags=["hybrid_velocity_task", "object_hold"],
+        ),
+        "hybrid_velocity_object_orientation_hold": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:hybrid_velocity_object_orientation_hold_exp",
+            params={"sigma": 0.35},
+            weight=0.5,
+            tags=["hybrid_velocity_task", "object_hold"],
+        ),
+    }
+)
+
 g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
     terms={
         "motion_relative_body_position_error_exp": RewardTermCfg(
@@ -610,6 +779,9 @@ __all__ = [
     "g1_29dof_wbt_reward_w_object",
     "g1_29dof_wbt_reward_w_object_generalist",
     "g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance",
+    "g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact",
+    "g1_29dof_wbt_reward_w_object_hybrid_stage2",
+    "g1_29dof_wbt_reward_w_object_hybrid_velocity",
     "g1_29dof_wbt_reward_w_object_r2s_contact_guidance",
     "g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance",
     "g1_29dof_wbt_reward_w_object_extend",

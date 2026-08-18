@@ -29,7 +29,8 @@ reject_launcher_owned_cli_overrides() {
       --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode|\
       --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps|\
-      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg)
+      --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg|\
+      --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active)
         echo "[ERROR] ${option} is launcher-owned and cannot be overridden in forwarded argv/EXTRA_ARGS." >&2
         echo "[ERROR] Set the corresponding launcher environment variable before launch." >&2
         return 2
@@ -81,6 +82,16 @@ case "${EXPORT_ONNX,,}" in
     ;;
 esac
 
+ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE:-False}
+case "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE,,}" in
+  1|true|yes|on) ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True ;;
+  0|false|no|off) ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=False ;;
+  *)
+    echo "[ERROR] ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE must be a boolean. Got: ${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}" >&2
+    exit 2
+    ;;
+esac
+
 CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-contact_interval}
 case "${CONTACT_AWARE_BUTTON_WINDOW_MODE}" in
   contact_interval|kinematic_lift) ;;
@@ -122,8 +133,11 @@ if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
     t1_aligned_segment|segment|segment_30)
       CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=t1_aligned_segment
       ;;
+    precomputed_turn_then_forward)
+      CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
+      ;;
     *)
-      echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error or t1_aligned_segment. Got: ${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" >&2
+      echo "[ERROR] CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE must resolve to tracking_error, t1_aligned_segment, or precomputed_turn_then_forward. Got: ${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" >&2
       exit 2
       ;;
   esac
@@ -1847,6 +1861,7 @@ fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
+echo "[INFO] zero_root_command_when_drop_active=${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
 echo "[INFO] shoo7sr1_near03_debug=${SHOO7SR1_NEAR03_DEBUG}"
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   echo "[INFO] shoo7sr1_obs_variant=${SHOO7SR1_OBS_VARIANT}"
@@ -2084,6 +2099,9 @@ fi
 # on a downstream default would let the audit output and executed policy
 # contract diverge when defaults change.
 EXTRA_DISTILL_ARGS+=(--training.export-onnx="${EXPORT_ONNX}")
+EXTRA_DISTILL_ARGS+=(
+  --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active="${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE}"
+)
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-lin-vel="[0.5, 0.5, 0.2]"

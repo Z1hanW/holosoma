@@ -40,6 +40,9 @@ ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV = (
 POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV = (
     "HOLOSOMA_POLICY_INIT_REQUIRED_TERMINAL_TARGET"
 )
+TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION = (
+    "tracking_error_to_precomputed_turn_then_forward_drop_exclusive_v1"
+)
 
 
 def allow_legacy_unverified_policy_load() -> bool:
@@ -320,6 +323,17 @@ def _contact_aware_command_contract(config: dict[str, Any], ordered_groups: list
         )
     if uses_contact_aware_root_command:
         result["contact_aware_sparse_root_command_mode"] = mode
+        zero_root_when_drop_active = motion_config.get(
+            "zero_root_command_when_drop_active",
+            False,
+        )
+        if type(zero_root_when_drop_active) is not bool:
+            raise ValueError(
+                "command.setup_terms.motion_command.params.motion_config."
+                "zero_root_command_when_drop_active must be boolean, got "
+                f"{zero_root_when_drop_active!r}."
+            )
+        result["zero_root_command_when_drop_active"] = zero_root_when_drop_active
         if mode == "t1_aligned_segment":
             result["contact_aware_sparse_root_segment_steps"] = _json_value(
                 motion_config.get("contact_aware_sparse_root_segment_steps", 30)
@@ -436,6 +450,102 @@ def canonical_actor_contract(config: dict[str, Any]) -> dict[str, Any]:
         "perception": perception,
         "robot_action": robot_action_contract,
         "action_terms": ordered_action_terms,
+    }
+
+
+def canonical_critic_contract(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract the ordered config contract that defines a PPO value function."""
+
+    config = _require_mapping(config, "experiment_config")
+    critic = _require_mapping(
+        _require_path(config, ("algo", "config", "module_dict", "critic")),
+        "algo.config.module_dict.critic",
+    )
+    critic_inputs_raw = _require_path(critic, ("input_dim",))
+    if not isinstance(critic_inputs_raw, (list, tuple)) or not all(
+        isinstance(group, str) and group for group in critic_inputs_raw
+    ):
+        raise ValueError(
+            "Stage-4 critic input_dim must be a non-empty ordered list of observation groups."
+        )
+    critic_inputs = list(critic_inputs_raw)
+    if len(set(critic_inputs)) != len(critic_inputs):
+        raise ValueError(
+            f"Stage-4 critic input_dim contains duplicate groups: {critic_inputs!r}."
+        )
+
+    layer_config = _require_mapping(
+        _require_path(critic, ("layer_config",)),
+        "algo.config.module_dict.critic.layer_config",
+    )
+    perception_key_raw = layer_config.get("perception_input_name", "")
+    if perception_key_raw is None:
+        perception_key_raw = ""
+    if not isinstance(perception_key_raw, str):
+        raise ValueError("Stage-4 critic perception_input_name must be a string or null.")
+    perception_key = perception_key_raw.strip()
+
+    observation = _require_mapping(_require_path(config, ("observation",)), "observation")
+    groups = _require_mapping(_require_path(observation, ("groups",)), "observation.groups")
+    ordered_group_names = list(critic_inputs)
+    if perception_key and perception_key not in ordered_group_names:
+        ordered_group_names.append(perception_key)
+    ordered_groups: list[dict[str, Any]] = []
+    for group_name in ordered_group_names:
+        if group_name not in groups:
+            raise ValueError(
+                f"Stage-4 critic references observation group {group_name!r}, "
+                "but it is missing from config."
+            )
+        ordered_groups.append(_ordered_observation_group(group_name, groups[group_name]))
+
+    algo_config = _require_mapping(_require_path(config, ("algo", "config")), "algo.config")
+    normalization: dict[str, Any] = {}
+    for field in ("normalize_critic_obs", "obs_normalizer_eps", "obs_normalizer_until"):
+        if field not in algo_config:
+            raise ValueError(
+                f"Stage-4 config is missing required critic-contract field algo.config.{field}."
+            )
+        normalization[field] = _json_value(algo_config[field])
+    if not isinstance(normalization["normalize_critic_obs"], bool):
+        raise ValueError("Stage-4 algo.config.normalize_critic_obs must be boolean.")
+    eps = normalization["obs_normalizer_eps"]
+    if isinstance(eps, bool) or not isinstance(eps, (int, float)) or float(eps) <= 0.0:
+        raise ValueError(f"Stage-4 algo.config.obs_normalizer_eps must be positive, got {eps!r}.")
+    until = normalization["obs_normalizer_until"]
+    if until is not None and (type(until) is not int or until < 0):
+        raise ValueError(
+            "Stage-4 algo.config.obs_normalizer_until must be null or a non-negative "
+            f"integer, got {until!r}."
+        )
+    if "clip_observations" not in observation:
+        raise ValueError("Stage-4 config is missing observation.clip_observations.")
+
+    robot = _require_mapping(_require_path(config, ("robot",)), "robot")
+    actions_dim = robot.get("actions_dim")
+    if type(actions_dim) is not int or actions_dim <= 0:
+        raise ValueError(
+            f"Stage-4 robot.actions_dim must be a positive integer, got {actions_dim!r}."
+        )
+    perception = None
+    if perception_key:
+        perception = _canonical_perception_config(
+            config,
+            _require_path(config, ("perception",)),
+        )
+    return {
+        "algorithm": "ppo",
+        "critic_module": _canonical_actor_module(critic, actions_dim=actions_dim),
+        "critic_input_groups": critic_inputs,
+        "observation_groups": ordered_groups,
+        "observation_clip": _json_value(observation["clip_observations"]),
+        "command_observation_semantics": _contact_aware_command_contract(
+            config,
+            ordered_groups,
+        ),
+        "normalization": normalization,
+        "perception_input_name": perception_key,
+        "perception": perception,
     }
 
 
@@ -654,6 +764,102 @@ def _diff(expected: Any, actual: Any, path: str = "") -> list[str]:
     return []
 
 
+def _actor_contract_migration_profile(
+    current_config: dict[str, Any],
+    *,
+    field_name: str = "policy_init_actor_contract_migration",
+) -> str | None:
+    training = _require_mapping(
+        _require_path(current_config, ("training",)),
+        "training",
+    )
+    profile = training.get(field_name)
+    if profile is None:
+        return None
+    if not isinstance(profile, str) or profile != profile.strip() or not profile:
+        raise ValueError(
+            f"training.{field_name} must be null or one "
+            f"non-empty stripped string, got {profile!r}."
+        )
+    if profile != TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION:
+        raise ValueError(
+            f"Unsupported training.{field_name} profile: "
+            f"{profile!r}."
+        )
+    return profile
+
+
+def _apply_explicit_policy_init_actor_contract_migration(
+    saved_contract: dict[str, Any],
+    current_contract: dict[str, Any],
+    *,
+    profile: str,
+) -> None:
+    """Accept one narrowly scoped, user-requested command-input migration.
+
+    The initialized actor keeps the exact tensor layout, observation producer,
+    perception preprocessing, robot/action contract, and normalization.  Only
+    the values carried by the existing root-command slots change from live
+    tracking error to the immutable precomputed turn/forward schedule, while
+    drop becomes exclusive.  Any additional drift remains fail-closed.
+    """
+
+    if profile != TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION:
+        raise AssertionError(f"Unhandled actor-contract migration profile: {profile!r}")
+    saved_command = saved_contract.get("command_observation_semantics")
+    current_command = current_contract.get("command_observation_semantics")
+    if not isinstance(saved_command, dict) or not isinstance(current_command, dict):
+        raise ValueError(
+            f"Policy-init migration {profile!r} requires contact-aware root-command semantics."
+        )
+    expected_source = {
+        "contact_aware_sparse_root_command_mode": "tracking_error",
+        "zero_root_command_when_drop_active": False,
+    }
+    expected_target = {
+        "contact_aware_sparse_root_command_mode": "precomputed_turn_then_forward",
+        "zero_root_command_when_drop_active": True,
+    }
+    for field, expected in expected_source.items():
+        if saved_command.get(field) != expected:
+            raise ValueError(
+                f"Policy-init migration {profile!r} source {field} must be "
+                f"{expected!r}, got {saved_command.get(field)!r}."
+            )
+    for field, expected in expected_target.items():
+        if current_command.get(field) != expected:
+            raise ValueError(
+                f"Policy-init migration {profile!r} target {field} must be "
+                f"{expected!r}, got {current_command.get(field)!r}."
+            )
+
+    migrated = copy.deepcopy(saved_contract)
+    migrated_command = migrated["command_observation_semantics"]
+    for field, value in expected_target.items():
+        migrated_command[field] = value
+    residual_differences = _diff(migrated, current_contract)
+    if residual_differences:
+        preview = "\n  - ".join(residual_differences[:30])
+        suffix = (
+            ""
+            if len(residual_differences) <= 30
+            else f"\n  ... and {len(residual_differences) - 30} more difference(s)"
+        )
+        raise ValueError(
+            f"Policy-init migration {profile!r} permits only the declared root-command "
+            "mode and drop-exclusivity changes; residual actor semantic drift:\n  - "
+            + preview
+            + suffix
+        )
+    print(
+        "[INFO] policy_init_actor_contract_migration_verified "
+        f"profile={profile} "
+        "source_mode=tracking_error target_mode=precomputed_turn_then_forward "
+        "source_drop_exclusive=false target_drop_exclusive=true",
+        flush=True,
+    )
+
+
 def validate_fast_sac_actor_config_identity(
     saved_config: dict[str, Any],
     current_config: dict[str, Any],
@@ -701,6 +907,40 @@ def _validate_normalizer_payload(checkpoint: dict[str, Any], actor_contract: dic
             f"{empty!r}."
         )
     validate_finite_tree(state, path="actor_obs_normalizer_state")
+
+
+def _validate_critic_normalizer_payload(
+    checkpoint: dict[str, Any],
+    critic_contract: dict[str, Any],
+) -> None:
+    normalization = critic_contract["normalization"]
+    if normalization["normalize_critic_obs"] is not True:
+        return
+    state = checkpoint.get("critic_obs_normalizer_state")
+    if not isinstance(state, dict):
+        raise ValueError(
+            "Stage-4 checkpoint enables normalize_critic_obs but "
+            "critic_obs_normalizer_state is missing."
+        )
+    expected_keys = set(critic_contract["critic_input_groups"])
+    actual_keys = set(state)
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "Stage-4 critic_obs_normalizer_state keys do not match critic input groups: "
+            f"missing={sorted(expected_keys - actual_keys)}, "
+            f"extra={sorted(actual_keys - expected_keys)}."
+        )
+    empty = [
+        key
+        for key in critic_contract["critic_input_groups"]
+        if not isinstance(state[key], dict) or not state[key]
+    ]
+    if empty:
+        raise ValueError(
+            "Stage-4 checkpoint has empty critic observation normalizer state for groups "
+            f"{empty!r}."
+        )
+    validate_finite_tree(state, path="critic_obs_normalizer_state")
 
 
 def _fast_sac_actor_args(config: dict[str, Any]) -> dict[str, Any]:
@@ -802,6 +1042,8 @@ def _validate_fast_sac_normalizer_payload(
 def validate_policy_init_payload_identity(
     checkpoint: dict[str, Any],
     current_config: dict[str, Any],
+    *,
+    migration_field_name: str = "policy_init_actor_contract_migration",
 ) -> dict[str, Any]:
     """Prove the semantic actor contract of an already authenticated payload.
 
@@ -839,7 +1081,24 @@ def validate_policy_init_payload_identity(
     actor_state = require_mapping(checkpoint, actor_state_key)
     validate_finite_tree(actor_state, path=actor_state_key)
 
+    migration_profile = _actor_contract_migration_profile(
+        current_config,
+        field_name=migration_field_name,
+    )
     differences = _diff(saved_contract, current_contract)
+    if differences:
+        if saved_kind == "ppo" and migration_profile is not None:
+            _apply_explicit_policy_init_actor_contract_migration(
+                saved_contract,
+                current_contract,
+                profile=migration_profile,
+            )
+            differences = []
+    elif migration_profile is not None:
+        raise ValueError(
+            f"training.{migration_field_name} is set, but the checkpoint "
+            "and current actor semantic contracts are already identical."
+        )
     if differences:
         preview = "\n  - ".join(differences[:30])
         suffix = (
@@ -857,6 +1116,54 @@ def validate_policy_init_payload_identity(
     else:
         _validate_fast_sac_normalizer_payload(checkpoint, saved_contract)
     return saved_contract
+
+
+def validate_stage4_init_payload_identity(
+    checkpoint: dict[str, Any],
+    current_config: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the actor and critic functions restored by a Stage-4 warm start."""
+
+    actor_contract = validate_policy_init_payload_identity(
+        checkpoint,
+        current_config,
+        migration_field_name="stage4_init_contract_migration",
+    )
+    saved_config = checkpoint.get("experiment_config")
+    if not isinstance(saved_config, dict):
+        raise ValueError("Stage-4 checkpoint has no serialized experiment_config.")
+    if _policy_algorithm_kind(saved_config) != "ppo" or _policy_algorithm_kind(current_config) != "ppo":
+        raise ValueError("Stage-4 actor+critic initialization currently supports PPO checkpoints only.")
+    critic_state = require_mapping(checkpoint, "critic_model_state_dict")
+    validate_finite_tree(critic_state, path="critic_model_state_dict")
+    saved_contract = canonical_critic_contract(saved_config)
+    current_contract = canonical_critic_contract(current_config)
+    differences = _diff(saved_contract, current_contract)
+    migration_profile = _actor_contract_migration_profile(
+        current_config,
+        field_name="stage4_init_contract_migration",
+    )
+    if differences and migration_profile is not None:
+        _apply_explicit_policy_init_actor_contract_migration(
+            saved_contract,
+            current_contract,
+            profile=migration_profile,
+        )
+        differences = []
+    if differences:
+        preview = "\n  - ".join(differences[:30])
+        suffix = (
+            ""
+            if len(differences) <= 30
+            else f"\n  ... and {len(differences) - 30} more difference(s)"
+        )
+        raise ValueError(
+            "Stage-4 critic semantic contract mismatch; equal tensor shapes are not sufficient:\n  - "
+            + preview
+            + suffix
+        )
+    _validate_critic_normalizer_payload(checkpoint, saved_contract)
+    return actor_contract, saved_contract
 
 
 def validate_policy_init_terminal_source_payload(
@@ -1029,20 +1336,80 @@ def validate_policy_init_checkpoint(
     )
 
 
+def validate_stage4_init_checkpoint(
+    checkpoint_path: Path,
+    current_config: dict[str, Any],
+    *,
+    current_provenance: dict[str, Any] | None = None,
+) -> None:
+    """Authenticate and validate an actor+critic fresh-lineage initializer."""
+
+    legacy_unverified_policy_load = allow_legacy_unverified_policy_load()
+    checkpoint_path = Path(os.path.abspath(os.fspath(checkpoint_path.expanduser())))
+    expected_sha256: str | None = None
+    if current_provenance is not None:
+        current_provenance = validate_training_provenance(
+            current_provenance,
+            require_finalized=True,
+        )
+        if current_provenance.get("stage4_init_enabled") is not True:
+            raise ValueError("Current training provenance does not enable Stage-4 initialization.")
+        expected_sha256 = current_provenance["stage4_init_sha256"]
+    elif not legacy_unverified_policy_load:
+        raise ValueError(
+            "Scientific Stage-4 initialization requires finalized current training provenance "
+            "with an authenticated stage4_init_sha256. Set "
+            f"{ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV}=1 only for an explicitly "
+            "non-scientific legacy warm start."
+        )
+    checkpoint, _actual_sha256 = load_verified_torch_checkpoint(
+        checkpoint_path,
+        expected_sha256=expected_sha256,
+        map_location="cpu",
+    )
+    actor_contract, critic_contract = validate_stage4_init_payload_identity(
+        checkpoint,
+        current_config,
+    )
+    print(
+        "[INFO] stage4_init_preflight_verified "
+        f"checkpoint={checkpoint_path} "
+        f"actor_inputs={actor_contract['actor_input_groups']} "
+        f"critic_inputs={critic_contract['critic_input_groups']} "
+        f"normalize_actor_obs={actor_contract['normalization']['normalize_actor_obs']} "
+        f"normalize_critic_obs={critic_contract['normalization']['normalize_critic_obs']}",
+        flush=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--current-provenance-json")
     parser.add_argument("--require-terminal-target", type=int)
+    parser.add_argument(
+        "--load-mode",
+        choices=("policy_init", "stage4_init"),
+        default="policy_init",
+    )
     args = parser.parse_args()
     current_config = json.load(sys.stdin)
     current_provenance = parse_training_provenance(args.current_provenance_json)
-    validate_policy_init_checkpoint(
-        args.checkpoint,
-        current_config,
-        current_provenance=current_provenance,
-        required_terminal_target=args.require_terminal_target,
-    )
+    if args.load_mode == "stage4_init":
+        if args.require_terminal_target is not None:
+            raise ValueError("--require-terminal-target is only valid for actor-only policy init.")
+        validate_stage4_init_checkpoint(
+            args.checkpoint,
+            current_config,
+            current_provenance=current_provenance,
+        )
+    else:
+        validate_policy_init_checkpoint(
+            args.checkpoint,
+            current_config,
+            current_provenance=current_provenance,
+            required_terminal_target=args.require_terminal_target,
+        )
 
 
 if __name__ == "__main__":

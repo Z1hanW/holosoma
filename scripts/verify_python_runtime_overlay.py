@@ -528,6 +528,8 @@ def verify_distribution_closure(
     try:
         import attrs
         import numpy
+        import onnx
+        import onnxruntime
         from omegaconf import OmegaConf
         import omegaconf
     except Exception as exc:
@@ -538,6 +540,8 @@ def verify_distribution_closure(
         ("attrs", attrs),
         ("numpy", numpy),
         ("omegaconf", omegaconf),
+        ("onnx", onnx),
+        ("onnxruntime", onnxruntime),
     ):
         module_file = getattr(module, "__file__", None)
         if not isinstance(module_file, str) or not _inside(Path(module_file).resolve(), root):
@@ -563,6 +567,30 @@ def verify_distribution_closure(
         )
     if float(numpy.dot(numpy.asarray([1.0, 2.0]), numpy.asarray([3.0, 4.0]))) != 11.0:
         raise OverlayVerificationError("NumPy scientific runtime smoke produced the wrong result")
+    try:
+        model = onnx.helper.make_model(
+            onnx.helper.make_graph(
+                [onnx.helper.make_node("Identity", ["input"], ["output"])],
+                "holosoma-runtime-smoke",
+                [onnx.helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1, 2])],
+                [onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1, 2])],
+            ),
+            opset_imports=[onnx.helper.make_opsetid("", 17)],
+            ir_version=9,
+        )
+        onnx.checker.check_model(model)
+        session = onnxruntime.InferenceSession(
+            model.SerializeToString(),
+            providers=["CPUExecutionProvider"],
+        )
+        expected = numpy.asarray([[1.25, -2.5]], dtype=numpy.float32)
+        outputs = session.run(None, {"input": expected})
+    except Exception as exc:
+        raise OverlayVerificationError(
+            f"ONNX checker/runtime smoke failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    if len(outputs) != 1 or not numpy.array_equal(outputs[0], expected):
+        raise OverlayVerificationError("ONNX Runtime scientific smoke produced the wrong result")
     config = OmegaConf.create({"base": 3, "resolved": "${base}"})
     resolved = OmegaConf.to_container(config, resolve=True)
     if not isinstance(resolved, dict) or resolved.get("resolved") != 3:
