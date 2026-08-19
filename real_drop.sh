@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
-default_model_path="wandb://zihanw22/carry-any/oosdgi7q/model_40000.onnx"
+default_model_path="wandb://zihanw22/carry-any/xxr6at37/latest"
 model_path="${HOLOSOMA_REAL_MODEL_PATH:-$default_model_path}"
 
 log_dir="${ROOT_DIR}/logs/real_drop_$(date +%Y%m%d_%H%M%S)"
