@@ -6,7 +6,11 @@ import torch
 
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.managers.termination.terms.common import timeout_exceeded
-from holosoma.managers.termination.terms.wbt import BadTracking
+from holosoma.managers.termination.terms.wbt import (
+    BadTracking,
+    BadTrackingAllPositionZOnly,
+    BadTrackingZOnly,
+)
 
 
 def test_timeout_triggers_at_configured_control_step_horizon() -> None:
@@ -125,3 +129,19 @@ def test_termination_logs_bad_tracking_component_fractions() -> None:
     assert env.log_dict[
         "termination/bad_tracking/condition_object_position_frac"
     ].item() == 0.5
+
+
+def test_all_position_z_only_ignores_object_xy_error() -> None:
+    legacy = object.__new__(BadTrackingZOnly)
+    all_z = object.__new__(BadTrackingAllPositionZOnly)
+    legacy.bad_object_pos_threshold = 0.5
+    all_z.bad_object_pos_threshold = 0.5
+    command = SimpleNamespace(
+        object_pos_w=torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
+        simulator_object_pos_w=torch.tensor(
+            [[0.8, 0.0, 1.0], [0.0, 0.0, 1.6]]
+        ),
+    )
+
+    assert torch.equal(legacy.bad_object_pos(command), torch.tensor([True, True]))
+    assert torch.equal(all_z.bad_object_pos(command), torch.tensor([False, True]))

@@ -73,6 +73,23 @@ g1_29dof_wbt_termination_generalist_z_only = TerminationManagerCfg(
     }
 )
 
+g1_29dof_wbt_termination_generalist_all_position_z_only = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination.terms,
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination.terms["bad_tracking"],
+            func=(
+                "holosoma.managers.termination.terms.wbt:"
+                "BadTrackingAllPositionZOnly"
+            ),
+        ),
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+            is_timeout=False,
+        ),
+    }
+)
+
 g1_29dof_wbt_termination_hybrid_stage2 = TerminationManagerCfg(
     terms={
         **g1_29dof_wbt_termination_generalist.terms,
@@ -153,6 +170,7 @@ __all__ = [
     "g1_29dof_wbt_termination",
     "g1_29dof_wbt_termination_generalist",
     "g1_29dof_wbt_termination_generalist_z_only",
+    "g1_29dof_wbt_termination_generalist_all_position_z_only",
     "g1_29dof_wbt_termination_hybrid_stage2",
     "g1_29dof_wbt_termination_hybrid_velocity",
     "g1_29dof_wbt_termination_distill",
