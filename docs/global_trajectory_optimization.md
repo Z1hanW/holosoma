@@ -242,9 +242,10 @@ Until those gates pass, the existing strict Clarabel path remains authoritative.
 
 `scripts/run_prism_trajectory_batch.py` runs the geometric and dynamics
 stages over a staging directory. It deduplicates inputs by the sequence stored
-inside each NPZ, assigns one serial worker to each requested GPU, writes an
-independent status and log tree per sequence, and rebuilds `summary.json` and
-`summary.csv` after every completion. Existing accepted results are resumable.
+inside each NPZ, pipelines CPU geometric work ahead of each requested GPU,
+serializes dynamics solves with a per-GPU lock, writes an independent status
+and log tree per sequence, and rebuilds `summary.json` and `summary.csv` after
+every completion. Existing accepted results are resumable.
 
 The real geometric batch path ranks every seed-bank trajectory using
 object-frame keypoint and contact-wrist error. It exact-collision-audits the

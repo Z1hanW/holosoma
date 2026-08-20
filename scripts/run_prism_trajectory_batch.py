@@ -281,6 +281,7 @@ def run_sequence(
     args: argparse.Namespace,
     repo_root: Path,
     gpu: int,
+    gpu_lock: threading.Lock,
 ) -> dict:
     sequence = item["sequence"]
     sequence_root = args.output_root / "sequences" / sequence
@@ -408,11 +409,12 @@ def run_sequence(
                 command[3] = str(report_path.parent / "result.npz")
                 resume_root = dynamics_root / f"resume_after_{completed_iterations:02d}"
                 command[5] = str(resume_root)
-            run_command(
-                command,
-                env=env,
-                log=dynamics_root / "driver.log",
-            )
+            with gpu_lock:
+                run_command(
+                    command,
+                    env=env,
+                    log=dynamics_root / "driver.log",
+                )
 
         dynamics_paths = dynamics_report_paths(dynamics_root)
         dynamics = [read_json(path) for path in dynamics_paths]
@@ -452,6 +454,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
+    parser.add_argument("--workers-per-gpu", type=int, default=2)
     parser.add_argument("--sequence", action="append", default=[])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--manifest-only", action="store_true")
@@ -489,6 +492,8 @@ def main() -> int:
     gpus = [int(value) for value in args.gpus.split(",") if value.strip()]
     if not gpus:
         raise ValueError("--gpus must name at least one device")
+    if args.workers_per_gpu <= 0:
+        raise ValueError("--workers-per-gpu must be positive")
     manifest = discover_inputs(args.staging_root)
     if args.sequence:
         selected = set(args.sequence)
@@ -515,7 +520,11 @@ def main() -> int:
         return 0
 
     summary_lock = threading.Lock()
-    executors = [ThreadPoolExecutor(max_workers=1) for _ in gpus]
+    executors = [
+        ThreadPoolExecutor(max_workers=args.workers_per_gpu)
+        for _ in gpus
+    ]
+    gpu_locks = [threading.Lock() for _ in gpus]
     try:
         futures = {
             executors[index % len(gpus)].submit(
@@ -524,6 +533,7 @@ def main() -> int:
                 args=args,
                 repo_root=repo_root,
                 gpu=gpus[index % len(gpus)],
+                gpu_lock=gpu_locks[index % len(gpus)],
             ): item
             for index, item in enumerate(manifest)
         }
