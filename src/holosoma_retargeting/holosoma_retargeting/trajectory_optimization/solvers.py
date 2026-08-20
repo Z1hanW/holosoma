@@ -38,6 +38,9 @@ class TorchADMMSettings:
     pcg_max_iterations: int = 500
     pcg_relative_tolerance: float = 1e-7
     adaptive_rho_interval: int = 25
+    relaxation: float = 1.6
+    adaptive_rho_tolerance: float = 5.0
+    max_solve_time_s: float | None = 30.0
     verbose: bool = False
 
 
@@ -173,6 +176,11 @@ class TorchSparseADMMSolver:
         sigma = float(settings.sigma)
         if rho <= 0.0 or sigma <= 0.0:
             raise ValueError("rho and sigma must be positive")
+        if (
+            settings.max_solve_time_s is not None
+            and settings.max_solve_time_s <= 0.0
+        ):
+            raise ValueError("max_solve_time_s must be positive or None")
 
         if problem.constraint_count:
             ax = _sparse_matvec(constraints, x)
@@ -272,6 +280,13 @@ class TorchSparseADMMSolver:
                     f"dual={dual_norm:.3e} rho={rho:.3e} pcg={pcg_iterations} "
                     f"pcg_residual={pcg_residual:.3e}"
                 )
+            if (
+                settings.max_solve_time_s is not None
+                and time.perf_counter() - started
+                >= settings.max_solve_time_s
+            ):
+                status = "time limit reached"
+                break
 
         if device.startswith("cuda"):
             torch.cuda.synchronize(device)
@@ -290,6 +305,240 @@ class TorchSparseADMMSolver:
                 "dual_residual_inf": dual_norm,
                 "rho": rho,
                 "pcg_iterations": total_pcg_iterations,
+                "hessian_nnz": problem.hessian.nnz,
+                "constraint_nnz": problem.constraint_matrix.nnz,
+            },
+        )
+
+
+class CuPySparseDirectADMMSolver:
+    """Sparse ADMM with one CPU LU factorization and GPU triangular solves."""
+
+    def __init__(
+        self,
+        *,
+        settings: TorchADMMSettings | None = None,
+    ) -> None:
+        self.settings = TorchADMMSettings() if settings is None else settings
+
+    def solve(
+        self,
+        problem: SparseQuadraticProblem,
+        warm_start: np.ndarray | None = None,
+    ) -> SolveResult:
+        import cupy as cp
+        import cupyx.scipy.sparse as csp
+        import cupyx.scipy.sparse.linalg as csl
+
+        settings = self.settings
+        if settings.rho <= 0.0 or settings.sigma <= 0.0:
+            raise ValueError("rho and sigma must be positive")
+        if not 0.0 < settings.relaxation < 2.0:
+            raise ValueError("relaxation must be between zero and two")
+        if settings.adaptive_rho_interval < 0:
+            raise ValueError("adaptive_rho_interval must be nonnegative")
+        if settings.adaptive_rho_tolerance <= 1.0:
+            raise ValueError("adaptive_rho_tolerance must exceed one")
+        if (
+            settings.max_solve_time_s is not None
+            and settings.max_solve_time_s <= 0.0
+        ):
+            raise ValueError("max_solve_time_s must be positive or None")
+        started = time.perf_counter()
+        hessian = csp.csr_matrix(problem.hessian)
+        constraints = csp.csr_matrix(problem.constraint_matrix)
+        constraints_t = constraints.T.tocsr()
+        gradient = cp.asarray(problem.gradient)
+        lower = cp.asarray(problem.lower)
+        upper = cp.asarray(problem.upper)
+        initial_rho = float(settings.rho)
+        rho = initial_rho
+        sigma = float(settings.sigma)
+        regularized_hessian = hessian + sigma * csp.eye(
+            problem.variable_count,
+            format="csr",
+        )
+        constraint_normal = None
+        if problem.constraint_count:
+            constraint_normal = constraints_t @ constraints
+            constraint_normal.sum_duplicates()
+
+        factorization_time = 0.0
+        refactorizations = 0
+
+        def factorize(current_rho: float):
+            nonlocal factorization_time, refactorizations
+            matrix = regularized_hessian
+            if constraint_normal is not None:
+                matrix = matrix + current_rho * constraint_normal
+            matrix.sum_duplicates()
+            factor_started = time.perf_counter()
+            solve = csl.factorized(matrix.tocsc())
+            factorization_time += time.perf_counter() - factor_started
+            refactorizations += 1
+            return matrix, solve
+
+        normal_matrix, linear_solve = factorize(rho)
+
+        if warm_start is None:
+            x = cp.zeros(problem.variable_count, dtype=cp.float64)
+        else:
+            warm_start = np.asarray(warm_start, dtype=np.float64).reshape(-1)
+            if warm_start.shape != (problem.variable_count,):
+                raise ValueError("warm_start shape disagrees with problem")
+            x = cp.asarray(warm_start)
+        if problem.constraint_count:
+            ax = constraints @ x
+            z = cp.clip(ax, lower, upper)
+            scaled_dual = cp.zeros_like(z)
+        else:
+            ax = z = scaled_dual = cp.empty(0, dtype=cp.float64)
+
+        status = "maximum iterations reached"
+        primal_norm = dual_norm = np.inf
+        completed_iterations = 0
+        for iteration in range(1, settings.max_iterations + 1):
+            previous_x = x
+            previous_z = z.copy()
+            rhs = -gradient + sigma * previous_x
+            if problem.constraint_count:
+                rhs = rhs + rho * (
+                    constraints_t @ (z - scaled_dual)
+                )
+            x = linear_solve(rhs)
+            completed_iterations = iteration
+
+            if not problem.constraint_count:
+                stationarity = hessian @ x + gradient
+                primal_norm = 0.0
+                dual_norm = float(
+                    cp.linalg.norm(stationarity, ord=cp.inf).item()
+                )
+                threshold = settings.absolute_tolerance
+                threshold += settings.relative_tolerance * max(
+                    float(cp.linalg.norm(gradient, ord=cp.inf).item()),
+                    float(
+                        cp.linalg.norm(
+                            hessian @ x,
+                            ord=cp.inf,
+                        ).item()
+                    ),
+                )
+                if dual_norm <= threshold:
+                    status = "optimal"
+                    break
+            else:
+                ax = constraints @ x
+                relaxed_ax = (
+                    settings.relaxation * ax
+                    + (1.0 - settings.relaxation) * previous_z
+                )
+                z = cp.clip(relaxed_ax + scaled_dual, lower, upper)
+                scaled_dual = scaled_dual + relaxed_ax - z
+                primal = ax - z
+                hessian_x = hessian @ x
+                dual_reference = rho * (
+                    constraints_t @ scaled_dual
+                )
+                dual = hessian_x + gradient + dual_reference
+                primal_norm = float(
+                    cp.linalg.norm(primal, ord=cp.inf).item()
+                )
+                dual_norm = float(
+                    cp.linalg.norm(dual, ord=cp.inf).item()
+                )
+                primal_tolerance = settings.absolute_tolerance
+                primal_tolerance += settings.relative_tolerance * max(
+                    float(cp.linalg.norm(ax, ord=cp.inf).item()),
+                    float(cp.linalg.norm(z, ord=cp.inf).item()),
+                )
+                dual_tolerance = settings.absolute_tolerance
+                dual_tolerance += settings.relative_tolerance * max(
+                    float(cp.linalg.norm(hessian_x, ord=cp.inf).item()),
+                    float(cp.linalg.norm(gradient, ord=cp.inf).item()),
+                    float(
+                        cp.linalg.norm(
+                            dual_reference,
+                            ord=cp.inf,
+                        ).item()
+                    ),
+                )
+                if (
+                    primal_norm <= primal_tolerance
+                    and dual_norm <= dual_tolerance
+                ):
+                    status = "optimal"
+                    break
+                interval = settings.adaptive_rho_interval
+                if interval > 0 and iteration % interval == 0:
+                    scaled_primal = primal_norm / max(
+                        primal_tolerance,
+                        1e-16,
+                    )
+                    scaled_dual_residual = dual_norm / max(
+                        dual_tolerance,
+                        1e-16,
+                    )
+                    ratio = scaled_primal / max(
+                        scaled_dual_residual,
+                        1e-16,
+                    )
+                    tolerance = settings.adaptive_rho_tolerance
+                    if ratio > tolerance or ratio < 1.0 / tolerance:
+                        old_rho = rho
+                        rho *= float(np.sqrt(ratio))
+                        rho = float(
+                            np.clip(
+                                rho,
+                                old_rho / tolerance,
+                                old_rho * tolerance,
+                            )
+                        )
+                        rho = float(np.clip(rho, 1e-6, 1e6))
+                        if not np.isclose(rho, old_rho, rtol=0.05):
+                            scaled_dual *= old_rho / rho
+                            normal_matrix, linear_solve = factorize(rho)
+            if (
+                settings.max_solve_time_s is not None
+                and time.perf_counter() - started
+                >= settings.max_solve_time_s
+            ):
+                status = "time limit reached"
+                break
+            if settings.verbose and (
+                iteration == 1 or iteration % 100 == 0
+            ):
+                print(
+                    f"[cupy-direct-admm] iter={iteration} "
+                    f"primal={primal_norm:.3e} "
+                    f"dual={dual_norm:.3e}"
+                )
+
+        cp.cuda.Stream.null.synchronize()
+        solution = cp.asnumpy(x)
+        elapsed = time.perf_counter() - started
+        return SolveResult(
+            solution=solution,
+            status=status,
+            iterations=completed_iterations,
+            solve_time_s=elapsed,
+            objective=problem.objective(solution),
+            max_constraint_violation=(
+                problem.max_constraint_violation(solution)
+            ),
+            backend="cupy-sparse-direct-admm:cuda",
+            diagnostics={
+                "primal_residual_inf": primal_norm,
+                "dual_residual_inf": dual_norm,
+                "initial_rho": initial_rho,
+                "rho": rho,
+                "relaxation": settings.relaxation,
+                "completed_iterations": completed_iterations,
+                "factorization_time_s": factorization_time,
+                "refactorizations": refactorizations,
+                "normal_matrix_nnz": int(normal_matrix.nnz),
+                "factorization": "CPU SuperLU",
+                "triangular_solves": "GPU cuSPARSE",
                 "hessian_nnz": problem.hessian.nnz,
                 "constraint_nnz": problem.constraint_matrix.nnz,
             },
@@ -368,6 +617,110 @@ class OSQPSolver:
         )
 
 
+class ProxQPSolver:
+    """Sparse proximal QP backend for equality-heavy problems."""
+
+    def __init__(
+        self,
+        *,
+        absolute_tolerance: float = 1e-6,
+        relative_tolerance: float = 1e-6,
+        max_iterations: int = 1_000,
+        verbose: bool = False,
+    ) -> None:
+        self.absolute_tolerance = absolute_tolerance
+        self.relative_tolerance = relative_tolerance
+        self.max_iterations = max_iterations
+        self.verbose = verbose
+
+    def solve(
+        self,
+        problem: SparseQuadraticProblem,
+        warm_start: np.ndarray | None = None,
+    ) -> SolveResult:
+        from proxsuite import proxqp
+
+        equality_mask = (
+            np.isfinite(problem.lower)
+            & np.isfinite(problem.upper)
+            & np.isclose(
+                problem.lower,
+                problem.upper,
+                atol=1e-12,
+                rtol=0.0,
+            )
+        )
+        inequality_mask = ~equality_mask
+        equality_matrix = problem.constraint_matrix[equality_mask].tocsc()
+        equality_target = problem.lower[equality_mask]
+        inequality_matrix = problem.constraint_matrix[inequality_mask].tocsc()
+        inequality_lower = problem.lower[inequality_mask]
+        inequality_upper = problem.upper[inequality_mask]
+        solver = proxqp.sparse.QP(
+            problem.variable_count,
+            equality_matrix.shape[0],
+            inequality_matrix.shape[0],
+        )
+        solver.settings.eps_abs = self.absolute_tolerance
+        solver.settings.eps_rel = self.relative_tolerance
+        solver.settings.max_iter = self.max_iterations
+        solver.settings.verbose = self.verbose
+        solver.settings.compute_timings = True
+        started = time.perf_counter()
+        solver.init(
+            problem.hessian.tocsc(),
+            problem.gradient,
+            equality_matrix,
+            equality_target,
+            inequality_matrix,
+            inequality_lower,
+            inequality_upper,
+        )
+        if warm_start is None:
+            solver.solve()
+        else:
+            warm_start = np.asarray(warm_start, dtype=np.float64).reshape(-1)
+            if warm_start.shape != (problem.variable_count,):
+                raise ValueError("warm_start shape disagrees with problem")
+            solver.solve(
+                warm_start,
+                np.zeros(equality_matrix.shape[0]),
+                np.zeros(inequality_matrix.shape[0]),
+            )
+        elapsed = time.perf_counter() - started
+        solution = np.asarray(solver.results.x, dtype=np.float64)
+        raw_status = str(solver.results.info.status)
+        success = raw_status.endswith("PROXQP_SOLVED")
+        status = "optimal" if success else raw_status.lower()
+        objective = (
+            problem.objective(solution)
+            if np.isfinite(solution).all()
+            else np.inf
+        )
+        violation = (
+            problem.max_constraint_violation(solution)
+            if np.isfinite(solution).all()
+            else np.inf
+        )
+        return SolveResult(
+            solution=solution,
+            status=status,
+            iterations=int(solver.results.info.iter),
+            solve_time_s=elapsed,
+            objective=objective,
+            max_constraint_violation=violation,
+            backend="proxqp:cpu",
+            diagnostics={
+                "primal_residual": float(solver.results.info.pri_res),
+                "dual_residual": float(solver.results.info.dua_res),
+                "equality_rows": equality_matrix.shape[0],
+                "inequality_rows": inequality_matrix.shape[0],
+                "hessian_nnz": problem.hessian.nnz,
+                "constraint_nnz": problem.constraint_matrix.nnz,
+            },
+        )
+
+
 class AutoSparseSolver:
     """Route small QPs to OSQP and large QPs to CUDA with CPU fallback."""
 
@@ -376,6 +729,7 @@ class AutoSparseSolver:
         *,
         gpu_minimum_variables: int = 20_000,
         gpu_settings: TorchADMMSettings | None = None,
+        gpu_maximum_equality_fraction: float = 0.2,
         fallback_to_osqp: bool = True,
     ) -> None:
         if gpu_minimum_variables <= 0:
@@ -383,6 +737,13 @@ class AutoSparseSolver:
         self.gpu_minimum_variables = int(gpu_minimum_variables)
         self.gpu_settings = (
             TorchADMMSettings() if gpu_settings is None else gpu_settings
+        )
+        if not 0.0 <= gpu_maximum_equality_fraction <= 1.0:
+            raise ValueError(
+                "gpu_maximum_equality_fraction must be between zero and one"
+            )
+        self.gpu_maximum_equality_fraction = float(
+            gpu_maximum_equality_fraction
         )
         self.fallback_to_osqp = fallback_to_osqp
 
@@ -407,23 +768,59 @@ class AutoSparseSolver:
         problem: SparseQuadraticProblem,
         warm_start: np.ndarray | None = None,
     ) -> SolveResult:
+        finite_equalities = (
+            np.isfinite(problem.lower)
+            & np.isfinite(problem.upper)
+            & np.isclose(
+                problem.lower,
+                problem.upper,
+                atol=1e-12,
+                rtol=0.0,
+            )
+        )
+        equality_fraction = (
+            float(np.mean(finite_equalities))
+            if problem.constraint_count
+            else 0.0
+        )
         use_gpu = (
             problem.variable_count >= self.gpu_minimum_variables
+            and equality_fraction <= self.gpu_maximum_equality_fraction
             and self._cuda_available()
         )
         if not use_gpu:
-            reason = (
-                "problem below GPU crossover threshold"
-                if problem.variable_count < self.gpu_minimum_variables
-                else "CUDA unavailable"
-            )
-            result = self._cpu_solver().solve(problem, warm_start)
+            if problem.variable_count < self.gpu_minimum_variables:
+                reason = "problem below GPU crossover threshold"
+            elif equality_fraction > self.gpu_maximum_equality_fraction:
+                reason = "equality-heavy problem routed to sparse CPU solver"
+            else:
+                reason = "CUDA unavailable"
+            if equality_fraction > self.gpu_maximum_equality_fraction:
+                try:
+                    result = ProxQPSolver(
+                        absolute_tolerance=(
+                            self.gpu_settings.absolute_tolerance
+                        ),
+                        relative_tolerance=(
+                            self.gpu_settings.relative_tolerance
+                        ),
+                        max_iterations=1_000,
+                    ).solve(problem, warm_start)
+                except ImportError:
+                    reason += "; ProxQP unavailable"
+                    result = self._cpu_solver().solve(
+                        problem,
+                        warm_start,
+                    )
+            else:
+                result = self._cpu_solver().solve(problem, warm_start)
             return SolveResult(
                 **{
                     **result.__dict__,
                     "diagnostics": {
                         **result.diagnostics,
                         "auto_selection": reason,
+                        "equality_fraction": equality_fraction,
                     },
                 }
             )
@@ -460,6 +857,7 @@ class AutoSparseSolver:
                     "diagnostics": {
                         **gpu_result.diagnostics,
                         "auto_selection": "problem above GPU crossover threshold",
+                        "equality_fraction": equality_fraction,
                     },
                 }
             )
@@ -476,6 +874,7 @@ class AutoSparseSolver:
                         gpu_result.max_constraint_violation
                     ),
                     "gpu_solve_time_s": gpu_result.solve_time_s,
+                    "equality_fraction": equality_fraction,
                 },
             }
         )

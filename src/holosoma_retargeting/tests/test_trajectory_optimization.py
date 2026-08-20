@@ -6,15 +6,21 @@ import mujoco
 
 from holosoma_retargeting.trajectory_optimization import (
     AutoSparseSolver,
+    CuPySparseDirectADMMSolver,
     LinearDynamics,
+    MujocoObjectFrameKinematics,
+    MujocoTrajectoryCollision,
+    MujocoTrajectoryDynamicsAuditor,
     MujocoDynamicsLinearizer,
     MujocoNominalTrajectory,
     OSQPSolver,
+    ProxQPSolver,
     SparseQuadraticBuilder,
     TorchADMMSettings,
     TorchSparseADMMSolver,
     WholeTrajectoryProblem,
     WholeTrajectorySpec,
+    decode_object_poses,
     piecewise_linear_scale_basis,
 )
 
@@ -45,6 +51,35 @@ def test_sparse_admm_solves_box_qp() -> None:
     assert result.max_constraint_violation < 2e-6
 
 
+def test_cupy_direct_admm_solves_box_qp() -> None:
+    cupy = pytest.importorskip("cupy")
+    if cupy.cuda.runtime.getDeviceCount() == 0:
+        pytest.skip("CUDA is unavailable")
+    builder = SparseQuadraticBuilder(2)
+    builder.add_quadratic(
+        np.arange(2),
+        np.eye(2),
+        np.array([-1.0, -2.0]),
+    )
+    builder.add_variable_bounds(
+        np.arange(2),
+        np.zeros(2),
+        np.array([0.5, 10.0]),
+    )
+    result = CuPySparseDirectADMMSolver(
+        settings=TorchADMMSettings(
+            max_iterations=1000,
+            absolute_tolerance=1e-7,
+            relative_tolerance=1e-7,
+        ),
+    ).solve(builder.build())
+    assert result.success
+    np.testing.assert_allclose(result.solution, [0.5, 2.0], atol=2e-5)
+    assert result.max_constraint_violation < 2e-6
+    assert result.diagnostics["relaxation"] == 1.6
+    assert result.diagnostics["refactorizations"] >= 1
+
+
 def test_large_variable_bounds_are_assembled_sparsely() -> None:
     variable_count = 100_000
     builder = SparseQuadraticBuilder(variable_count)
@@ -56,6 +91,30 @@ def test_large_variable_bounds_are_assembled_sparsely() -> None:
     problem = builder.build()
     assert problem.constraint_matrix.shape == (variable_count, variable_count)
     assert problem.constraint_matrix.nnz == variable_count
+
+
+def test_proxqp_solves_equality_and_box_qp() -> None:
+    builder = SparseQuadraticBuilder(2)
+    builder.add_quadratic(
+        np.arange(2),
+        np.eye(2),
+        np.array([-1.0, -2.0]),
+    )
+    builder.add_linear_constraint(
+        np.arange(2),
+        np.ones((1, 2)),
+        np.ones(1),
+        np.ones(1),
+    )
+    builder.add_variable_bounds(
+        np.arange(2),
+        np.zeros(2),
+        np.full(2, 10.0),
+    )
+    result = ProxQPSolver().solve(builder.build())
+    assert result.success
+    np.testing.assert_allclose(result.solution, [0.0, 1.0], atol=2e-5)
+    assert result.max_constraint_violation < 2e-5
 
 
 def test_diagonal_quadratic_does_not_store_dense_zeros() -> None:
@@ -227,6 +286,104 @@ def test_dynamics_constraints_are_jointly_enforced() -> None:
     assert solution.states[-1, 0] > 0.9
 
 
+def test_soft_dynamics_remain_feasible_with_conflicting_bounds() -> None:
+    trajectory_problem = WholeTrajectoryProblem(
+        WholeTrajectorySpec(
+            state_reference=np.zeros((2, 1)),
+            scale_reference=np.ones((1, 1)),
+            scale_basis=np.ones((2, 1)),
+            tracking_state_jacobian=np.zeros((2, 1, 1)),
+            tracking_scale_jacobian=np.zeros((2, 1, 1)),
+            tracking_target=np.zeros((2, 1)),
+            control_reference=np.zeros((1, 1)),
+            dynamics=LinearDynamics(
+                transition=np.ones((1, 1, 1)),
+                control=np.zeros((1, 1, 1)),
+                offset=np.ones((1, 1)),
+            ),
+            dynamics_weight=10.0,
+            state_lower=0.0,
+            state_upper=0.0,
+            state_velocity_weight=0.0,
+            state_acceleration_weight=0.0,
+            scale_smoothness_weight=0.0,
+        )
+    )
+    result = OSQPSolver().solve(trajectory_problem.build())
+    assert result.success
+    solution = trajectory_problem.unpack(result.solution)
+    np.testing.assert_allclose(solution.states, 0.0, atol=1e-7)
+    np.testing.assert_allclose(
+        solution.dynamics_slacks,
+        -1.0,
+        atol=1e-7,
+    )
+
+
+def test_penalty_dynamics_do_not_add_equality_rows() -> None:
+    trajectory_problem = WholeTrajectoryProblem(
+        WholeTrajectorySpec(
+            state_reference=np.zeros((2, 1)),
+            scale_reference=np.ones((1, 1)),
+            scale_basis=np.ones((2, 1)),
+            tracking_state_jacobian=np.zeros((2, 1, 1)),
+            tracking_scale_jacobian=np.zeros((2, 1, 1)),
+            tracking_target=np.zeros((2, 1)),
+            control_reference=np.zeros((1, 1)),
+            dynamics=LinearDynamics(
+                transition=np.ones((1, 1, 1)),
+                control=np.zeros((1, 1, 1)),
+                offset=np.ones((1, 1)),
+            ),
+            dynamics_weight=10.0,
+            dynamics_soft_formulation="penalty",
+            state_lower=-np.inf,
+            state_upper=np.inf,
+            control_lower=-np.inf,
+            control_upper=np.inf,
+            state_velocity_weight=0.0,
+            state_acceleration_weight=0.0,
+            scale_smoothness_weight=0.0,
+        )
+    )
+    problem = trajectory_problem.build()
+    solution = trajectory_problem.unpack(
+        OSQPSolver().solve(problem).solution
+    )
+    equality_rows = (
+        np.isfinite(problem.lower)
+        & np.isfinite(problem.upper)
+        & np.isclose(problem.lower, problem.upper)
+    )
+    assert not np.any(equality_rows)
+    assert solution.dynamics_slacks is None
+
+
+def test_inactive_dynamics_transition_is_omitted() -> None:
+    trajectory_problem = WholeTrajectoryProblem(
+        WholeTrajectorySpec(
+            state_reference=np.zeros((2, 1)),
+            scale_reference=np.ones((1, 1)),
+            scale_basis=np.ones((2, 1)),
+            tracking_state_jacobian=np.zeros((2, 1, 1)),
+            tracking_scale_jacobian=np.zeros((2, 1, 1)),
+            tracking_target=np.zeros((2, 1)),
+            control_reference=np.zeros((1, 1)),
+            dynamics=LinearDynamics(
+                transition=np.ones((1, 1, 1)),
+                control=np.zeros((1, 1, 1)),
+                offset=np.ones((1, 1)),
+                active=np.zeros(1, dtype=bool),
+            ),
+            state_velocity_weight=0.0,
+            state_acceleration_weight=0.0,
+            scale_smoothness_weight=0.0,
+        )
+    )
+    problem = trajectory_problem.build()
+    assert problem.metadata["active_dynamics_transitions"] == 0
+
+
 def test_mujoco_dynamics_linearization_uses_tangent_state() -> None:
     model = mujoco.MjModel.from_xml_string(
         """
@@ -261,6 +418,11 @@ def test_mujoco_dynamics_linearization_uses_tangent_state() -> None:
     assert result.dynamics.transition.shape == (frame_count - 1, 2, 2)
     assert result.dynamics.control.shape == (frame_count - 1, 2, 1)
     assert np.max(result.defect_norms) < 1e-10
+    np.testing.assert_allclose(
+        linearizer.rollout_defects(nominal),
+        result.dynamics.offset,
+        atol=1e-12,
+    )
 
     state_deltas = np.zeros((frame_count, 2))
     state_deltas[:, 0] = 0.1
@@ -270,6 +432,158 @@ def test_mujoco_dynamics_linearization_uses_tangent_state() -> None:
         np.zeros_like(controls),
     )
     np.testing.assert_allclose(updated.qpos[:, 0], nominal.qpos[:, 0] + 0.1)
+
+
+def test_object_pose_layout_and_kinematic_jacobian() -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="pelvis">
+              <freejoint/>
+              <geom type="sphere" size="0.05"/>
+              <body name="wrist" pos="0.3 0 0">
+                <geom type="sphere" size="0.03"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    qpos = np.array([[0.1, -0.2, 0.8, 1.0, 0.0, 0.0, 0.0]])
+    human = np.array([[[0.1, -0.2, 0.8], [0.45, -0.2, 0.8]]])
+    object_poses = np.array([[0.0, 0.0, 0.0, 1.0, -0.3, 0.2, 0.1]])
+    transforms = decode_object_poses(
+        object_poses,
+        quaternion_order="xyzw",
+    )
+    assert transforms.pose_layout == "quat_pos"
+    np.testing.assert_allclose(transforms.positions[0], [-0.3, 0.2, 0.1])
+
+    kinematics = MujocoObjectFrameKinematics(
+        model,
+        ["Pelvis", "L_Wrist"],
+        {"Pelvis": "pelvis", "L_Wrist": "wrist"},
+    )
+    linearization = kinematics.linearize(
+        qpos,
+        human,
+        object_poses,
+        quaternion_order="xyzw",
+    )
+    direction = np.array([[0.2, -0.1, 0.05, 0.0, 0.0, 0.3]])
+    epsilon = 1e-7
+    perturbed = kinematics.retract(qpos, epsilon * direction)
+    finite_difference = (
+        kinematics.mapped_points(perturbed) - kinematics.mapped_points(qpos)
+    ) / epsilon
+    predicted = np.einsum(
+        "tjdn,tn->tjd",
+        linearization.state_jacobian.reshape(1, 2, 3, model.nv),
+        direction,
+    )
+    np.testing.assert_allclose(predicted, finite_difference, atol=2e-7)
+
+    qp_residual = (
+        np.einsum(
+            "tms,ts->tm",
+            linearization.scale_jacobian,
+            np.ones((1, 3)),
+        )
+        - linearization.target
+    ).reshape(1, 2, 3)
+    expected_residual = (
+        linearization.robot_points_object
+        - linearization.human_points_object
+    )
+    np.testing.assert_allclose(qp_residual, expected_residual, atol=1e-12)
+
+
+def test_mujoco_collision_audit_and_linearization() -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <geom name="ground" type="plane" size="2 2 0.1"/>
+            <body name="robot">
+              <freejoint/>
+              <geom name="robot_ball" type="sphere" size="0.1"/>
+            </body>
+            <body name="trajopt_object" mocap="true">
+              <geom name="trajopt_object_geom" type="sphere" size="0.1"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    qpos = np.array([[0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]])
+    object_poses = np.array([[0.0, 0.0, 0.0, 1.0, 0.3, 0.0, 0.1]])
+    collision = MujocoTrajectoryCollision(model)
+    audit = collision.audit(
+        qpos,
+        object_poses,
+        quaternion_order="xyzw",
+    )
+    np.testing.assert_allclose(audit.ground_minimum_distance, 0.0, atol=1e-12)
+    np.testing.assert_allclose(audit.object_minimum_distance, 0.1, atol=1e-12)
+
+    linearization = collision.linearize(
+        qpos,
+        object_poses,
+        quaternion_order="xyzw",
+        activation_distance=0.2,
+        include_ground=False,
+    )
+    assert len(linearization.frames) == 1
+    direction = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    epsilon = 1e-7
+    perturbed = qpos.copy()
+    mujoco.mj_integratePos(model, perturbed[0], direction, epsilon)
+    perturbed_audit = collision.audit(
+        perturbed,
+        object_poses,
+        quaternion_order="xyzw",
+    )
+    finite_difference = (
+        perturbed_audit.object_minimum_distance[0]
+        - audit.object_minimum_distance[0]
+    ) / epsilon
+    np.testing.assert_allclose(
+        linearization.jacobians[0] @ direction,
+        finite_difference,
+        atol=2e-7,
+    )
+
+
+def test_mujoco_trajectory_dynamics_audit_recovers_motor_force() -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <option gravity="0 0 0"/>
+          <worldbody>
+            <body>
+              <joint name="slide" type="slide" axis="1 0 0"/>
+              <geom type="sphere" size="0.05" mass="1"/>
+            </body>
+          </worldbody>
+          <actuator>
+            <motor joint="slide" ctrllimited="true" ctrlrange="-10 10"/>
+          </actuator>
+        </mujoco>
+        """
+    )
+    fps = 100.0
+    times = np.arange(12) / fps
+    acceleration = 2.0
+    qpos = (0.5 * acceleration * times**2)[:, None]
+    audit = MujocoTrajectoryDynamicsAuditor(model, fps=fps).audit(qpos)
+    assert np.max(audit.generalized_force_residual_norm) < 1e-10
+    np.testing.assert_allclose(
+        audit.controls[2:-2, 0],
+        acceleration,
+        atol=1e-9,
+    )
+    assert np.max(audit.control_violation) == 0.0
 
 
 @pytest.mark.skipif(

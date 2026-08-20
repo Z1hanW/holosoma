@@ -18,6 +18,8 @@ class MujocoNominalTrajectory:
     qvel: np.ndarray
     controls: np.ndarray
     activations: np.ndarray | None = None
+    mocap_positions: np.ndarray | None = None
+    mocap_quaternions: np.ndarray | None = None
 
     def validate(self, model: mujoco.MjModel) -> None:
         qpos = np.asarray(self.qpos, dtype=np.float64)
@@ -44,9 +46,40 @@ class MujocoNominalTrajectory:
             activations = np.asarray(self.activations, dtype=np.float64)
             if activations.shape != (frame_count, 0):
                 raise ValueError("activations must be None or have shape (T, 0)")
+        if self.mocap_positions is None or self.mocap_quaternions is None:
+            if self.mocap_positions is not None or self.mocap_quaternions is not None:
+                raise ValueError(
+                    "mocap_positions and mocap_quaternions must be provided together"
+                )
+        else:
+            mocap_positions = np.asarray(
+                self.mocap_positions,
+                dtype=np.float64,
+            )
+            mocap_quaternions = np.asarray(
+                self.mocap_quaternions,
+                dtype=np.float64,
+            )
+            if mocap_positions.shape != (frame_count, model.nmocap, 3):
+                raise ValueError(
+                    "mocap_positions must have shape "
+                    f"{(frame_count, model.nmocap, 3)}"
+                )
+            if mocap_quaternions.shape != (frame_count, model.nmocap, 4):
+                raise ValueError(
+                    "mocap_quaternions must have shape "
+                    f"{(frame_count, model.nmocap, 4)}"
+                )
         arrays = [qpos, qvel, controls]
         if self.activations is not None:
             arrays.append(np.asarray(self.activations))
+        if self.mocap_positions is not None:
+            arrays.extend(
+                (
+                    np.asarray(self.mocap_positions),
+                    np.asarray(self.mocap_quaternions),
+                )
+            )
         if any(not np.isfinite(array).all() for array in arrays):
             raise ValueError("nominal trajectory must contain only finite values")
 
@@ -87,6 +120,9 @@ class MujocoDynamicsLinearizer:
         data.qvel[:] = trajectory.qvel[frame]
         if self.model.na:
             data.act[:] = trajectory.activations[frame]
+        if trajectory.mocap_positions is not None:
+            data.mocap_pos[:] = trajectory.mocap_positions[frame]
+            data.mocap_quat[:] = trajectory.mocap_quaternions[frame]
         if frame < len(trajectory.controls):
             data.ctrl[:] = trajectory.controls[frame]
         mujoco.mj_forward(self.model, data)
@@ -106,9 +142,7 @@ class MujocoDynamicsLinearizer:
             (frame_count - 1, state_dimension, self.model.nu),
             dtype=np.float64,
         )
-        offset = np.empty((frame_count - 1, state_dimension), dtype=np.float64)
         derivative_data = mujoco.MjData(self.model)
-        rollout_data = mujoco.MjData(self.model)
 
         for frame in range(frame_count - 1):
             self._set_state(derivative_data, trajectory, frame)
@@ -123,6 +157,36 @@ class MujocoDynamicsLinearizer:
                 None,
             )
 
+        offset = self.rollout_defects(trajectory)
+        if not (
+            np.isfinite(transition).all()
+            and np.isfinite(control).all()
+            and np.isfinite(offset).all()
+        ):
+            raise RuntimeError("MuJoCo dynamics linearization produced non-finite values")
+        return MujocoDynamicsLinearization(
+            dynamics=LinearDynamics(
+                transition=transition,
+                control=control,
+                offset=offset,
+            ),
+            defect_norms=np.linalg.norm(offset, axis=1),
+        )
+
+    def rollout_defects(
+        self,
+        trajectory: MujocoNominalTrajectory,
+    ) -> np.ndarray:
+        """Evaluate nonlinear one-step defects without finite differences."""
+
+        trajectory.validate(self.model)
+        frame_count = len(trajectory.qpos)
+        offset = np.empty(
+            (frame_count - 1, self.state_dimension),
+            dtype=np.float64,
+        )
+        rollout_data = mujoco.MjData(self.model)
+        for frame in range(frame_count - 1):
             self._set_state(rollout_data, trajectory, frame)
             mujoco.mj_step(self.model, rollout_data)
             qpos_defect = np.empty(self.model.nv, dtype=np.float64)
@@ -141,21 +205,9 @@ class MujocoDynamicsLinearizer:
                 offset[frame, 2 * self.model.nv :] = (
                     rollout_data.act - trajectory.activations[frame + 1]
                 )
-
-        if not (
-            np.isfinite(transition).all()
-            and np.isfinite(control).all()
-            and np.isfinite(offset).all()
-        ):
-            raise RuntimeError("MuJoCo dynamics linearization produced non-finite values")
-        return MujocoDynamicsLinearization(
-            dynamics=LinearDynamics(
-                transition=transition,
-                control=control,
-                offset=offset,
-            ),
-            defect_norms=np.linalg.norm(offset, axis=1),
-        )
+        if not np.isfinite(offset).all():
+            raise RuntimeError("MuJoCo dynamics rollout produced non-finite values")
+        return offset
 
     def apply_deltas(
         self,
@@ -197,4 +249,6 @@ class MujocoDynamicsLinearizer:
             controls=np.asarray(trajectory.controls, dtype=np.float64)
             + control_deltas,
             activations=activations,
+            mocap_positions=trajectory.mocap_positions,
+            mocap_quaternions=trajectory.mocap_quaternions,
         )

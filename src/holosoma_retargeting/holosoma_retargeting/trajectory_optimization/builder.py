@@ -37,6 +37,7 @@ class LinearDynamics:
     transition: np.ndarray
     control: np.ndarray
     offset: np.ndarray
+    active: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,9 @@ class WholeTrajectorySpec:
     tracking_offset: np.ndarray | None = None
     control_reference: np.ndarray | None = None
     dynamics: LinearDynamics | None = None
+    dynamics_weight: float | np.ndarray | None = None
+    dynamics_soft_formulation: str = "slack"
+    normalize_dynamics_rows: bool = True
     initial_state: np.ndarray | None = None
     tracking_weight: float | np.ndarray = 1.0
     state_prior_weight: float | np.ndarray = 1e-3
@@ -67,6 +71,8 @@ class WholeTrajectorySpec:
     control_weight: float | np.ndarray = 1e-3
     state_velocity_weight: float = 1.0
     state_acceleration_weight: float = 1.0
+    state_velocity_target: np.ndarray | None = None
+    state_acceleration_target: np.ndarray | None = None
     scale_smoothness_weight: float = 1.0
     state_lower: float | np.ndarray = -np.inf
     state_upper: float | np.ndarray = np.inf
@@ -85,6 +91,7 @@ class VariableLayout:
     knot_count: int
     scale_dimension: int
     control_dimension: int
+    dynamics_slack_dimension: int = 0
 
     @property
     def state_count(self) -> int:
@@ -99,8 +106,20 @@ class VariableLayout:
         return max(0, self.frame_count - 1) * self.control_dimension
 
     @property
+    def dynamics_slack_count(self) -> int:
+        return (
+            max(0, self.frame_count - 1)
+            * self.dynamics_slack_dimension
+        )
+
+    @property
     def variable_count(self) -> int:
-        return self.state_count + self.scale_count + self.control_count
+        return (
+            self.state_count
+            + self.scale_count
+            + self.control_count
+            + self.dynamics_slack_count
+        )
 
     def state_indices(self, frame: int) -> np.ndarray:
         start = frame * self.state_dimension
@@ -114,6 +133,15 @@ class VariableLayout:
         start = self.state_count + self.scale_count + frame * self.control_dimension
         return np.arange(start, start + self.control_dimension)
 
+    def dynamics_slack_indices(self, frame: int) -> np.ndarray:
+        start = (
+            self.state_count
+            + self.scale_count
+            + self.control_count
+            + frame * self.dynamics_slack_dimension
+        )
+        return np.arange(start, start + self.dynamics_slack_dimension)
+
     @property
     def all_state_indices(self) -> np.ndarray:
         return np.arange(self.state_count)
@@ -124,9 +152,22 @@ class VariableLayout:
 
     @property
     def all_control_indices(self) -> np.ndarray:
+        start = self.state_count + self.scale_count
         return np.arange(
-            self.state_count + self.scale_count,
-            self.variable_count,
+            start,
+            start + self.control_count,
+        )
+
+    @property
+    def all_dynamics_slack_indices(self) -> np.ndarray:
+        start = (
+            self.state_count
+            + self.scale_count
+            + self.control_count
+        )
+        return np.arange(
+            start,
+            start + self.dynamics_slack_count,
         )
 
 
@@ -136,6 +177,7 @@ class WholeTrajectorySolution:
     scale_knots: np.ndarray
     frame_scales: np.ndarray
     controls: np.ndarray | None
+    dynamics_slacks: np.ndarray | None
 
 
 def _broadcast(value, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -210,12 +252,25 @@ class WholeTrajectoryProblem:
             control_dimension = control_reference.shape[1]
         if spec.dynamics is not None and control_reference is None:
             raise ValueError("dynamics requires control_reference")
+        if spec.dynamics is None and spec.dynamics_weight is not None:
+            raise ValueError("dynamics_weight requires dynamics")
+        if spec.dynamics_soft_formulation not in {"slack", "penalty"}:
+            raise ValueError(
+                "dynamics_soft_formulation must be 'slack' or 'penalty'"
+            )
         self.layout = VariableLayout(
             frame_count=frame_count,
             state_dimension=state_dimension,
             knot_count=knot_count,
             scale_dimension=scale_dimension,
             control_dimension=control_dimension,
+            dynamics_slack_dimension=(
+                state_dimension
+                if spec.dynamics is not None
+                and spec.dynamics_weight is not None
+                and spec.dynamics_soft_formulation == "slack"
+                else 0
+            ),
         )
         self._state_reference = state_reference
         self._scale_reference = scale_reference
@@ -225,6 +280,36 @@ class WholeTrajectoryProblem:
         self._tracking_scale = tracking_scale
         self._tracking_target = tracking_target
         self._tracking_offset = tracking_offset
+        if spec.state_velocity_target is None:
+            self._state_velocity_target = np.zeros(
+                (max(0, frame_count - 1), state_dimension),
+                dtype=np.float64,
+            )
+        else:
+            self._state_velocity_target = np.asarray(
+                spec.state_velocity_target,
+                dtype=np.float64,
+            )
+            expected = (max(0, frame_count - 1), state_dimension)
+            if self._state_velocity_target.shape != expected:
+                raise ValueError(
+                    f"state_velocity_target must have shape {expected}"
+                )
+        if spec.state_acceleration_target is None:
+            self._state_acceleration_target = np.zeros(
+                (max(0, frame_count - 2), state_dimension),
+                dtype=np.float64,
+            )
+        else:
+            self._state_acceleration_target = np.asarray(
+                spec.state_acceleration_target,
+                dtype=np.float64,
+            )
+            expected = (max(0, frame_count - 2), state_dimension)
+            if self._state_acceleration_target.shape != expected:
+                raise ValueError(
+                    f"state_acceleration_target must have shape {expected}"
+                )
 
     def build(self) -> SparseQuadraticProblem:
         spec = self.spec
@@ -269,7 +354,7 @@ class WholeTrajectoryProblem:
                 builder.add_least_squares(
                     difference_indices,
                     difference_matrix,
-                    np.zeros(layout.state_dimension),
+                    self._state_velocity_target[frame - 1],
                     spec.state_velocity_weight,
                 )
             if frame >= 2:
@@ -290,7 +375,7 @@ class WholeTrajectoryProblem:
                 builder.add_least_squares(
                     acceleration_indices,
                     acceleration_matrix,
-                    np.zeros(layout.state_dimension),
+                    self._state_acceleration_target[frame - 2],
                     spec.state_acceleration_weight,
                 )
 
@@ -322,6 +407,21 @@ class WholeTrajectoryProblem:
                     np.eye(layout.control_dimension),
                     self._control_reference[frame],
                     spec.control_weight,
+                )
+        if layout.dynamics_slack_dimension:
+            dynamics_active = (
+                np.ones(frame_count - 1, dtype=bool)
+                if spec.dynamics.active is None
+                else np.asarray(spec.dynamics.active, dtype=bool)
+            )
+            for frame in range(frame_count - 1):
+                if not dynamics_active[frame]:
+                    continue
+                builder.add_least_squares(
+                    layout.dynamics_slack_indices(frame),
+                    np.eye(layout.dynamics_slack_dimension),
+                    np.zeros(layout.dynamics_slack_dimension),
+                    spec.dynamics_weight,
                 )
 
         state_lower = _broadcast(
@@ -396,26 +496,66 @@ class WholeTrajectoryProblem:
                 raise ValueError(f"dynamics control must have shape {expected_b}")
             if offset.shape != expected_c:
                 raise ValueError(f"dynamics offset must have shape {expected_c}")
+            if dynamics.active is None:
+                dynamics_active = np.ones(frame_count - 1, dtype=bool)
+            else:
+                dynamics_active = np.asarray(
+                    dynamics.active,
+                    dtype=bool,
+                )
+                if dynamics_active.shape != (frame_count - 1,):
+                    raise ValueError(
+                        "dynamics active mask must have shape "
+                        f"{(frame_count - 1,)}"
+                    )
             for frame in range(frame_count - 1):
+                if not dynamics_active[frame]:
+                    continue
                 indices = np.concatenate(
                     (
                         layout.state_indices(frame),
                         layout.state_indices(frame + 1),
                         layout.control_indices(frame),
+                        (
+                            layout.dynamics_slack_indices(frame)
+                            if layout.dynamics_slack_dimension
+                            else np.empty(0, dtype=np.int64)
+                        ),
                     )
                 )
-                matrix = np.hstack(
-                    (
-                        -transition[frame],
-                        np.eye(layout.state_dimension),
-                        -control[frame],
-                    )
+                blocks = [
+                    -transition[frame],
+                    np.eye(layout.state_dimension),
+                    -control[frame],
+                ]
+                penalty_formulation = (
+                    spec.dynamics_weight is not None
+                    and spec.dynamics_soft_formulation == "penalty"
                 )
+                if layout.dynamics_slack_dimension:
+                    blocks.append(-np.eye(layout.state_dimension))
+                matrix = np.hstack(blocks)
+                if penalty_formulation:
+                    builder.add_least_squares(
+                        indices,
+                        matrix,
+                        offset[frame],
+                        spec.dynamics_weight,
+                    )
+                    continue
+                right_hand_side = np.asarray(offset[frame])
+                if spec.normalize_dynamics_rows:
+                    row_scale = np.maximum(
+                        1.0,
+                        np.max(np.abs(matrix), axis=1),
+                    )
+                    matrix = matrix / row_scale[:, None]
+                    right_hand_side = right_hand_side / row_scale
                 builder.add_linear_constraint(
                     indices,
                     matrix,
-                    offset[frame],
-                    offset[frame],
+                    right_hand_side,
+                    right_hand_side,
                 )
 
         for constraint in spec.extra_constraints:
@@ -433,6 +573,27 @@ class WholeTrajectoryProblem:
                 "scale_dimension": layout.scale_dimension,
                 "scale_knot_count": layout.knot_count,
                 "control_dimension": layout.control_dimension,
+                "dynamics_slack_dimension": (
+                    layout.dynamics_slack_dimension
+                ),
+                "dynamics_mode": (
+                    "none"
+                    if spec.dynamics is None
+                    else (
+                        "hard"
+                        if spec.dynamics_weight is None
+                        else f"soft-{spec.dynamics_soft_formulation}"
+                    )
+                ),
+                "dynamics_rows_normalized": bool(
+                    spec.dynamics is not None
+                    and spec.normalize_dynamics_rows
+                ),
+                "active_dynamics_transitions": (
+                    0
+                    if spec.dynamics is None
+                    else int(np.count_nonzero(dynamics_active))
+                ),
             },
         )
 
@@ -452,15 +613,26 @@ class WholeTrajectoryProblem:
                 self.layout.frame_count - 1,
                 self.layout.control_dimension,
             )
+        dynamics_slacks = None
+        if self.layout.dynamics_slack_dimension:
+            dynamics_slacks = solution[
+                self.layout.all_dynamics_slack_indices
+            ].reshape(
+                self.layout.frame_count - 1,
+                self.layout.dynamics_slack_dimension,
+            )
         return WholeTrajectorySolution(
             states=states,
             scale_knots=scale_knots,
             frame_scales=self._scale_basis @ scale_knots,
             controls=controls,
+            dynamics_slacks=dynamics_slacks,
         )
 
     def reference_vector(self) -> np.ndarray:
         parts = [self._state_reference.reshape(-1), self._scale_reference.reshape(-1)]
         if self._control_reference is not None:
             parts.append(self._control_reference.reshape(-1))
+        if self.layout.dynamics_slack_dimension:
+            parts.append(np.zeros(self.layout.dynamics_slack_count))
         return np.concatenate(parts)
