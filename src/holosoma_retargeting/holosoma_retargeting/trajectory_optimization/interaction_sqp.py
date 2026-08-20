@@ -46,6 +46,7 @@ class MujocoInteractionTrajOptSettings:
     collision_linearization_margin: float = 5e-4
     collision_penalty: float = 1e7
     collision_feasibility_tolerance: float = 5e-5
+    maximum_inaccurate_qp_violation: float = 1e-4
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,13 @@ class MujocoInteractionTrajectoryOptimizer:
         ):
             raise ValueError(
                 "collision_linearization_margin must be finite and non-negative"
+            )
+        if (
+            not np.isfinite(settings.maximum_inaccurate_qp_violation)
+            or settings.maximum_inaccurate_qp_violation < 0.0
+        ):
+            raise ValueError(
+                "maximum_inaccurate_qp_violation must be finite and non-negative"
             )
         if settings.scale_lower >= settings.scale_upper:
             raise ValueError("scale_lower must be below scale_upper")
@@ -481,13 +489,23 @@ class MujocoInteractionTrajectoryOptimizer:
                 )
             )
             qp_result: SolveResult = self.solver.solve(problem, warm_start)
+            qp_usable = (
+                qp_result.success
+                or (
+                    qp_result.status
+                    in {"time limit reached", "maximum iterations reached"}
+                    and np.isfinite(qp_result.solution).all()
+                    and qp_result.max_constraint_violation
+                    <= settings.maximum_inaccurate_qp_violation
+                )
+            )
             accepted = False
             accepted_scale = 0.0
             candidate_evaluation = current
             state_step_inf = 0.0
             state_saturation = 0.0
             scale_saturation = 0.0
-            if qp_result.success:
+            if qp_usable:
                 unpacked = trajectory_problem.unpack(qp_result.solution)
                 state_step_inf = float(np.max(np.abs(unpacked.states)))
                 finite_bounds = np.isfinite(state_lower) & np.isfinite(state_upper)
@@ -603,7 +621,7 @@ class MujocoInteractionTrajectoryOptimizer:
                     ),
                 )
             )
-            if not qp_result.success:
+            if not qp_usable:
                 if (
                     current.maximum_collision_violation_m
                     > settings.collision_feasibility_tolerance
