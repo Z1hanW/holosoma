@@ -386,13 +386,11 @@ class MujocoDynamicsTrajectoryOptimizer:
                 projection_problem,
                 qp_result.solution,
             )
-            if not direction_projection.success:
-                raise RuntimeError(
-                    "inaccurate dynamics direction projection failed: "
-                    f"{direction_projection.status}; "
-                    f"diagnostics={direction_projection.diagnostics}"
-                )
-            direction_solution = direction_projection.solution
+            direction_solution = (
+                direction_projection.solution
+                if direction_projection.success
+                else warm_start
+            )
         unpacked = trajectory_problem.unpack(direction_solution)
         qp_defect = (
             unpacked.states[1:]

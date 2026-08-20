@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--geometric-result", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--mesh", type=Path)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--qpos-trust-radius", type=float, default=0.2)
     parser.add_argument("--qvel-trust-radius", type=float, default=50.0)
@@ -110,10 +111,17 @@ def main() -> int:
         quaternion_order = str(
             np.asarray(data["object_pose_quat_order"]).item()
         )
-        mesh_path = Path(str(np.asarray(data["mesh_file"]).item())).resolve()
+        input_mesh_path = Path(
+            str(np.asarray(data["mesh_file"]).item())
+        ).resolve()
         contact_start = int(np.asarray(data["contact_start_idx"]).item())
         contact_end = int(np.asarray(data["contact_end_idx"]).item())
         sequence = str(np.asarray(data["sequence"]).item())
+    mesh_path = (
+        args.mesh.expanduser().resolve()
+        if args.mesh is not None
+        else input_mesh_path
+    )
     transforms = decode_object_poses(
         object_poses,
         quaternion_order=quaternion_order,
@@ -307,6 +315,7 @@ def main() -> int:
     report = {
         "sequence": sequence,
         "input": str(input_path),
+        "mesh": str(mesh_path),
         "geometric_result": str(result_path),
         "nominal_state_source": nominal_state_source,
         "frames": len(qpos),

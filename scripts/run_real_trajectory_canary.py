@@ -29,13 +29,141 @@ from holosoma_retargeting.trajectory_optimization import (
 )
 
 
+def sequence_signature(sequence: str) -> tuple[str | None, str | None]:
+    parts = sequence.split("_")
+    object_class = parts[2] if len(parts) > 2 else None
+    motion = next(
+        (part for part in parts if len(part) > 1 and part[0] == "m" and part[1:].isdigit()),
+        None,
+    )
+    return object_class, motion
+
+
+def select_seed(
+    candidates: np.ndarray,
+    source_sequences: np.ndarray,
+    *,
+    sequence: str,
+    kinematics: MujocoObjectFrameKinematics,
+    collision: MujocoTrajectoryCollision,
+    human_joints: np.ndarray,
+    object_poses: np.ndarray,
+    quaternion_order: str,
+    pose_layout: str,
+    contact_slice: slice,
+    wrist_indices: np.ndarray,
+    collision_candidates: int,
+    minimum_collision_distance: float,
+) -> tuple[int, np.ndarray, dict]:
+    """Rank all seed trajectories, then collision-audit the best few."""
+
+    target_class, target_motion = sequence_signature(sequence)
+    frame_scales = np.ones((len(human_joints), 3), dtype=np.float64)
+    ranked: list[dict] = []
+    aligned_candidates: dict[int, np.ndarray] = {}
+    for index, candidate in enumerate(candidates):
+        qpos = np.asarray(candidate[:, : kinematics.model.nq], dtype=np.float64)
+        if len(qpos) != len(human_joints) or not np.isfinite(qpos).all():
+            continue
+        aligned = kinematics.align_seed_root(qpos, human_joints)
+        errors = kinematics.object_frame_error(
+            aligned,
+            human_joints,
+            object_poses,
+            frame_scales,
+            quaternion_order=quaternion_order,
+            pose_layout=pose_layout,
+        )
+        mean_error = float(np.mean(errors))
+        contact_wrist_error = float(
+            np.mean(errors[contact_slice][:, wrist_indices])
+        )
+        source_class, source_motion = sequence_signature(
+            str(source_sequences[index])
+        )
+        compatibility_penalty = 0.0
+        if target_class != source_class:
+            compatibility_penalty += 0.10
+        if target_motion != source_motion:
+            compatibility_penalty += 0.025
+        tracking_score = (
+            mean_error + 2.0 * contact_wrist_error + compatibility_penalty
+        )
+        aligned_candidates[index] = aligned
+        ranked.append(
+            {
+                "index": index,
+                "source_sequence": str(source_sequences[index]),
+                "mean_keypoint_error_m": mean_error,
+                "contact_wrist_error_m": contact_wrist_error,
+                "compatibility_penalty": compatibility_penalty,
+                "tracking_score": tracking_score,
+            }
+        )
+    if not ranked:
+        raise ValueError("seed bank has no finite frame-compatible candidates")
+
+    ranked.sort(key=lambda item: item["tracking_score"])
+    audit_count = min(max(collision_candidates, 1), len(ranked))
+    for item in ranked[:audit_count]:
+        audit = collision.audit(
+            aligned_candidates[item["index"]],
+            object_poses,
+            quaternion_order=quaternion_order,
+            pose_layout=pose_layout,
+        )
+        ground_violation = float(
+            np.max(
+                np.maximum(
+                    minimum_collision_distance
+                    - audit.ground_minimum_distance,
+                    0.0,
+                )
+            )
+        )
+        object_violation = float(
+            np.max(
+                np.maximum(
+                    minimum_collision_distance
+                    - audit.object_minimum_distance,
+                    0.0,
+                )
+            )
+        )
+        item["ground_collision_violation_m"] = ground_violation
+        item["object_collision_violation_m"] = object_violation
+        item["selection_score"] = (
+            item["tracking_score"]
+            + 25.0 * ground_violation
+            + 25.0 * object_violation
+        )
+    chosen = min(
+        ranked[:audit_count],
+        key=lambda item: item["selection_score"],
+    )
+    report = {
+        "mode": "auto",
+        "candidate_count": len(ranked),
+        "collision_audited_candidates": audit_count,
+        "chosen_index": chosen["index"],
+        "chosen_source_sequence": chosen["source_sequence"],
+        "top_candidates": ranked[:audit_count],
+    }
+    return chosen["index"], aligned_candidates[chosen["index"]], report
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--seed-bank", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--mesh", type=Path)
-    parser.add_argument("--seed-index", type=int, default=25)
+    parser.add_argument(
+        "--seed-index",
+        default="25",
+        help="integer seed index or 'auto'",
+    )
+    parser.add_argument("--seed-collision-candidates", type=int, default=5)
     parser.add_argument("--scale-knots", type=int, default=8)
     parser.add_argument("--scale-lower", type=float, default=0.85)
     parser.add_argument("--scale-upper", type=float, default=1.15)
@@ -49,8 +177,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--initial-trust-radius", type=float, default=0.25)
+    parser.add_argument("--minimum-trust-radius", type=float, default=0.01)
+    parser.add_argument("--maximum-trust-radius", type=float, default=0.6)
+    parser.add_argument("--line-search-steps", type=int, default=8)
     parser.add_argument("--collision-activation-distance", type=float, default=0.08)
     parser.add_argument("--minimum-collision-distance", type=float, default=-1e-3)
+    parser.add_argument("--collision-restoration-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--minimum-collision-restoration-fraction",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--collision-linearization-margin",
+        type=float,
+        default=5e-4,
+    )
     parser.add_argument(
         "--pose-layout",
         choices=("auto", "quat_pos", "pos_quat"),
@@ -151,19 +293,13 @@ def main() -> int:
     with np.load(seed_bank_path, allow_pickle=True) as data:
         candidates = np.asarray(data["qpos_candidates"], dtype=np.float64)
         source_sequences = np.asarray(data["source_sequences"]).astype(str)
-    if not 0 <= args.seed_index < len(candidates):
-        raise ValueError("--seed-index is outside the seed bank")
 
     model = build_mocap_object_model(model_path, mesh_path)
-    qpos_seed = candidates[args.seed_index, :, : model.nq].copy()
-    if len(qpos_seed) != len(human_joints):
-        raise ValueError("seed and real input frame counts disagree")
     mapping = JOINTS_MAPPINGS[("seedance", "g1")]
     kinematics = MujocoObjectFrameKinematics(model, joint_names, mapping)
-    qpos_seed = kinematics.align_seed_root(qpos_seed, human_joints)
     collision = MujocoTrajectoryCollision(model)
 
-    frame_count = len(qpos_seed)
+    frame_count = len(human_joints)
     row_count = 3 * len(joint_names)
     tracking_weight = np.full((frame_count, row_count), 20.0)
     wrist_indices = np.asarray(
@@ -176,6 +312,39 @@ def main() -> int:
             contact_slice,
             3 * wrist : 3 * (wrist + 1),
         ] = 100.0
+    if args.seed_index == "auto":
+        seed_index, qpos_seed, seed_selection = select_seed(
+            candidates,
+            source_sequences,
+            sequence=sequence,
+            kinematics=kinematics,
+            collision=collision,
+            human_joints=human_joints,
+            object_poses=object_poses,
+            quaternion_order=quaternion_order,
+            pose_layout=pose_layout,
+            contact_slice=contact_slice,
+            wrist_indices=wrist_indices,
+            collision_candidates=args.seed_collision_candidates,
+            minimum_collision_distance=args.minimum_collision_distance,
+        )
+    else:
+        try:
+            seed_index = int(args.seed_index)
+        except ValueError as exc:
+            raise ValueError("--seed-index must be an integer or 'auto'") from exc
+        if not 0 <= seed_index < len(candidates):
+            raise ValueError("--seed-index is outside the seed bank")
+        qpos_seed = candidates[seed_index, :, : model.nq].copy()
+        if len(qpos_seed) != frame_count:
+            raise ValueError("seed and real input frame counts disagree")
+        qpos_seed = kinematics.align_seed_root(qpos_seed, human_joints)
+        seed_selection = {
+            "mode": "explicit",
+            "candidate_count": len(candidates),
+            "chosen_index": seed_index,
+            "chosen_source_sequence": str(source_sequences[seed_index]),
+        }
     scale_basis = piecewise_linear_scale_basis(
         frame_count,
         args.scale_knots,
@@ -204,6 +373,9 @@ def main() -> int:
     settings = MujocoInteractionTrajOptSettings(
         max_iterations=args.max_iterations,
         initial_trust_radius=args.initial_trust_radius,
+        minimum_trust_radius=args.minimum_trust_radius,
+        maximum_trust_radius=args.maximum_trust_radius,
+        line_search_steps=args.line_search_steps,
         scale_lower=args.scale_lower,
         scale_upper=args.scale_upper,
         scale_prior_weight=args.scale_prior_weight,
@@ -212,6 +384,15 @@ def main() -> int:
         scale_mode=args.scale_mode,
         collision_activation_distance=args.collision_activation_distance,
         minimum_collision_distance=args.minimum_collision_distance,
+        collision_restoration_fraction=(
+            args.collision_restoration_fraction
+        ),
+        minimum_collision_restoration_fraction=(
+            args.minimum_collision_restoration_fraction
+        ),
+        collision_linearization_margin=(
+            args.collision_linearization_margin
+        ),
     )
     optimizer = MujocoInteractionTrajectoryOptimizer(
         model,
@@ -284,8 +465,9 @@ def main() -> int:
         "input": str(input_path),
         "mesh": str(mesh_path),
         "seed_bank": str(seed_bank_path),
-        "seed_index": args.seed_index,
-        "seed_sequence": source_sequences[args.seed_index],
+        "seed_index": seed_index,
+        "seed_sequence": source_sequences[seed_index],
+        "seed_selection": seed_selection,
         "frames": frame_count,
         "model_nq": model.nq,
         "model_nv": model.nv,

@@ -42,6 +42,8 @@ class MujocoInteractionTrajOptSettings:
     collision_activation_distance: float = 0.08
     minimum_collision_distance: float = -1e-3
     collision_restoration_fraction: float = 0.5
+    minimum_collision_restoration_fraction: float = 0.05
+    collision_linearization_margin: float = 5e-4
     collision_penalty: float = 1e7
     collision_feasibility_tolerance: float = 5e-5
 
@@ -82,6 +84,7 @@ class InteractionTrajOptIteration:
     mean_keypoint_error_m: float
     contact_wrist_error_m: float
     maximum_collision_violation_m: float
+    collision_restoration_fraction: float
 
 
 @dataclass(frozen=True)
@@ -164,8 +167,22 @@ class MujocoInteractionTrajectoryOptimizer:
             <= settings.maximum_trust_radius
         ):
             raise ValueError("trust radii must be positive and ordered")
-        if not 0.0 < settings.collision_restoration_fraction <= 1.0:
-            raise ValueError("collision_restoration_fraction must be in (0, 1]")
+        if not (
+            0.0
+            < settings.minimum_collision_restoration_fraction
+            <= settings.collision_restoration_fraction
+            <= 1.0
+        ):
+            raise ValueError(
+                "collision restoration fractions must be in (0, 1] and ordered"
+            )
+        if (
+            not np.isfinite(settings.collision_linearization_margin)
+            or settings.collision_linearization_margin < 0.0
+        ):
+            raise ValueError(
+                "collision_linearization_margin must be finite and non-negative"
+            )
         if settings.scale_lower >= settings.scale_upper:
             raise ValueError("scale_lower must be below scale_upper")
         if settings.scale_mode not in {
@@ -333,6 +350,9 @@ class MujocoInteractionTrajectoryOptimizer:
         )
         initial_evaluation = current
         trust_radius = settings.initial_trust_radius
+        collision_restoration_fraction = (
+            settings.collision_restoration_fraction
+        )
         history: list[InteractionTrajOptIteration] = []
         status = "maximum iterations reached"
 
@@ -359,20 +379,24 @@ class MujocoInteractionTrajectoryOptimizer:
             correction = self._trajectory_correction(qpos_seed, current_qpos)
             velocity, acceleration = self._trajectory_motion(current_qpos)
             extra_constraints = []
+            linearized_minimum_distance = (
+                settings.minimum_collision_distance
+                + settings.collision_linearization_margin
+            )
             for frame in np.unique(collision_linearization.frames):
                 mask = collision_linearization.frames == frame
                 distances = collision_linearization.distances[mask]
                 restored_targets = distances + (
-                    settings.collision_restoration_fraction
+                    collision_restoration_fraction
                     * np.maximum(
-                        settings.minimum_collision_distance - distances,
+                        linearized_minimum_distance - distances,
                         0.0,
                     )
                 )
                 required_distances = np.where(
-                    distances < settings.minimum_collision_distance,
+                    distances < linearized_minimum_distance,
                     restored_targets,
-                    settings.minimum_collision_distance,
+                    linearized_minimum_distance,
                 )
                 extra_constraints.append(
                     LinearizedConstraint(
@@ -574,6 +598,9 @@ class MujocoInteractionTrajectoryOptimizer:
                     maximum_collision_violation_m=(
                         candidate_evaluation.maximum_collision_violation_m
                     ),
+                    collision_restoration_fraction=(
+                        collision_restoration_fraction
+                    ),
                 )
             )
             if not qp_result.success:
@@ -587,6 +614,17 @@ class MujocoInteractionTrajectoryOptimizer:
                         trust_radius * 1.5,
                     )
                     continue
+                if (
+                    current.maximum_collision_violation_m
+                    > settings.collision_feasibility_tolerance
+                    and collision_restoration_fraction
+                    > settings.minimum_collision_restoration_fraction
+                ):
+                    collision_restoration_fraction = max(
+                        settings.minimum_collision_restoration_fraction,
+                        0.5 * collision_restoration_fraction,
+                    )
+                    continue
                 status = f"qp failed: {qp_result.status}"
                 break
             if not accepted:
@@ -597,6 +635,16 @@ class MujocoInteractionTrajectoryOptimizer:
                 continue
             improvement = current.merit - candidate_evaluation.merit
             current = candidate_evaluation
+            if (
+                current.maximum_collision_violation_m
+                < 0.05
+                and collision_restoration_fraction
+                < settings.collision_restoration_fraction
+            ):
+                collision_restoration_fraction = min(
+                    settings.collision_restoration_fraction,
+                    1.5 * collision_restoration_fraction,
+                )
             if accepted_scale == 1.0:
                 trust_radius = min(
                     settings.maximum_trust_radius,

@@ -237,3 +237,37 @@ Production promotion still requires:
    time, and GPU memory against the accepted baseline.
 
 Until those gates pass, the existing strict Clarabel path remains authoritative.
+
+## PRISM batch evaluation
+
+`scripts/run_prism_trajectory_batch.py` runs the geometric and dynamics
+stages over a staging directory. It deduplicates inputs by the sequence stored
+inside each NPZ, assigns one serial worker to each requested GPU, writes an
+independent status and log tree per sequence, and rebuilds `summary.json` and
+`summary.csv` after every completion. Existing accepted results are resumable.
+
+The real geometric batch path ranks every seed-bank trajectory using
+object-frame keypoint and contact-wrist error. It exact-collision-audits the
+best candidates before selecting one. Deeply penetrating initializations use
+an adaptive collision-restoration homotopy: the requested single-step
+restoration is reduced after an infeasible QP and tightened again as the
+trajectory approaches feasibility. A 0.5 mm linearization margin prevents
+the exact nonlinear collision audit from stalling just outside the unchanged
+0.05 mm acceptance tolerance.
+
+An inaccurate GPU dynamics direction is still projected through the original
+sparse constraints. If that feasibility projection is itself infeasible, the
+stage emits an auditable zero-step rejection and preserves the accepted
+geometric trajectory instead of failing the sequence.
+
+The 2026-08-20 portable staging inventory contains 68 unique runnable
+sequences: 17 ball, 18 barrel, 15 bin, and 18 box. The canonical model
+inventory contains 137 sequences, but 69 do not currently have an NPZ with
+the required human joints, object poses, joint names, mesh, and contact
+metadata. Seed-only qpos banks cannot reconstruct those missing inputs.
+
+An eight-sequence smoke test spanning all four object classes reduced initial
+geometric penetration as large as 290.6 mm to zero exact violation on the
+hard recovery cases. Seven sequences accepted a dynamics-reducing step; one
+kept its collision-feasible geometric result after safely rejecting the
+dynamics direction.
