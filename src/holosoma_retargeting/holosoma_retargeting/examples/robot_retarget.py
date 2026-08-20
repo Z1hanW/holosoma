@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -37,6 +38,7 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
     create_scaled_multi_boxes_xml,
     estimate_human_orientation,
     extract_foot_sticking_sequence_velocity,
+    extract_foot_sticking_sequence_contact_aware,
     extract_object_first_moving_frame,
     load_intermimic_data,
     load_object_data,
@@ -55,12 +57,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_FORMATS = {
     "robot_only": "smplh",
     "object_interaction": "smplh",
+    "w_obj": "smplh",
+    "w-obj-scale": "seedance",
     "climbing": "mocap",
 }
 
 DEFAULT_SAVE_DIRS = {
     "robot_only": "demo_results/{robot}/robot_only/omomo",
     "object_interaction": "demo_results/{robot}/object_interaction/omomo",
+    "w_obj": "demo_results/{robot}/object_interaction/omomo",
+    "w-obj-scale": "demo_results/{robot}/object_interaction/omomo",
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
 }
 
@@ -72,8 +78,16 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
 # Type aliases
-TaskType = Literal["robot_only", "object_interaction", "climbing"]
+TaskType = Literal["robot_only", "object_interaction", "w_obj", "w-obj-scale", "climbing"]
 # DataFormat is imported from config_types.data_type
+
+
+def _normalized_task_type(task_type: str) -> str:
+    return task_type.replace("_", "-")
+
+
+def _is_object_task(task_type: str) -> bool:
+    return _normalized_task_type(task_type) in {"object-interaction", "w-obj", "w-obj-scale"}
 
 
 # ----------------------------- Helper Functions -----------------------------
@@ -113,7 +127,7 @@ def create_task_constants(
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
-    elif task_type == "object_interaction":
+    elif _is_object_task(task_type):
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = f"models/{obj_name}/{obj_name}.urdf"
@@ -150,11 +164,140 @@ def validate_config(cfg: RetargetingConfig) -> None:
         )
 
     # Task-specific format requirements
-    if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
-        raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
-        raise ValueError("Object interaction requires 'smplh' data format")
+    if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap", "smplx"):
+        raise ValueError("Climbing task requires 'mocap' or 'smplx' data format")
+    if _is_object_task(cfg.task_type) and cfg.data_format not in (None, "smplh", "seedance"):
+        raise ValueError("Object interaction requires 'smplh' or 'seedance' data format")
     # robot_only accepts any format in the registry (already validated above)
+
+
+def _resolve_sequence_npz(data_path: Path, task_name: str) -> Path:
+    candidates = [
+        data_path / f"{task_name}.npz",
+        data_path / task_name / f"{task_name}.npz",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"No .npz file found for {task_name} under {data_path}")
+
+
+def load_seedance_data(npz_file: Path, robot_height: float, default_human_height: float | None = None):
+    with np.load(str(npz_file), allow_pickle=True) as data:
+        if "global_joint_positions" in data:
+            human_joints = np.asarray(data["global_joint_positions"], dtype=float)
+        elif "human_joints" in data:
+            human_joints = np.asarray(data["human_joints"], dtype=float)
+        elif "joints" in data:
+            human_joints = np.asarray(data["joints"], dtype=float)
+        else:
+            raise KeyError(f"{npz_file} does not contain global_joint_positions/human_joints/joints")
+
+        if "object_poses" in data:
+            object_poses = np.asarray(data["object_poses"], dtype=float)
+        elif "object_pose" in data:
+            object_poses = np.asarray(data["object_pose"], dtype=float)
+        else:
+            object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]], dtype=float), (human_joints.shape[0], 1))
+
+        human_height = None
+        for key in ("human_height_m", "height", "human_height"):
+            if key in data:
+                human_height = float(np.asarray(data[key]).reshape(-1)[0])
+                break
+
+    if human_height is None or not np.isfinite(human_height) or human_height <= 0:
+        human_height = default_human_height or 1.78
+    smpl_scale = float(robot_height) / float(human_height)
+    return human_joints, object_poses, smpl_scale
+
+
+def load_hand_contact_data(
+    data_path: Path,
+    task_name: str,
+    task_type: str,
+    smpl_scale: float,
+    object_scale_multiplier: float = 1.0,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    npz_file = _resolve_sequence_npz(data_path, task_name)
+    with np.load(str(npz_file), allow_pickle=True) as data:
+        points = None
+        valid = None
+        weight_scale = None
+        for key in ("palm_contact_points_local", "object_contact_points_local"):
+            if key in data:
+                points = np.asarray(data[key], dtype=float)
+                break
+        for key in ("palm_contact_points_valid", "object_contact_points_valid"):
+            if key in data:
+                valid = np.asarray(data[key]).astype(bool)
+                break
+        if "palm_contact_weight_scale" in data:
+            weight_scale = np.asarray(data["palm_contact_weight_scale"], dtype=float)
+
+    if points is None or valid is None:
+        return None, None, None
+
+    if points.ndim == 2 and points.shape == (2, 3):
+        points = np.broadcast_to(points[None, :, :], (valid.shape[0], 2, 3)).copy()
+    if points.ndim != 3 or points.shape[1:] != (2, 3):
+        raise ValueError(f"Hand contact points must have shape (T, 2, 3), got {points.shape}")
+    if valid.ndim == 1:
+        valid = np.stack([valid, valid], axis=1)
+    if valid.shape != points.shape[:2]:
+        raise ValueError(f"Hand contact valid shape {valid.shape} does not match points {points.shape[:2]}")
+
+    num_frames = points.shape[0]
+    if weight_scale is None:
+        weight_scale = np.ones((num_frames, 2), dtype=float)
+    elif weight_scale.ndim == 0:
+        weight_scale = np.full((num_frames, 2), float(weight_scale), dtype=float)
+    elif weight_scale.shape == (2,):
+        weight_scale = np.broadcast_to(weight_scale[None, :], (num_frames, 2)).copy()
+    elif weight_scale.shape == (num_frames, 1):
+        weight_scale = np.repeat(weight_scale, 2, axis=1)
+    elif weight_scale.shape != (num_frames, 2):
+        raise ValueError(
+            f"palm_contact_weight_scale must be scalar or have shape (2,), (T, 1), or (T, 2); "
+            f"got {weight_scale.shape} for T={num_frames}"
+        )
+    if not np.all(np.isfinite(weight_scale)):
+        raise ValueError("palm_contact_weight_scale must contain only finite values")
+    if np.any(weight_scale < 0.0):
+        raise ValueError("palm_contact_weight_scale must be non-negative")
+
+    if _normalized_task_type(task_type) == "w-obj-scale":
+        points = points * smpl_scale * object_scale_multiplier
+    return points, valid, weight_scale
+
+
+def load_required_contact_start_idx(
+    data_path: Path,
+    task_name: str,
+    num_frames: int,
+) -> int:
+    """Load an exact contact start frame from the staged input without inference."""
+
+    npz_file = _resolve_sequence_npz(data_path, task_name)
+    with np.load(str(npz_file), allow_pickle=True) as data:
+        if "contact_start_idx" not in data:
+            raise KeyError(
+                f"before_contact grounding requires contact_start_idx in {npz_file}"
+            )
+        value = np.asarray(data["contact_start_idx"])
+    if value.size != 1:
+        raise ValueError(
+            f"contact_start_idx in {npz_file} must be scalar, got shape {value.shape}"
+        )
+    scalar = float(value.reshape(-1)[0])
+    if not np.isfinite(scalar) or not scalar.is_integer():
+        raise ValueError(f"contact_start_idx in {npz_file} must be a finite integer")
+    contact_start_idx = int(scalar)
+    if not 0 <= contact_start_idx < num_frames:
+        raise ValueError(
+            f"contact_start_idx={contact_start_idx} in {npz_file} is outside [0, {num_frames})"
+        )
+    return contact_start_idx
 
 
 def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, float], size: int) -> np.ndarray:
@@ -253,28 +396,48 @@ def load_motion_data(
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
-    elif task_type == "object_interaction":
-        pt_path = data_path / f"{task_name}.pt"
-        if not pt_path.exists():
-            raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
+    elif _is_object_task(task_type):
+        if data_format == "seedance":
+            npz_file = _resolve_sequence_npz(data_path, task_name)
+            human_joints, object_poses, smpl_scale = load_seedance_data(
+                npz_file, constants.ROBOT_HEIGHT, motion_data_config.default_human_height
+            )
+        else:
+            pt_path = data_path / f"{task_name}.pt"
+            if not pt_path.exists():
+                raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
 
-        human_joints, object_poses = load_intermimic_data(str(pt_path))
-        smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+            human_joints, object_poses = load_intermimic_data(str(pt_path))
+            smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
 
     elif task_type == "climbing":
         task_dir = data_path / task_name
-        npy_files = list(task_dir.glob("*.npy"))
-        if not npy_files:
-            raise FileNotFoundError(f"No .npy file found in {task_dir}")
+        if data_format == "smplx":
+            npz_file = task_dir / f"{task_name}.npz"
+            if not npz_file.exists():
+                npz_files = list(task_dir.glob("*.npz"))
+                if not npz_files:
+                    raise FileNotFoundError(f"No SMPL-X .npz file found in {task_dir}")
+                npz_file = npz_files[0]
+            human_data = np.load(str(npz_file))
+            human_joints = human_data["global_joint_positions"]
+            human_height = float(np.asarray(human_data["height"]).reshape(-1)[0])
+            smpl_scale = constants.ROBOT_HEIGHT / human_height
+            num_frames = human_joints.shape[0]
+            object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
+        else:
+            npy_files = list(task_dir.glob("*.npy"))
+            if not npy_files:
+                raise FileNotFoundError(f"No .npy file found in {task_dir}")
 
-        npy_file = npy_files[0]
-        # MOCAP-specific downsample factor
-        downsample = 4
-        human_joints = np.load(str(npy_file))[::downsample]
-        num_frames = human_joints.shape[0]
-        object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
-        default_human_height = motion_data_config.default_human_height or 1.78
-        smpl_scale = constants.ROBOT_HEIGHT / default_human_height
+            npy_file = npy_files[0]
+            # MOCAP-specific downsample factor
+            downsample = 4
+            human_joints = np.load(str(npy_file))[::downsample]
+            num_frames = human_joints.shape[0]
+            object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
+            default_human_height = motion_data_config.default_human_height or 1.78
+            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
     logger.debug(
         "Loaded %d frames, scale factor: %.4f",
@@ -315,15 +478,45 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    if task_type == "object_interaction":
+    if _is_object_task(task_type):
         # Load object data
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
 
+        object_scale_multiplier = float(task_config.object_scale_multiplier)
+        if not np.isfinite(object_scale_multiplier) or object_scale_multiplier <= 0.0:
+            raise ValueError(
+                "task_config.object_scale_multiplier must be positive and finite, "
+                f"got {object_scale_multiplier}"
+            )
+        effective_object_scale = smpl_scale
+        if _normalized_task_type(task_type) == "w-obj-scale":
+            effective_object_scale *= object_scale_multiplier
+
         object_local_pts, object_local_pts_demo = load_object_data(
-            constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
+            constants.OBJECT_MESH_FILE,
+            smpl_scale=effective_object_scale,
+            sample_count=100,
         )
-        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+        if _normalized_task_type(task_type) == "w-obj-scale":
+            scale_tag = f"{effective_object_scale:.6f}".replace(".", "p")
+            scale_factors = (effective_object_scale,) * 3
+            object_urdf = Path(constants.OBJECT_URDF_FILE)
+            scaled_urdf = object_urdf.with_name(f"{object_urdf.stem}_w_obj_scale_{scale_tag}{object_urdf.suffix}")
+            scene_xml = Path(constants.ROBOT_URDF_FILE.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml"))
+            scaled_scene_xml = scene_xml.with_name(f"{scene_xml.stem}_w_obj_scale_{scale_tag}{scene_xml.suffix}")
+            create_scaled_multi_boxes_urdf(str(object_urdf), scale_factors, output_path=str(scaled_urdf))
+            create_scaled_multi_boxes_xml(str(scene_xml), scale_factors, output_path=str(scaled_scene_xml))
+            if task_config.scene_xml_file is not None:
+                scene_override = task_config.scene_xml_file.expanduser().resolve()
+                if not scene_override.is_file():
+                    raise FileNotFoundError(f"Configured scene XML does not exist: {scene_override}")
+                constants.SCENE_XML_FILE = str(scene_override)
+            else:
+                constants.SCENE_XML_FILE = str(scaled_scene_xml)
+            constants.OBJECT_URDF_FILE = str(scaled_urdf)
+            return object_local_pts_demo, object_local_pts_demo, str(scaled_urdf)
+        return object_local_pts, object_local_pts, constants.OBJECT_URDF_FILE
 
     if task_type == "climbing":
         if object_dir is None:
@@ -407,7 +600,7 @@ def _compute_q_init_base(
             )
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate([human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)])
-    elif task_type == "object_interaction":
+    elif _is_object_task(task_type):
         _, human_quat_init = transform_from_human_to_world(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
@@ -467,15 +660,72 @@ def build_retargeter_kwargs_from_config(
         "q_a_init_idx": retargeter_config.q_a_init_idx,
         "activate_joint_limits": retargeter_config.activate_joint_limits,
         "activate_obj_non_penetration": retargeter_config.activate_obj_non_penetration,
+        "terrain_collision_geom_prefix": retargeter_config.terrain_collision_geom_prefix,
+        "terrain_collision_foot_only": retargeter_config.terrain_collision_foot_only,
+        "terrain_support_mesh_file": retargeter_config.terrain_support_mesh_file,
+        "terrain_support_mesh_scale": retargeter_config.terrain_support_mesh_scale,
+        "terrain_support_min_normal_z": retargeter_config.terrain_support_min_normal_z,
+        "terrain_support_clearance": retargeter_config.terrain_support_clearance,
+        "terrain_support_sphere_radius": retargeter_config.terrain_support_sphere_radius,
+        "terrain_support_activation_margin": retargeter_config.terrain_support_activation_margin,
+        "terrain_support_max_sqp_iterations": retargeter_config.terrain_support_max_sqp_iterations,
+        "terrain_support_feasibility_tolerance": retargeter_config.terrain_support_feasibility_tolerance,
         "activate_foot_sticking": retargeter_config.activate_foot_sticking,
+        "ground_initial_robot": retargeter_config.ground_initial_robot,
+        "initial_ground_clearance": retargeter_config.initial_ground_clearance,
+        "foot_sticking_pin_z": retargeter_config.foot_sticking_pin_z,
+        "foot_sticking_z_floor": retargeter_config.foot_sticking_z_floor,
+        "foot_grounding_weight": retargeter_config.foot_grounding_weight,
+        "foot_grounding_mode": retargeter_config.foot_grounding_mode,
+        "foot_grounding_schedule": retargeter_config.foot_grounding_schedule,
+        "foot_grounding_ramp_frames": retargeter_config.foot_grounding_ramp_frames,
         "foot_lock": retargeter_config.foot_lock,
         "penetration_tolerance": retargeter_config.penetration_tolerance,
+        "enforce_exact_nonpenetration": retargeter_config.enforce_exact_nonpenetration,
+        "exact_nonpenetration_max_sqp_iterations": (
+            retargeter_config.exact_nonpenetration_max_sqp_iterations
+        ),
+        "exact_nonpenetration_feasibility_tolerance": (
+            retargeter_config.exact_nonpenetration_feasibility_tolerance
+        ),
+        "exact_nonpenetration_interior_margin": (
+            retargeter_config.exact_nonpenetration_interior_margin
+        ),
+        "exact_nonpenetration_qp_safety_margin": (
+            retargeter_config.exact_nonpenetration_qp_safety_margin
+        ),
+        "exact_nonpenetration_restore_infeasible_start": (
+            retargeter_config.exact_nonpenetration_restore_infeasible_start
+        ),
+        "exact_nonpenetration_restoration_max_iterations": (
+            retargeter_config.exact_nonpenetration_restoration_max_iterations
+        ),
+        "exact_nonpenetration_backtracking_steps": (
+            retargeter_config.exact_nonpenetration_backtracking_steps
+        ),
         "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "self_collision": retargeter_config.self_collision,
         "step_size": retargeter_config.step_size,
+        "max_frame_root_translation": retargeter_config.max_frame_root_translation,
+        "max_frame_root_quaternion_delta": retargeter_config.max_frame_root_quaternion_delta,
+        "max_frame_joint_delta": retargeter_config.max_frame_joint_delta,
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
+        "w_keypoint_tracking": retargeter_config.w_keypoint_tracking,
+        "activate_hand_contact": retargeter_config.activate_hand_contact,
+        "hand_contact_mode": retargeter_config.hand_contact_mode,
+        "hand_contact_weight": retargeter_config.hand_contact_weight,
+        "hand_contact_tolerance": retargeter_config.hand_contact_tolerance,
+        "hand_contact_point_offset": retargeter_config.hand_contact_point_offset,
+        "hand_contact_point_mode": retargeter_config.hand_contact_point_mode,
+        "replace_source_wrist_with_contact": retargeter_config.replace_source_wrist_with_contact,
+        "save_partial_on_failure": retargeter_config.save_partial_on_failure,
+        "partial_checkpoint_interval_frames": (
+            retargeter_config.partial_checkpoint_interval_frames
+        ),
+        "resume_partial_file": retargeter_config.resume_partial_file,
+        "initial_qpos_file": retargeter_config.initial_qpos_file,
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
@@ -525,7 +775,7 @@ def initialize_robot_pose(
         object_poses = convert_object_poses_to_mujoco_order(object_poses)
         return q_init, None, object_poses, human_joints, object_poses
 
-    if task_type == "object_interaction":
+    if _is_object_task(task_type):
         if augmentation:
             object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
             object_poses_augmented = augment_object_poses(
@@ -589,7 +839,7 @@ def determine_output_path(
     """
     if task_type == "robot_only":
         return str(save_dir / f"{task_name}.npz")
-    if task_type in ("object_interaction", "climbing"):
+    if _is_object_task(task_type) or task_type == "climbing":
         suffix = "_augmented" if augmentation else "_original"
         return str(save_dir / f"{task_name}{suffix}.npz")
     raise ValueError(f"Unknown task type: {task_type}")
@@ -624,12 +874,10 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.robot_config = RobotConfig(robot_type=robot)
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
+        cfg.motion_data_config = replace(cfg.motion_data_config, data_format=data_format, robot_type=robot)
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and cfg.task_config.object_dir is None:
-        from dataclasses import replace
-
         cfg.task_config = replace(cfg.task_config, object_dir=data_path / task_name)
 
     constants = create_task_constants(
@@ -665,13 +913,24 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Preprocess motion data
     if task_type == "robot_only":
-        human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-    elif task_type in {"object_interaction", "climbing"}:
+        human_joints = preprocess_motion_data(
+            human_joints,
+            retargeter,
+            toe_names,
+            smpl_scale,
+            source_mat_height=cfg.motion_data_config.source_mat_height,
+            ground_z_override=cfg.motion_data_config.ground_z_override,
+            ground_reference_mode=cfg.motion_data_config.ground_reference_mode,
+        )
+    elif _is_object_task(task_type) or task_type == "climbing":
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
             retargeter,
             toe_names,
             scale=smpl_scale,
+            source_mat_height=cfg.motion_data_config.source_mat_height,
+            ground_z_override=cfg.motion_data_config.ground_z_override,
+            ground_reference_mode=cfg.motion_data_config.ground_reference_mode,
             object_poses=object_poses,
         )
 
@@ -690,17 +949,58 @@ def main(cfg: RetargetingConfig) -> None:
         augmentation_translation=_AUGMENTATION_TRANSLATION,
     )
 
+    # Persist the detector policy with every complete or partial result so a
+    # batch audit can distinguish legacy XY sticking from contact-aware runs.
+    retargeter.source_foot_sticking_mode = str(cfg.motion_data_config.foot_sticking_mode)
+
     # Extract foot sticking sequences
-    foot_sticking_sequences = extract_foot_sticking_sequence_velocity(human_joints, retargeter.demo_joints, toe_names)
+    if cfg.motion_data_config.foot_sticking_mode == "contact_aware":
+        foot_sticking_sequences = extract_foot_sticking_sequence_contact_aware(
+            human_joints,
+            retargeter.demo_joints,
+            toe_names,
+            velocity_threshold=cfg.motion_data_config.foot_contact_velocity_threshold,
+            height_margin=cfg.motion_data_config.foot_contact_height_margin,
+        )
+    else:
+        foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
+            human_joints, retargeter.demo_joints, toe_names
+        )
 
     # Task-specific foot sticking adjustments
-    if task_type == "object_interaction":
-        # Disable initial sticking
-        foot_sticking_sequences[0][toe_names[0]] = False
-        foot_sticking_sequences[0][toe_names[1]] = False
+    if _is_object_task(task_type):
+        # A grounded run needs frame 0 support; legacy XY-only sticking keeps
+        # the historical frame-0 behavior when Z pinning is not requested.
+        initial_sticking = bool(cfg.retargeter.foot_sticking_pin_z)
+        foot_sticking_sequences[0][toe_names[0]] = initial_sticking
+        foot_sticking_sequences[0][toe_names[1]] = initial_sticking
 
     # Determine output path
     dest_res_path = determine_output_path(task_type, save_dir, task_name, cfg.augmentation)
+    hand_contact_points_local, hand_contact_valid, hand_contact_weight_scale = (None, None, None)
+    if cfg.retargeter.activate_hand_contact and _is_object_task(task_type):
+        hand_contact_points_local, hand_contact_valid, hand_contact_weight_scale = load_hand_contact_data(
+            data_path,
+            task_name,
+            task_type,
+            smpl_scale,
+            cfg.task_config.object_scale_multiplier,
+        )
+        if hand_contact_points_local is not None:
+            logger.info("Loaded hand contact targets (%d valid points)", int(np.asarray(hand_contact_valid).sum()))
+
+    contact_start_idx = None
+    if cfg.retargeter.foot_grounding_schedule == "before_contact":
+        contact_start_idx = load_required_contact_start_idx(
+            data_path,
+            task_name,
+            human_joints.shape[0],
+        )
+        logger.info(
+            "Foot grounding schedule: before_contact, t1=%d, ramp=%d frames",
+            contact_start_idx,
+            cfg.retargeter.foot_grounding_ramp_frames,
+        )
 
     # Retarget motion
     logger.info("Starting retargeting...")
@@ -715,6 +1015,10 @@ def main(cfg: RetargetingConfig) -> None:
         q_nominal_list=q_nominal,
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
+        hand_contact_points_local=hand_contact_points_local,
+        hand_contact_valid=hand_contact_valid,
+        hand_contact_weight_scale=hand_contact_weight_scale,
+        contact_start_idx=contact_start_idx,
     )
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 

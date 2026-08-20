@@ -133,6 +133,90 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/amass_smplx_proc
 
 ## Check Visualizations of Saved Retargeting Results
 
+### CRISP / VGGT-Omega Terrain Retargeting
+
+For CRISP VGGT-Omega stair scenes, use the terrain-aware `climbing` path with SMPL-X
+22-joint HMR input. The current expected setup is:
+
+- Input joints are already in the z-up scene frame.
+- `scripts/prepare_crisp_terrain_retargeting.py` applies the same z offset to the
+  human joints and terrain mesh only to preserve Holosoma's human/terrain relative
+  height through preprocessing.
+- SQS terrain pieces must be loaded separately from
+  `gv/scene_mesh_sqs/pieces/part_*.obj`. Do not collapse them into one collision mesh:
+  MuJoCo treats each mesh collision as a convex hull, so a single combined mesh creates
+  one large incorrect convex hull for the whole scene.
+- The generated package writes `box_models/box1.obj ... boxN.obj`, one URDF link/collision
+  per piece, and one MuJoCo `<mesh>`/`<geom>` per piece.
+- Scaling is handled by Holosoma's normal `smpl_scale` path through the generated
+  `*_scaled_*.urdf` and `box_assets_scaled_*.xml`. Do not bake extra scale into qpos or
+  add viewer-only transforms.
+- The viewer must faithfully display saved data. Do not add extra G1 translations,
+  rotations, foot offsets, or hidden scale corrections in the viewer.
+- The retargeter solves the same constrained problem with CLARABEL first and falls
+  back to SCS only for numerical solver failures. SCS can be much slower and may
+  emit `optimal_inaccurate` warnings, but it must not be used as a reason to add
+  viewer-only pose or terrain corrections.
+
+Prepare one sequence:
+
+```bash
+cd /home/ubuntu/FAR/holosoma_gt
+python scripts/prepare_crisp_terrain_retargeting.py --seq 56_outdoor_stairs_up_down
+```
+
+Retarget with the validated terrain/G1 setup:
+
+```bash
+cd /home/ubuntu/FAR/holosoma_gt/src/holosoma_retargeting/holosoma_retargeting
+python examples/robot_retarget.py \
+    --data_path demo_data/crisp_terrain \
+    --task-type climbing \
+    --task-name 56_outdoor_stairs_up_down \
+    --data_format smplx \
+    --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf \
+    --task-config.object-name multi_boxes \
+    --save_dir demo_results/g1/climbing/crisp_terrain_footsticking_tol2cm_keytrack_fixedmap_pieces \
+    --retargeter.w-keypoint-tracking 100.0 \
+    --retargeter.foot-sticking-tolerance 0.02
+```
+
+Foot sticking is intentionally enabled in this setup. The default tolerance
+`1e-3` can be too strict for CRISP/HMR stair data and caused infeasible solves on
+`56_outdoor_stairs_up_down`; use `--retargeter.foot-sticking-tolerance 0.02`.
+
+Batch all available VGGT-Omega terrain sequences from the CRISP output tree:
+
+```bash
+cd /home/ubuntu/FAR/holosoma_gt
+python scripts/run_crisp_terrain_retargeting_batch.py --workers 8
+```
+
+The batch script discovers sequences that have both
+`results/output/gmr_scene_inputs/vggt_omega/<seq>/joint_frames_scene.npz` and
+`results/output/post_scene_vggt_omega/<seq>/gv/scene_mesh_sqs/scene_mesh_sqs.obj`.
+It skips existing `*_original.npz` files unless `--force` is passed and writes
+per-sequence logs under the save directory's `_logs/` folder.
+
+For visualization, prefer direct terrain piece loading so the display matches the
+piece-wise collision setup without making `yourdfpy` parse a large static terrain URDF:
+
+```bash
+python viser_player.py \
+    --port 9304 \
+    --robot-urdf models/g1/g1_29dof_spherehand.urdf \
+    --terrain-mesh-dir demo_data/crisp_terrain/56_outdoor_stairs_up_down/box_models \
+    --terrain-scale 0.8579007369929165 \
+    --qpos-npz demo_results/g1/climbing/crisp_terrain_footsticking_tol2cm_keytrack_fixedmap_pieces/56_outdoor_stairs_up_down_original.npz \
+    --no-assume-object-in-qpos \
+    --loop \
+    --grid-width 10 \
+    --grid-height 10
+```
+
+The `terrain-scale` value should match the generated `box_assets_scaled_*.xml` scale
+for that sequence. The viewer provides separate checkboxes for G1, terrain, and HMR.
+
 ```bash
 # Visualize object-interaction results
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \

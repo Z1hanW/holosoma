@@ -10,6 +10,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
+from dataclasses import replace
 
 # Add src to path for direct execution
 import time
@@ -23,16 +24,17 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 
 # Import reusable functions from robot_retarget.py
 from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
+    _is_object_task,
     build_retargeter_kwargs_from_config,
     create_task_constants,
     initialize_robot_pose,
+    load_required_contact_start_idx,
     load_motion_data,
     setup_object_data,
 )
@@ -43,6 +45,7 @@ from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
 )
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
     extract_foot_sticking_sequence_velocity,
+    extract_foot_sticking_sequence_contact_aware,
     preprocess_motion_data,
 )
 
@@ -52,6 +55,8 @@ from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  
 PARALLEL_SAVE_DIRS = {
     "robot_only": "demo_results_parallel/{robot}/robot_only/omomo",
     "object_interaction": "demo_results_parallel/{robot}/object_interaction/omomo",
+    "w_obj": "demo_results_parallel/{robot}/object_interaction/omomo",
+    "w-obj-scale": "demo_results_parallel/{robot}/object_interaction/omomo",
     "climbing": "demo_results_parallel/{robot}/climbing/mocap_climb",
 }
 
@@ -99,7 +104,7 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
         # No augmentation for robot_only
         return [{"name": "original"}]
 
-    if task_type == "object_interaction":
+    if _is_object_task(task_type):
         """Generate different augmentation configurations for object interaction."""
         augmentations = []
         augmentations.append({"name": "original", "translation": np.array([0.0, 0.0, 0.0]), "rotation": 0.0})
@@ -172,8 +177,6 @@ def process_single_task(args):
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and task_config.object_dir is None:
-        from dataclasses import replace
-
         task_config = replace(task_config, object_dir=Path(file_path))
 
     constants = create_task_constants(robot_config, motion_data_config, task_config, task_type)
@@ -231,27 +234,57 @@ def process_single_task(args):
 
         # Preprocess motion data
         if task_type == "robot_only":
-            human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-        elif task_type in {"object_interaction", "climbing"}:
+            human_joints = preprocess_motion_data(
+                human_joints,
+                retargeter,
+                toe_names,
+                smpl_scale,
+                source_mat_height=motion_data_config.source_mat_height,
+                ground_z_override=motion_data_config.ground_z_override,
+                ground_reference_mode=motion_data_config.ground_reference_mode,
+            )
+        elif _is_object_task(task_type) or task_type == "climbing":
             human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-                human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
+                human_joints,
+                retargeter,
+                toe_names,
+                scale=smpl_scale,
+                source_mat_height=motion_data_config.source_mat_height,
+                ground_z_override=motion_data_config.ground_z_override,
+                ground_reference_mode=motion_data_config.ground_reference_mode,
+                object_poses=object_poses,
             )
 
+        # Persist the detector policy with every complete or partial result so
+        # batch outputs remain self-describing.
+        retargeter.source_foot_sticking_mode = str(motion_data_config.foot_sticking_mode)
+
         # Extract foot sticking sequences
-        foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
-            human_joints, retargeter.demo_joints, toe_names
-        )
+        if motion_data_config.foot_sticking_mode == "contact_aware":
+            foot_sticking_sequences = extract_foot_sticking_sequence_contact_aware(
+                human_joints,
+                retargeter.demo_joints,
+                toe_names,
+                velocity_threshold=motion_data_config.foot_contact_velocity_threshold,
+                height_margin=motion_data_config.foot_contact_height_margin,
+            )
+        else:
+            foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
+                human_joints, retargeter.demo_joints, toe_names
+            )
 
         # Task-specific foot sticking adjustments
-        if task_type == "object_interaction":
-            # Disable initial sticking
-            foot_sticking_sequences[0][toe_names[0]] = False
-            foot_sticking_sequences[0][toe_names[1]] = False
+        if _is_object_task(task_type):
+            # A grounded run needs frame 0 support; legacy XY-only sticking
+            # keeps the historical frame-0 behavior otherwise.
+            initial_sticking = bool(retargeter.foot_sticking_pin_z)
+            foot_sticking_sequences[0][toe_names[0]] = initial_sticking
+            foot_sticking_sequences[0][toe_names[1]] = initial_sticking
 
         # Determine if this is an augmentation run (k > 0 means we're augmenting)
         is_augmentation_run = k > 0
 
-        if task_type == "object_interaction":
+        if _is_object_task(task_type):
             # Initialize robot pose
             q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
                 task_type,
@@ -287,6 +320,13 @@ def process_single_task(args):
             continue
 
         # Retarget motion
+        contact_start_idx = None
+        if retargeter.foot_grounding_schedule == "before_contact":
+            contact_start_idx = load_required_contact_start_idx(
+                data_path,
+                task_name,
+                human_joints.shape[0],
+            )
         retargeted_motions, _, _, _ = retargeter.retarget_motion(
             human_joint_motions=human_joints,
             object_poses=object_poses,
@@ -298,6 +338,7 @@ def process_single_task(args):
             q_nominal_list=q_nominal,
             original=(k == 0),
             dest_res_path=file_name,
+            contact_start_idx=contact_start_idx,
         )
 
 
@@ -324,7 +365,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
         cfg.robot_config = RobotConfig(robot_type=robot)
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
+        cfg.motion_data_config = replace(cfg.motion_data_config, data_format=data_format, robot_type=robot)
 
     if task_type == "robot_only":
         files = find_files(data_dir, data_format)

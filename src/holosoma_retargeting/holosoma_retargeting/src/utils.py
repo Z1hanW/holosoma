@@ -210,8 +210,10 @@ def preprocess_motion_data(
     retargeter,
     foot_names,
     scale=0.714,
-    mat_height=0.1,
+    source_mat_height=0.1,
     object_poses=None,
+    ground_z_override=None,
+    ground_reference_mode="sequence_toe_min",
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -221,7 +223,13 @@ def preprocess_motion_data(
         object_poses (np.ndarray): Object poses.
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
-        normalize_height (bool): Whether to normalize human joint heights.
+        source_mat_height (float): Legacy source mat height. Used only when
+            ground_z_override is None.
+        ground_z_override (float | None): Source-space ground Z to subtract
+            from both human joints and object translations before scaling.
+        ground_reference_mode (str): Ground estimator used when no explicit
+            override is supplied. ``first_frame_toe_min`` avoids later HMR foot
+            outliers lifting the initial robot pose.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -231,20 +239,39 @@ def preprocess_motion_data(
         retargeter.demo_joints.index(foot_names[0]),
         retargeter.demo_joints.index(foot_names[1]),
     ]
-    z_min = human_joints[:, toe_indices, 2].min()
-    if z_min >= mat_height:
-        # On a mat.
-        z_min -= mat_height
-    human_joints[:, :, 2] -= z_min
+    if ground_z_override is None:
+        if ground_reference_mode == "world_zero":
+            source_ground_z = 0.0
+        elif ground_reference_mode == "first_frame_toe_min":
+            source_ground_z = float(human_joints[0, toe_indices, 2].min())
+        elif ground_reference_mode == "sequence_toe_min":
+            source_ground_z = float(human_joints[:, toe_indices, 2].min())
+            if source_ground_z >= source_mat_height:
+                source_ground_z -= source_mat_height
+        else:
+            raise ValueError(
+                "ground_reference_mode must be sequence_toe_min, first_frame_toe_min, or world_zero, "
+                f"got {ground_reference_mode!r}"
+            )
+        resolved_ground_reference_mode = str(ground_reference_mode)
+    else:
+        source_ground_z = float(ground_z_override)
+        resolved_ground_reference_mode = "explicit_override"
+    retargeter.source_ground_reference_mode = resolved_ground_reference_mode
+    retargeter.source_ground_z_m = source_ground_z
+    human_joints[:, :, 2] -= source_ground_z
 
     # Scale human joints
     human_joints = human_joints * scale
 
     if object_poses is not None:
         object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
-        object_z0 = object_poses[0, -1]
-        dz_scale = (object_poses[:, -1] - object_z0) * scale
-        object_poses[:, -1] = object_z0 + dz_scale
+        if ground_z_override is None:
+            object_z0 = object_poses[0, -1]
+            dz_scale = (object_poses[:, -1] - object_z0) * scale
+            object_poses[:, -1] = object_z0 + dz_scale
+        else:
+            object_poses[:, -1] = (object_poses[:, -1] - source_ground_z) * scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
 
@@ -255,6 +282,8 @@ def preprocess_motion_data(
 
 def extract_object_first_moving_frame(object_poses, vel_threshold=0.0025):
     """Extract the first frame where the object starts moving."""
+    if len(object_poses) < 2:
+        return 0
     object_vel = np.diff(object_poses, axis=0)
     object_vel_norm = np.linalg.norm(object_vel, axis=1)
     return np.argmax(object_vel_norm > vel_threshold)
@@ -713,6 +742,37 @@ def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names
     return [
         {"L_Toe": left_toe_velocity[i] <= velocity_threshold, "R_Toe": right_toe_velocity[i] <= velocity_threshold}
         for i in range(len(smpl_joints))
+    ]
+
+
+def extract_foot_sticking_sequence_contact_aware(
+    smpl_joints,
+    demo_joints,
+    foot_names,
+    velocity_threshold=0.01,
+    height_margin=0.03,
+):
+    """Detect support using 3D toe speed and height relative to frame 0."""
+    joints = np.asarray(smpl_joints, dtype=np.float64)
+    if joints.ndim != 3 or joints.shape[0] == 0 or joints.shape[2] != 3:
+        raise ValueError(f"Expected non-empty (T, J, 3) joints, got {joints.shape}")
+    if velocity_threshold < 0.0 or height_margin < 0.0:
+        raise ValueError("Foot contact thresholds must be non-negative")
+
+    toe_indices = [demo_joints.index(name) for name in foot_names]
+    toe_positions = joints[:, toe_indices, :]
+    toe_speed = np.linalg.norm(np.diff(toe_positions, axis=0), axis=2)
+    toe_speed = np.concatenate(
+        [np.full((1, 2), np.inf, dtype=np.float64), toe_speed],
+        axis=0,
+    )
+    height_limit = toe_positions[0, :, 2] + float(height_margin)
+    contact = (toe_speed <= float(velocity_threshold)) & (
+        toe_positions[:, :, 2] <= height_limit[None, :]
+    )
+    return [
+        {foot_names[0]: bool(contact[i, 0]), foot_names[1]: bool(contact[i, 1])}
+        for i in range(joints.shape[0])
     ]
 
 

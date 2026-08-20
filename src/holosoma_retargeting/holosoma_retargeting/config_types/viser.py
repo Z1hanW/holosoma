@@ -16,11 +16,20 @@ class ViserConfig:
     qpos_npz: str = "rt_results/OMOMO_new/box_parallel/sub8_largebox_051_original.npz"
     """Path to .npz file with qpos data."""
 
+    port: int = 9304
+    """Port for the viser web server."""
+
     robot_urdf: str = "models/g1/g1_29dof.urdf"
     """Path to robot URDF file."""
 
     object_urdf: str | None = None
     """Path to object URDF file (optional)."""
+
+    terrain_mesh_dir: str | None = None
+    """Optional directory of terrain OBJ pieces to draw directly instead of object_urdf."""
+
+    terrain_scale: float = 1.0
+    """Uniform scale applied to terrain_mesh_dir meshes."""
 
     fps: int = 30
     """Frames per second for playback."""
@@ -33,6 +42,9 @@ class ViserConfig:
 
     show_meshes: bool = True
     """Whether to show mesh visualizations."""
+
+    show_human: bool = True
+    """Whether to show human reference joints when present in the qpos npz."""
 
     grid_width: float = 8.0
     """Grid width for visualization."""

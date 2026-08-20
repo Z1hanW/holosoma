@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Tuple
+from typing import Any, Callable, List, Tuple
 
 import numpy as np
 import viser  # type: ignore[import-not-found]
@@ -23,6 +23,9 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    on_update: Callable[[np.ndarray, int], None] | None = None,
+    sequence_setter_out: dict[str, Any] | None = None,
+    state_lock: Any | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -54,13 +57,17 @@ def create_motion_control_sliders(
     n_frames = int(qpos.shape[0])
     if n_frames == 0:
         raise ValueError("motion_sequence is empty.")
+    update_lock = state_lock if state_lock is not None else threading.RLock()
 
-    has_object_input = (
-        viser_object is not None
-        and object_base_frame is not None
-        and contains_object_in_qpos
-        and qpos.shape[1] >= (7 + robot_dof + 7)
-    )
+    def _has_object_input(qpos_arr: np.ndarray) -> bool:
+        return (
+            viser_object is not None
+            and object_base_frame is not None
+            and contains_object_in_qpos
+            and qpos_arr.shape[1] >= (7 + robot_dof + 7)
+        )
+
+    has_object_input = _has_object_input(qpos)
 
     # ---------------- GUI ----------------
     with server.gui.add_folder("Playback"):
@@ -154,83 +161,119 @@ def create_motion_control_sliders(
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
 
     def _apply_discrete_frame(i: int) -> None:
-        i = int(np.clip(i, 0, n_frames - 1))
-        _apply_frame_from_q(qpos[i])
+        with update_lock:
+            i = int(np.clip(i, 0, n_frames - 1))
+            _apply_frame_from_q(qpos[i])
+            if on_update is not None:
+                on_update(qpos[i], i)
 
     # ---------------- controls ----------------
     @play_btn.on_click
     def _(_evt) -> None:
-        playing["flag"] = not playing["flag"]
-        # reset timing & continuity starting from the current slider frame
-        tick["next"] = time.perf_counter()
-        prev["robot_q"] = None
-        prev["obj_q"] = None
-        nonlocal_f["f"] = float(frame_slider.value)
+        with update_lock:
+            playing["flag"] = not playing["flag"]
+            # reset timing & continuity starting from the current slider frame
+            tick["next"] = time.perf_counter()
+            prev["robot_q"] = None
+            prev["obj_q"] = None
+            nonlocal_f["f"] = float(frame_slider.value)
 
     @fps_in.on_update
     def _(_evt) -> None:
-        tick["next"] = time.perf_counter()
+        with update_lock:
+            tick["next"] = time.perf_counter()
 
     @interp_mult_in.on_update
     def _(_evt) -> None:
-        tick["next"] = time.perf_counter()
+        with update_lock:
+            tick["next"] = time.perf_counter()
 
     @frame_slider.on_update
     def _(_evt) -> None:
-        # Only pause if this is a user interaction, not a programmatic update
-        if not updating_programmatically["flag"]:
-            # Pause when scrubbing so the background loop doesn't overwrite immediately
-            playing["flag"] = False
-            tick["next"] = time.perf_counter()
-            frame_val = int(frame_slider.value)
-            _apply_discrete_frame(frame_val)
-            prev["robot_q"] = None
-            prev["obj_q"] = None
-            nonlocal_f["f"] = float(frame_val)
+        with update_lock:
+            # Only pause if this is a user interaction, not a programmatic update
+            if not updating_programmatically["flag"]:
+                # Pause when scrubbing so the background loop doesn't overwrite immediately
+                playing["flag"] = False
+                tick["next"] = time.perf_counter()
+                frame_val = int(frame_slider.value)
+                _apply_discrete_frame(frame_val)
+                prev["robot_q"] = None
+                prev["obj_q"] = None
+                nonlocal_f["f"] = float(frame_val)
 
     # ---------------- player loop ----------------
     def _player_loop() -> None:
-        if n_frames <= 1:
-            return
         while True:
-            if playing["flag"]:
-                now = time.perf_counter()
-                fps_val = max(1, int(fps_in.value))
-                mult = max(1, int(interp_mult_in.value))
-                dt = 1.0 / (fps_val * mult)
+            sleep_for = 0.02
+            with update_lock:
+                if playing["flag"] and n_frames > 1:
+                    now = time.perf_counter()
+                    fps_val = max(1, int(fps_in.value))
+                    mult = max(1, int(interp_mult_in.value))
+                    dt = 1.0 / (fps_val * mult)
 
-                if now >= tick["next"]:
-                    # advance by one visual step
-                    f = nonlocal_f["f"] + 1.0 / mult
-                    if loop:
-                        f = f % max(1, n_frames)
+                    if now >= tick["next"]:
+                        # advance by one visual step
+                        f = nonlocal_f["f"] + 1.0 / mult
+                        if loop:
+                            f = f % max(1, n_frames)
+                        else:
+                            f = min(f, float(n_frames - 1))
+                        nonlocal_f["f"] = f
+
+                        k0 = int(np.floor(f))
+                        k1 = (k0 + 1) % max(1, n_frames) if loop else min(k0 + 1, n_frames - 1)
+                        u = float(f - k0)
+
+                        q_interp = _interp_frame(qpos, k0, k1, u)
+                        _apply_frame_from_q(q_interp)
+                        if on_update is not None:
+                            on_update(q_interp, k0)
+
+                        # Update slider to show current frame number in real-time
+                        # Use flag to prevent callback from pausing playback
+                        updating_programmatically["flag"] = True
+                        frame_slider.value = k0
+                        updating_programmatically["flag"] = False
+
+                        tick["next"] = now + dt
+                        sleep_for = 0.0
                     else:
-                        f = min(f, float(n_frames - 1))
-                    nonlocal_f["f"] = f
-
-                    k0 = int(np.floor(f))
-                    k1 = (k0 + 1) % max(1, n_frames) if loop else min(k0 + 1, n_frames - 1)
-                    u = float(f - k0)
-
-                    q_interp = _interp_frame(qpos, k0, k1, u)
-                    _apply_frame_from_q(q_interp)
-
-                    # Update slider to show current frame number in real-time
-                    # Use flag to prevent callback from pausing playback
-                    updating_programmatically["flag"] = True
-                    frame_slider.value = k0
-                    updating_programmatically["flag"] = False
-
-                    tick["next"] = now + dt
-                else:
-                    time.sleep(min(0.002, max(0.0, tick["next"] - now)))
-            else:
-                time.sleep(0.02)
+                        sleep_for = min(0.002, max(0.0, tick["next"] - now))
+            if sleep_for > 0.0:
+                time.sleep(sleep_for)
 
     threading.Thread(target=_player_loop, daemon=True).start()
 
     # initial draw
     _apply_discrete_frame(0)
+
+    def _set_sequence(new_motion_sequence: np.ndarray, new_fps: int | None = None) -> None:
+        nonlocal qpos, n_frames, has_object_input
+        new_qpos = np.asarray(new_motion_sequence)
+        if new_qpos.ndim != 2 or new_qpos.shape[0] == 0:
+            raise ValueError("new motion_sequence must have shape [T, D] with T > 0.")
+        with update_lock:
+            playing["flag"] = False
+            qpos = new_qpos
+            n_frames = int(qpos.shape[0])
+            has_object_input = _has_object_input(qpos)
+            prev["robot_q"] = None
+            prev["obj_q"] = None
+            nonlocal_f["f"] = 0.0
+            tick["next"] = time.perf_counter()
+            if new_fps is not None:
+                fps_in.value = int(new_fps)
+            if hasattr(frame_slider, "max"):
+                frame_slider.max = max(0, n_frames - 1)
+            updating_programmatically["flag"] = True
+            frame_slider.value = 0
+            updating_programmatically["flag"] = False
+            _apply_discrete_frame(0)
+
+    if sequence_setter_out is not None:
+        sequence_setter_out["set_sequence"] = _set_sequence
 
     # keep consistent with your previous return convention
     return [frame_slider], [0.0]

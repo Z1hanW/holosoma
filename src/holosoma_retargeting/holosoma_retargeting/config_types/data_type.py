@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -173,6 +174,24 @@ SMPLX_DEMO_JOINTS = [
     "R_Wrist",
 ]
 
+SEEDANCE_DEMO_JOINTS = [
+    "Pelvis",
+    "L_Hip",
+    "R_Hip",
+    "L_Knee",
+    "R_Knee",
+    "L_Shoulder",
+    "R_Shoulder",
+    "L_Elbow",
+    "R_Elbow",
+    "L_Ankle",
+    "R_Ankle",
+    "L_Toe",
+    "R_Toe",
+    "L_Wrist",
+    "R_Wrist",
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -257,8 +276,8 @@ JOINTS_MAPPINGS = {
         "R_Ankle": "right_ankle_intermediate_1_link",
         "L_Foot": "left_ankle_roll_sphere_5_link",
         "R_Foot": "right_ankle_roll_sphere_5_link",
-        "L_Wrist": "left_rubber_hand_link",
-        "R_Wrist": "right_rubber_hand_link",
+        "L_Wrist": "left_sphere_hand_link",
+        "R_Wrist": "right_sphere_hand_link",
     },
     ("mocap", "g1"): {
         "Spine1": "pelvis_contour_link",
@@ -302,6 +321,7 @@ TOE_NAMES_BY_FORMAT = {
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
     "smplx": ["L_Foot", "R_Foot"],
+    "seedance": ["L_Toe", "R_Toe"],
 }
 
 
@@ -328,7 +348,11 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
+    "seedance": SEEDANCE_DEMO_JOINTS,
 }
+
+JOINTS_MAPPINGS[("seedance", "g1")] = JOINTS_MAPPINGS[("smplh", "g1")]
+JOINTS_MAPPINGS[("seedance", "t1")] = JOINTS_MAPPINGS[("smplh", "t1")]
 
 # Type alias for data formats - use str to allow dynamic data formats via DEMO_JOINTS_REGISTRY
 # No need to update this when adding new formats - just add to DEMO_JOINTS_REGISTRY above
@@ -353,12 +377,54 @@ class MotionDataConfig:
     # Use str instead of Literal to allow dynamic robot types
     robot_type: str = "g1"
     robot_defaults: dict[str, RobotDefaults] = field(default_factory=_default_robot_defaults)
+    ground_z_override: float | None = None
+    """Source-space ground Z shared by human, object, and scene transforms."""
+
+    ground_reference_mode: str = "sequence_toe_min"
+    """Ground estimator without an override: sequence_toe_min, first_frame_toe_min, or world_zero."""
+
+    source_mat_height: float = 0.1
+    """Legacy source mat height retained when ground_z_override is not set."""
+
+    foot_sticking_mode: str = "xy_velocity"
+    """Foot-contact detector: legacy xy_velocity or contact_aware."""
+
+    foot_contact_velocity_threshold: float = 0.01
+    """Maximum per-frame 3D toe displacement for contact-aware sticking."""
+
+    foot_contact_height_margin: float = 0.03
+    """Maximum toe height above its initial reference for contact-aware sticking."""
 
     def __post_init__(self) -> None:
         """Validate data_format and robot_type."""
         _validate_data_format(self.data_format)
 
         _validate_robot_type(self.robot_type, self.robot_defaults)
+        if self.ground_z_override is not None and not math.isfinite(self.ground_z_override):
+            raise ValueError(f"ground_z_override must be finite, got {self.ground_z_override}")
+        if self.ground_reference_mode not in {
+            "sequence_toe_min",
+            "first_frame_toe_min",
+            "world_zero",
+        }:
+            raise ValueError(
+                "ground_reference_mode must be sequence_toe_min, first_frame_toe_min, or world_zero, "
+                f"got {self.ground_reference_mode!r}"
+            )
+        if not math.isfinite(self.source_mat_height) or self.source_mat_height < 0.0:
+            raise ValueError(f"source_mat_height must be finite and nonnegative, got {self.source_mat_height}")
+        if self.foot_sticking_mode not in {"xy_velocity", "contact_aware"}:
+            raise ValueError(
+                "foot_sticking_mode must be xy_velocity or contact_aware, "
+                f"got {self.foot_sticking_mode!r}"
+            )
+        if (
+            not math.isfinite(self.foot_contact_velocity_threshold)
+            or self.foot_contact_velocity_threshold < 0.0
+        ):
+            raise ValueError("foot_contact_velocity_threshold must be finite and non-negative")
+        if not math.isfinite(self.foot_contact_height_margin) or self.foot_contact_height_margin < 0.0:
+            raise ValueError("foot_contact_height_margin must be finite and non-negative")
 
     # Optional overrides - if None, will use defaults from data_format
     demo_joints: list[str] | None = None
