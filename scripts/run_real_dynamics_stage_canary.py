@@ -81,12 +81,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--line-search-steps", type=int, default=8)
+    parser.add_argument(
+        "--maximum-qvel-consistency",
+        type=float,
+        default=None,
+    )
     parser.add_argument("--allow-inaccurate-qp", action="store_true")
     parser.add_argument(
         "--maximum-inaccurate-qp-violation",
         type=float,
         default=1.0,
     )
+    parser.add_argument("--project-inaccurate-qp", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     return parser.parse_args()
@@ -250,10 +256,12 @@ def main() -> int:
             args.maximum_collision_violation
         ),
         line_search_steps=args.line_search_steps,
+        maximum_qvel_consistency=args.maximum_qvel_consistency,
         allow_inaccurate_qp=args.allow_inaccurate_qp,
         maximum_inaccurate_qp_violation=(
             args.maximum_inaccurate_qp_violation
         ),
+        project_inaccurate_qp=args.project_inaccurate_qp,
     )
     result = MujocoDynamicsTrajectoryOptimizer(
         model,
@@ -322,6 +330,20 @@ def main() -> int:
             "diagnostics": result.qp_result.diagnostics,
             "used_inaccurate_direction": result.used_inaccurate_qp,
         },
+        "direction_projection": (
+            None
+            if result.direction_projection is None
+            else {
+                "backend": result.direction_projection.backend,
+                "status": result.direction_projection.status,
+                "iterations": result.direction_projection.iterations,
+                "solve_time_s": result.direction_projection.solve_time_s,
+                "max_constraint_violation": (
+                    result.direction_projection.max_constraint_violation
+                ),
+                "diagnostics": result.direction_projection.diagnostics,
+            }
+        ),
         "initial_inverse_dynamics_audit": initial_dynamics.summary(),
         "final_qpos_inverse_dynamics_audit": final_qpos_dynamics.summary(),
         "initial_linearized_defect_mean": float(
@@ -363,11 +385,18 @@ def main() -> int:
                 "step_size": step_size,
                 "dynamics_mean": dynamics_mean,
                 "collision_violation_m": collision_violation,
+                "qvel_consistency_max": qvel_consistency_max,
             }
-            for step_size, dynamics_mean, collision_violation in zip(
+            for (
+                step_size,
+                dynamics_mean,
+                collision_violation,
+                qvel_consistency_max,
+            ) in zip(
                 result.line_search_step_sizes,
                 result.line_search_dynamics_means,
                 result.line_search_collision_violations,
+                result.line_search_qvel_consistency_maxes,
             )
         ],
         "initial_collision_violation_m": (
@@ -378,6 +407,9 @@ def main() -> int:
         ),
         "collision_violation_limit_m": (
             result.collision_violation_limit
+        ),
+        "line_search_final_qvel_consistency_max": (
+            result.final_qvel_consistency_max
         ),
         "final_nonlinear_defect_mean": float(
             np.mean(result.final_defect_norm)

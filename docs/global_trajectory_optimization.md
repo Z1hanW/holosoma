@@ -199,6 +199,27 @@ re-estimating them from `qpos`. One chained iteration then reduced defect from
 iteration and stopped the driver automatically. This is measurable but very
 small dynamics progress, not a converged dynamics retargeting result.
 
+Projecting a GPU time-limit direction onto the QP's sparse feasible set is
+substantially more effective. The OSQP projection has a diagonal Hessian and
+the original sparse constraints; it took `0.029-0.055 s` and reduced linear
+constraint violation from roughly `3e-2..6e-2` to at most `4.7e-6`. The first
+nonlinear-safe step then increased from `1/2048` to `1/16`.
+
+Three automatic projected-direction iterations with a fixed `5.0` maximum
+qpos-derived velocity-consistency norm produced:
+
+```text
+mean nonlinear defect              52.152 -> 51.373
+qpos-derived rollout qvel defect   52.123 -> 50.731
+qpos-derived rollout qpos defect    1.737 -> 1.691
+contact wrist error                17.504 -> 16.933 mm
+collision violation             2.029e-6 -> 1.167e-6 m
+final qvel consistency maximum                  4.985
+```
+
+The GPU QPs still ended at their 30-second time limit, so these results remain
+line-searched approximate SQP progress rather than a converged QP certificate.
+
 ## Production boundary
 
 This code is not yet a replacement for the accepted strict retargeter.

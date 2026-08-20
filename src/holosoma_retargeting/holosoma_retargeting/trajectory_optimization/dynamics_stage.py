@@ -7,6 +7,7 @@ import time
 
 import mujoco
 import numpy as np
+from scipy import sparse as sp
 
 from .builder import (
     LinearDynamics,
@@ -25,7 +26,8 @@ from .mujoco_dynamics import (
 )
 from .mujoco_kinematics import MujocoObjectFrameKinematics
 from .object_pose import decode_object_poses
-from .solvers import SolveResult
+from .problem import SparseQuadraticProblem
+from .solvers import OSQPSolver, SolveResult
 from .sqp import SparseQPSolver
 
 
@@ -52,8 +54,10 @@ class MujocoDynamicsStageSettings:
     maximum_collision_violation: float | None = None
     line_search_steps: int = 8
     minimum_dynamics_improvement: float = 1e-6
+    maximum_qvel_consistency: float | None = None
     allow_inaccurate_qp: bool = False
     maximum_inaccurate_qp_violation: float = 1.0
+    project_inaccurate_qp: bool = False
     dynamics_epsilon: float = 1e-5
 
 
@@ -82,10 +86,13 @@ class MujocoDynamicsStageResult:
     line_search_step_sizes: tuple[float, ...]
     line_search_dynamics_means: tuple[float, ...]
     line_search_collision_violations: tuple[float, ...]
+    line_search_qvel_consistency_maxes: tuple[float, ...]
     initial_collision_violation: float
     final_collision_violation: float
     collision_violation_limit: float
+    final_qvel_consistency_max: float
     used_inaccurate_qp: bool
+    direction_projection: SolveResult | None
     collision_audit: TrajectoryCollisionAudit
 
 
@@ -133,6 +140,27 @@ class MujocoDynamicsTrajectoryOptimizer:
                 ),
             )
         )
+
+    def _qpos_derived_qvel(self, qpos: np.ndarray) -> np.ndarray:
+        dt = 1.0 / self.settings.fps
+        qvel = np.empty((len(qpos), self.model.nv), dtype=np.float64)
+        difference = np.empty(self.model.nv, dtype=np.float64)
+        for frame in range(len(qpos)):
+            if frame == 0:
+                left, right, interval = 0, 1, dt
+            elif frame == len(qpos) - 1:
+                left, right, interval = len(qpos) - 2, len(qpos) - 1, dt
+            else:
+                left, right, interval = frame - 1, frame + 1, 2.0 * dt
+            mujoco.mj_differentiatePos(
+                self.model,
+                difference,
+                interval,
+                qpos[left],
+                qpos[right],
+            )
+            qvel[frame] = difference
+        return qvel
 
     def optimize(
         self,
@@ -335,7 +363,37 @@ class MujocoDynamicsTrajectoryOptimizer:
                 "dynamics QP failed: "
                 f"{qp_result.status}; diagnostics={qp_result.diagnostics}"
             )
-        unpacked = trajectory_problem.unpack(qp_result.solution)
+        direction_solution = qp_result.solution
+        direction_projection = None
+        if not qp_result.success and settings.project_inaccurate_qp:
+            projection_problem = SparseQuadraticProblem(
+                hessian=sp.eye(
+                    problem.variable_count,
+                    format="csc",
+                ),
+                gradient=-qp_result.solution,
+                constraint_matrix=problem.constraint_matrix,
+                lower=problem.lower,
+                upper=problem.upper,
+                metadata={"kind": "feasibility projection"},
+            )
+            direction_projection = OSQPSolver(
+                absolute_tolerance=1e-6,
+                relative_tolerance=1e-6,
+                max_iterations=20_000,
+                polish=False,
+            ).solve(
+                projection_problem,
+                qp_result.solution,
+            )
+            if not direction_projection.success:
+                raise RuntimeError(
+                    "inaccurate dynamics direction projection failed: "
+                    f"{direction_projection.status}; "
+                    f"diagnostics={direction_projection.diagnostics}"
+                )
+            direction_solution = direction_projection.solution
+        unpacked = trajectory_problem.unpack(direction_solution)
         qp_defect = (
             unpacked.states[1:]
             - np.einsum(
@@ -388,11 +446,22 @@ class MujocoDynamicsTrajectoryOptimizer:
         line_search_step_sizes: list[float] = []
         line_search_dynamics_means: list[float] = []
         line_search_collision_violations: list[float] = []
+        line_search_qvel_consistency_maxes: list[float] = []
         updated = nominal
         accepted_scale_knots = np.asarray(scale_knots, dtype=np.float64)
         final_defect = dynamics_linearization.dynamics.offset
         collision_audit = initial_collision_audit
         final_collision_violation = initial_collision_violation
+        final_qvel_consistency_max = float(
+            np.max(
+                np.linalg.norm(
+                    nominal.qvel
+                    - self._qpos_derived_qvel(nominal.qpos),
+                    axis=1,
+                ),
+                initial=0.0,
+            )
+        )
         original_timestep = float(self.model.opt.timestep)
         self.model.opt.timestep = 1.0 / settings.fps
         try:
@@ -436,6 +505,19 @@ class MujocoDynamicsTrajectoryOptimizer:
                 line_search_collision_violations.append(
                     candidate_collision_violation
                 )
+                candidate_qvel_consistency_max = float(
+                    np.max(
+                        np.linalg.norm(
+                            candidate.qvel
+                            - self._qpos_derived_qvel(candidate.qpos),
+                            axis=1,
+                        ),
+                        initial=0.0,
+                    )
+                )
+                line_search_qvel_consistency_maxes.append(
+                    candidate_qvel_consistency_max
+                )
                 dynamics_improved = (
                     candidate_dynamics_mean
                     <= initial_defect_mean
@@ -445,13 +527,25 @@ class MujocoDynamicsTrajectoryOptimizer:
                     candidate_collision_violation
                     <= collision_violation_limit
                 )
-                if dynamics_improved and collision_preserved:
+                velocity_consistent = (
+                    settings.maximum_qvel_consistency is None
+                    or candidate_qvel_consistency_max
+                    <= settings.maximum_qvel_consistency
+                )
+                if (
+                    dynamics_improved
+                    and collision_preserved
+                    and velocity_consistent
+                ):
                     accepted_step_size = step_size
                     updated = candidate
                     final_defect = candidate_defect
                     collision_audit = candidate_collision
                     final_collision_violation = (
                         candidate_collision_violation
+                    )
+                    final_qvel_consistency_max = (
+                        candidate_qvel_consistency_max
                     )
                     accepted_scale_knots = (
                         np.asarray(scale_knots, dtype=np.float64)
@@ -505,9 +599,14 @@ class MujocoDynamicsTrajectoryOptimizer:
             line_search_collision_violations=tuple(
                 line_search_collision_violations
             ),
+            line_search_qvel_consistency_maxes=tuple(
+                line_search_qvel_consistency_maxes
+            ),
             initial_collision_violation=initial_collision_violation,
             final_collision_violation=final_collision_violation,
             collision_violation_limit=collision_violation_limit,
+            final_qvel_consistency_max=final_qvel_consistency_max,
             used_inaccurate_qp=not qp_result.success,
+            direction_projection=direction_projection,
             collision_audit=collision_audit,
         )
