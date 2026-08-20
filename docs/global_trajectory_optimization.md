@@ -272,3 +272,22 @@ geometric penetration as large as 290.6 mm to zero exact violation on the
 hard recovery cases. Seven sequences accepted a dynamics-reducing step; one
 kept its collision-feasible geometric result after safely rejecting the
 dynamics direction.
+
+The complete 68-sequence run produced 64 dynamics-accepted results and four
+collision-feasible geometric-only results, with no failed or unreadable
+artifacts. Aggregate metrics were:
+
+```text
+mean keypoint error                  145.78 -> 36.04 mm
+mean contact-window wrist error      158.14 -> 35.80 mm
+maximum final geometric violation               0.0497 mm
+accepted dynamics mean defect         96.257 -> 95.348
+accepted dynamics trajectories improved             64 / 64
+accepted dynamics steps                               181
+maximum final qvel consistency                       4.999
+maximum final dynamics collision violation         0.0226 mm
+```
+
+The large improvement is in horizon-wide geometric retargeting. The mean
+dynamics-defect reduction is real but modest and remains based on
+time-limited, projected GPU directions rather than converged QP certificates.
