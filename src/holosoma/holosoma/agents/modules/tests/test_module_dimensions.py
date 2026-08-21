@@ -943,6 +943,10 @@ def test_apply_perception_overrides_keeps_critic_plain_for_far_tracking_preset()
     assert actor_cfg.layer_config.perception_encoder_type == "far_tracking_cnn_small"
     assert actor_cfg.layer_config.perception_input_height == 58
     assert actor_cfg.layer_config.perception_input_width == 87
+    assert actor_cfg.layer_config.perception_pretrained is False
+    assert actor_cfg.layer_config.perception_pretrained_path is None
+    assert actor_cfg.layer_config.perception_pretrained_sha256 is None
+    assert actor_cfg.layer_config.perception_freeze_backbone is False
     assert actor_cfg.layer_config.extra_input_to_hidden is False
     assert critic_cfg.type == "MLP"
     assert critic_cfg.layer_config.perception_input_name == ""

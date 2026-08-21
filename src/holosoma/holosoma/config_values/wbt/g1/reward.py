@@ -341,6 +341,30 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
             params={"sigma": 0.25, "dof_names": _WAIST_DOF_NAMES},
             weight=0.0,
         ),
+        "t1_precontact_motion_joint_position_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:t1_precontact_motion_joint_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "dof_names": _LOWER_DOF_NAMES,
+                "lead_steps": 50,
+                "tail_steps": 10,
+                "ramp_steps": 5,
+                "require_complete_contact_window": True,
+            },
+            weight=0.0,
+        ),
+        "t1_precontact_motion_joint_position_waist": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:t1_precontact_motion_joint_position_error_exp",
+            params={
+                "sigma": 0.25,
+                "dof_names": _WAIST_DOF_NAMES,
+                "lead_steps": 50,
+                "tail_steps": 10,
+                "ramp_steps": 5,
+                "require_complete_contact_window": True,
+            },
+            weight=0.0,
+        ),
         "motion_joint_velocity_error_waist": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_joint_velocity_error_exp",
             params={"sigma": 2.0, "dof_names": _WAIST_DOF_NAMES},

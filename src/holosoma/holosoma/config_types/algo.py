@@ -77,8 +77,8 @@ class LayerConfig:
     perception_input_width: int | None = None
     """Optional input width for structured perception encoders."""
 
-    perception_pretrained: bool = True
-    """Whether to load pretrained weights for external perception encoders."""
+    perception_pretrained: bool = False
+    """Whether to load pretrained weights for an external perception backbone."""
 
     perception_pretrained_path: str | None = None
     """Optional local checkpoint path for external perception encoders."""
@@ -86,8 +86,8 @@ class LayerConfig:
     perception_pretrained_sha256: str | None = None
     """Authenticated SHA-256 for an external perception checkpoint."""
 
-    perception_freeze_backbone: bool = True
-    """Freeze external perception backbones and train only projection layers when supported."""
+    perception_freeze_backbone: bool = False
+    """Freeze an external perception backbone and train only its projection when supported."""
 
     perception_target_size: int | tuple[int, int] | None = None
     """Optional target size used by external perception preprocessors."""

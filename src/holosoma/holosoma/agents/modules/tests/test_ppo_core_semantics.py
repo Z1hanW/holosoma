@@ -7236,8 +7236,12 @@ def _strict_teacher_runtime_env(runtime_group):
     )
 
 
-def _strict_teacher_perception_contract(*, runtime_cfg: PerceptionConfig | None = None):
-    checkpoint_cfg = PerceptionConfig(
+def _strict_teacher_perception_contract(
+    *,
+    checkpoint_cfg: PerceptionConfig | None = None,
+    runtime_cfg: PerceptionConfig | None = None,
+):
+    checkpoint_cfg = checkpoint_cfg or PerceptionConfig(
         enabled=True,
         output_mode="camera_depth",
         camera_width=87,
@@ -7349,6 +7353,40 @@ def test_strict_teacher_validation_accepts_exact_perception_manager_alias_contra
     ppo = object.__new__(PPO)
     ppo.strict_teacher_load = True
     _, checkpoint, ppo.env, teacher_actor_cfg = _strict_teacher_perception_contract()
+
+    ppo._validate_teacher_checkpoint_runtime_config(
+        checkpoint,
+        obs_keys=["teacher_actor_obs"],
+        teacher_actor_cfg=teacher_actor_cfg,
+    )
+
+
+def test_strict_teacher_validation_ignores_legacy_backbone_flags_for_native_cnn():
+    """A historical fake freeze=True must not change a trainable native CNN contract."""
+    legacy_checkpoint_cfg = PerceptionConfig(
+        enabled=True,
+        output_mode="camera_depth",
+        camera_width=87,
+        camera_height=58,
+        camera_warp_preprocess=False,
+        camera_warp_normalize=True,
+        encoder_type="far_tracking_cnn_small",
+        encoder_output_dim=32,
+        encoder_pretrained=True,
+        encoder_freeze_backbone=True,
+    )
+    runtime_cfg = dataclasses.replace(
+        legacy_checkpoint_cfg,
+        encoder_pretrained=False,
+        encoder_freeze_backbone=False,
+    )
+    _, checkpoint, env, teacher_actor_cfg = _strict_teacher_perception_contract(
+        checkpoint_cfg=legacy_checkpoint_cfg,
+        runtime_cfg=runtime_cfg,
+    )
+    ppo = object.__new__(PPO)
+    ppo.strict_teacher_load = True
+    ppo.env = env
 
     ppo._validate_teacher_checkpoint_runtime_config(
         checkpoint,

@@ -267,8 +267,8 @@ class PerceptionConfig:
     encoder_fusion: str = "extra_input_to_hidden"
     """How encoded perception is fused into policy modules: 'extra_input_to_hidden' or 'concat'."""
 
-    encoder_pretrained: bool = True
-    """Whether to load pretrained weights for external perception backbones when supported."""
+    encoder_pretrained: bool = False
+    """Whether to load pretrained weights for an external perception backbone."""
 
     encoder_pretrained_path: str | None = None
     """Optional local checkpoint path for external perception backbones."""
@@ -276,8 +276,8 @@ class PerceptionConfig:
     encoder_pretrained_sha256: str | None = None
     """Required SHA-256 for a local external-backbone checkpoint when pretrained is enabled."""
 
-    encoder_freeze_backbone: bool = True
-    """Freeze external perception backbones and train only the projection head when supported."""
+    encoder_freeze_backbone: bool = False
+    """Freeze an external perception backbone and train only its projection head when supported."""
 
     encoder_target_size: int | tuple[int, int] | None = None
     """Optional target size used by external perception preprocessors."""

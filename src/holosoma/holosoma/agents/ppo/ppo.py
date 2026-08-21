@@ -3052,13 +3052,21 @@ class PPO(BaseAlgo):
                     else:
                         input_height = input_width = None
 
-                    layer_manager_fields = (
+                    runtime_encoder_type = str(
+                        getattr(runtime_perception_cfg, "encoder_type", "") or ""
+                    ).strip().lower()
+                    layer_manager_fields = [
                         ("perception_encoder_type", "encoder_type"),
                         ("perception_output_dim", "encoder_output_dim"),
-                        ("perception_freeze_backbone", "encoder_freeze_backbone"),
-                        ("perception_target_size", "encoder_target_size"),
-                        ("perception_patch_size", "encoder_patch_size"),
-                    )
+                    ]
+                    if runtime_encoder_type.startswith("defm_"):
+                        layer_manager_fields.extend(
+                            [
+                                ("perception_freeze_backbone", "encoder_freeze_backbone"),
+                                ("perception_target_size", "encoder_target_size"),
+                                ("perception_patch_size", "encoder_patch_size"),
+                            ]
+                        )
                     for layer_field, manager_field in layer_manager_fields:
                         checkpoint_value = checkpoint_layer_cfg.get(layer_field)
                         runtime_value = getattr(runtime_perception_cfg, manager_field, None)
@@ -3078,9 +3086,6 @@ class PPO(BaseAlgo):
                                 f"checkpoint={checkpoint_value!r} runtime={runtime_value!r}"
                             )
 
-                    runtime_encoder_type = str(
-                        getattr(runtime_perception_cfg, "encoder_type", "") or ""
-                    ).strip().lower()
                     if runtime_encoder_type.startswith("defm_") and (
                         output_mode != "camera_depth"
                         or bool(getattr(runtime_perception_cfg, "camera_warp_normalize", False))

@@ -250,6 +250,8 @@ def _update_module_config(
         and module_type not in {"TransformerEncoder", "TransformerObsTokenEncoder", "TerrainTransformerObsTokenEncoder"}
     )
     perception_height, perception_width = _resolve_perception_obs_hw(perception_cfg)
+    encoder_type = str(perception_cfg.encoder_type).strip().lower()
+    uses_external_backbone = encoder_type.startswith("defm_")
     layer_cfg = dataclasses.replace(
         layer_cfg,
         extra_input_to_hidden=use_extra,
@@ -258,12 +260,21 @@ def _update_module_config(
         perception_encoder_type=perception_cfg.encoder_type,
         perception_input_height=perception_height,
         perception_input_width=perception_width,
-        perception_pretrained=perception_cfg.encoder_pretrained,
-        perception_pretrained_path=perception_cfg.encoder_pretrained_path,
-        perception_pretrained_sha256=getattr(perception_cfg, "encoder_pretrained_sha256", None),
-        perception_freeze_backbone=perception_cfg.encoder_freeze_backbone,
-        perception_target_size=perception_cfg.encoder_target_size,
-        perception_patch_size=perception_cfg.encoder_patch_size,
+        # These fields describe external backbones only.  Materialize neutral
+        # values for native trainable encoders so resolved configs/W&B cannot
+        # falsely claim that the far-tracking CNN is pretrained or frozen.
+        perception_pretrained=(bool(perception_cfg.encoder_pretrained) if uses_external_backbone else False),
+        perception_pretrained_path=(perception_cfg.encoder_pretrained_path if uses_external_backbone else None),
+        perception_pretrained_sha256=(
+            getattr(perception_cfg, "encoder_pretrained_sha256", None)
+            if uses_external_backbone
+            else None
+        ),
+        perception_freeze_backbone=(
+            bool(perception_cfg.encoder_freeze_backbone) if uses_external_backbone else False
+        ),
+        perception_target_size=(perception_cfg.encoder_target_size if uses_external_backbone else None),
+        perception_patch_size=(perception_cfg.encoder_patch_size if uses_external_backbone else None),
     )
 
     if module_type in {"MLP", "FlowMLP"}:

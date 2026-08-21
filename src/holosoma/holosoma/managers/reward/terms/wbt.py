@@ -1427,6 +1427,139 @@ def motion_joint_position_error_exp(
     return reward
 
 
+def _t1_precontact_smooth_gate(
+    env: WholeBodyTrackingManager,
+    motion_command: MotionCommand,
+    *,
+    lead_steps: int,
+    tail_steps: int,
+    ramp_steps: int,
+    require_complete_contact_window: bool,
+) -> torch.Tensor:
+    """Return a per-environment smooth gate around each clip's first contact.
+
+    Contact windows are consumed from ``MotionCommand`` after its established
+    physical-rollout to motion-time conversion.  The gate is zero at
+    ``t1-lead_steps``, ramps to one over ``ramp_steps``, stays one through
+    ``t1+tail_steps-ramp_steps``, and ramps back to zero at
+    ``t1+tail_steps``.  Runtime default-pose prepend rows are masked out so a
+    held timestep cannot repeatedly collect preparation reward.
+    """
+
+    lead_steps = int(lead_steps)
+    tail_steps = int(tail_steps)
+    ramp_steps = int(ramp_steps)
+    if lead_steps <= 0:
+        raise ValueError(f"lead_steps must be positive, got {lead_steps}.")
+    if tail_steps <= 0:
+        raise ValueError(f"tail_steps must be positive, got {tail_steps}.")
+    if ramp_steps <= 0:
+        raise ValueError(f"ramp_steps must be positive, got {ramp_steps}.")
+    if ramp_steps > lead_steps or ramp_steps > tail_steps:
+        raise ValueError(
+            "ramp_steps must not exceed either side of the t1 window: "
+            f"lead_steps={lead_steps}, tail_steps={tail_steps}, ramp_steps={ramp_steps}."
+        )
+
+    cache_key = (
+        int(getattr(env, "_reward_compute_counter", -1)),
+        id(motion_command),
+        lead_steps,
+        tail_steps,
+        ramp_steps,
+        bool(require_complete_contact_window),
+    )
+    cached = getattr(env, "_t1_precontact_smooth_gate_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    windows = getattr(motion_command, "_adaptive_sampling_contact_window_by_clip", None)
+    valid_by_clip = getattr(motion_command, "_adaptive_sampling_contact_window_valid_by_clip", None)
+    clip_ids = getattr(motion_command, "clip_ids", None)
+    time_steps = getattr(motion_command, "time_steps", None)
+    if not all(isinstance(value, torch.Tensor) for value in (windows, valid_by_clip, clip_ids, time_steps)):
+        raise RuntimeError(
+            "t1 pre-contact reward requires MotionCommand's converted contact-window bank, "
+            "clip_ids, and current time_steps."
+        )
+    if windows.ndim != 2 or windows.shape[1] != 2 or valid_by_clip.shape != (windows.shape[0],):
+        raise RuntimeError(
+            "t1 pre-contact reward received an invalid contact-window bank: "
+            f"windows_shape={tuple(windows.shape)}, valid_shape={tuple(valid_by_clip.shape)}."
+        )
+    if clip_ids.shape != (env.num_envs,) or time_steps.shape != (env.num_envs,):
+        raise RuntimeError(
+            "t1 pre-contact reward requires one clip id and current timestep per environment: "
+            f"clip_ids_shape={tuple(clip_ids.shape)}, time_steps_shape={tuple(time_steps.shape)}, "
+            f"num_envs={env.num_envs}."
+        )
+    if bool(((clip_ids < 0) | (clip_ids >= windows.shape[0])).any().item()):
+        raise RuntimeError("t1 pre-contact reward received an out-of-range clip id.")
+
+    selected_valid = valid_by_clip.index_select(0, clip_ids).to(dtype=torch.bool)
+    if require_complete_contact_window and not bool(selected_valid.all().item()):
+        missing = torch.unique(clip_ids[~selected_valid]).detach().cpu().tolist()
+        raise RuntimeError(
+            "t1 pre-contact reward requires a valid converted contact window for every active clip; "
+            f"missing_clip_indices={missing[:20]}."
+        )
+
+    t1 = windows.index_select(0, clip_ids)[:, 0].to(device=time_steps.device, dtype=torch.float32)
+    relative_step = time_steps.to(dtype=torch.float32) - t1
+    fade_in = torch.clamp((relative_step + float(lead_steps)) / float(ramp_steps), 0.0, 1.0)
+    fade_out = torch.clamp((float(tail_steps) - relative_step) / float(ramp_steps), 0.0, 1.0)
+    gate = torch.minimum(fade_in, fade_out)
+    gate = gate * selected_valid.to(device=gate.device, dtype=gate.dtype)
+
+    runtime_prepend_active = getattr(motion_command, "_runtime_default_pose_prepend_active", None)
+    if isinstance(runtime_prepend_active, torch.Tensor):
+        if runtime_prepend_active.shape != (env.num_envs,):
+            raise RuntimeError(
+                "Runtime prepend mask shape does not match t1 reward environments: "
+                f"shape={tuple(runtime_prepend_active.shape)}, num_envs={env.num_envs}."
+            )
+        gate = gate * (~runtime_prepend_active).to(device=gate.device, dtype=gate.dtype)
+
+    metrics = getattr(motion_command, "metrics", None)
+    if isinstance(metrics, dict):
+        metrics["t1_precontact_gate_active_frac"] = (gate > 0.0).to(dtype=torch.float32).mean()
+        metrics["t1_precontact_gate_mean"] = gate.mean()
+        metrics["t1_precontact_contact_window_valid_frac"] = selected_valid.to(dtype=torch.float32).mean()
+
+    setattr(env, "_t1_precontact_smooth_gate_cache", (cache_key, gate))
+    return gate
+
+
+def t1_precontact_motion_joint_position_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    dof_names: list[str] | None = None,
+    dof_name_pattern: str | None = None,
+    lead_steps: int = 50,
+    tail_steps: int = 10,
+    ramp_steps: int = 5,
+    require_complete_contact_window: bool = True,
+) -> torch.Tensor:
+    """Gate reference joint-position tracking around per-clip first contact."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    reward = motion_joint_position_error_exp(
+        env,
+        sigma=sigma,
+        dof_names=dof_names,
+        dof_name_pattern=dof_name_pattern,
+    )
+    gate = _t1_precontact_smooth_gate(
+        env,
+        motion_command,
+        lead_steps=lead_steps,
+        tail_steps=tail_steps,
+        ramp_steps=ramp_steps,
+        require_complete_contact_window=require_complete_contact_window,
+    )
+    return reward * gate.to(dtype=reward.dtype)
+
+
 def motion_joint_velocity_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,

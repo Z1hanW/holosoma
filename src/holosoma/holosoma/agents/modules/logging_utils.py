@@ -32,6 +32,8 @@ REWARD_LOG_GROUPS: dict[str, tuple[str, ...]] = {
         "motion_relative_body_orientation_error_exp",
         "motion_global_body_lin_vel",
         "motion_global_body_ang_vel",
+        "t1_precontact_motion_joint_position_lower",
+        "t1_precontact_motion_joint_position_waist",
     ),
     "Object": (
         "object_global_ref_position_error_exp",
@@ -61,6 +63,9 @@ REWARD_LOG_PARAM_KEYS = (
     "force_sigma",
     "wrist_weight",
     "contact_weight",
+    "lead_steps",
+    "tail_steps",
+    "ramp_steps",
 )
 REWARD_REPORTING_CONTRACT = {
     "legacy_episode": "sum(weight * raw_reward * dt) / max_episode_length_s",
