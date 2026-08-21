@@ -28,6 +28,7 @@ readonly TEACHER_ONNX=${TEACHER_ROOT}/model_40000.onnx
 readonly TEACHER_ONNX_SHA256=a003a77abbeface5bde627f7ac8d4289f81820264a31eb9ae31d0cc8ba86ce92
 readonly TEACHER_PAIR=${TEACHER_ROOT}/model_40000.pair.json
 readonly TEACHER_PAIR_SHA256=859619bd64f76e5ad364c721ea7b9f156ff56e81bae40d11c352169e3f0a5599
+readonly IMMUTABLE_DATA_ROOT=/data/holosoma_runs/formal_distill_7hvy40000_depthab_ws8x2_20260821/immutable_data_v2
 
 case ${ENCODER_ARM} in
   gap) readonly ENCODER_TYPE=far_tracking_cnn_small ;;
@@ -75,10 +76,11 @@ if [[ ${MODE} == formal ]]; then
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
 fi
 
-# The AS launcher requires the effective bank below its clean checkout's data
-# root.  Hard links preserve the already authenticated immutable bytes without
-# distributing source code or consuming a second copy of the asset bank.
-readonly LOCAL_MOTION_DIR=${SOURCE_ROOT}/data/formal_distill_7hvy_exact109_source
+# Keep generated data outside the clean Git checkout at one identical absolute
+# path on every node.  The single-slot/view digest currently authenticates the
+# source paths as well as file bytes, so putting this under SOURCE_ROOT would
+# make canary and formal clones receive different execution identities.
+readonly LOCAL_MOTION_DIR=${IMMUTABLE_DATA_ROOT}/exact109_source
 if [[ ! -d ${LOCAL_MOTION_DIR} ]]; then
   readonly LOCAL_MOTION_INCOMING=${LOCAL_MOTION_DIR}.incoming.$$
   [[ ! -e ${LOCAL_MOTION_INCOMING} ]]
@@ -176,7 +178,7 @@ export HOLOSOMA_GIT_COMMIT_SHA=${COMMIT_SHA} HOLOSOMA_GIT_TREE_SHA=${TREE_SHA}
 export HOLOSOMA_FORMAL_GIT_VERIFICATION_PATH=${VERIFY_ROOT}/node_0.json
 export OMOMO_DATA_DIR=${MOTION_DIR} OMOMO_OBJECT_MAP=${OBJECT_SPEC_PATH}
 export MOTION_DIR OBJECT_URDF=${OBJECT_SPEC_PATH} CONTACT_EXPORT_ROOT=${CONTACT_ROOT} AS_CONTACT_EXPORT_ROOT=${CONTACT_ROOT}
-export AS_SINGLE_SLOT_MOTION_BASE=${SOURCE_ROOT}/data/formal_distill_7hvy_single_slot
+export AS_SINGLE_SLOT_MOTION_BASE=${IMMUTABLE_DATA_ROOT}/single_slot
 export OMOMO_EXPECTED_TOTAL=109 RESUME_FROM_BOX_EXPECTED_TOTAL=109 AS_SUCCESS133_FINAL0P5=0 AS_RANK_LOCAL_SHARDS=1
 export SOLID_ALLOWED_OBJECT_CATEGORIES='["box","ball","barrel","bin"]'
 export CONTACT_SIDECAR_MODE=full-sidecars REQUIRE_MOTION_GENERATOR_TEACHER_MATCH=0
