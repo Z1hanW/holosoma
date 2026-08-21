@@ -194,6 +194,7 @@ export DISTILL_REWARD_CONFIG=g1-29dof-wbt-w-object-generalist-tracking-no-contac
 export ENABLE_OFFLINE_CONTACT_GUIDANCE=False
 export TEACHER_CHECKPOINT=${TEACHER} TEACHER_CHECKPOINT_EXPECTED_SHA256=${TEACHER_SHA256}
 export DEFAULT_AS_TEACHER_CHECKPOINT=${TEACHER}
+export EXPORT_ONNX=True
 export RESUME_FROM_BOX=0 RESUME_FROM_PREVIOUS=0 WANDB_RESUME_SAME_RUN=0
 unset RESUME_TRAINING_CKPT RESUME_CHECKPOINT RESUME_CKPT POLICY_INIT_CKPT POLICY_INIT_CHECKPOINT
 export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
@@ -228,7 +229,6 @@ fi
 EXTRA_ARGS=(
   "reward:${DISTILL_REWARD_CONFIG}"
   randomization:g1_29dof_wbt_w_object_with_action_delay
-  --training.export-onnx=True
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
   --randomization.setup-terms.setup-dof-pos-bias.params.dof-pos-bias-range='[-0.01,0.01]'
