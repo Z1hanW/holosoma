@@ -56,6 +56,8 @@ mkdir -p "${VERIFY_ROOT}"
   --source-root "${SOURCE_ROOT}" --remote-url "${REMOTE_URL}" --remote-ref "${REMOTE_REF}" \
   --commit "${COMMIT_SHA}" --tree "${TREE_SHA}" \
   --output "${VERIFY_ROOT}/node_${NODE_RANK}.json"
+readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
+readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
 check_sha 2de9ee5ca188b70e877c32dd9f0d2975eea99d11aa077bb077cf06ea9ab897bb "${MOTION_DIR}/manifest.json"
 check_sha 70b466aad04837a79f6dd0f4491cb345a73c687209981acd3eb7f4a0365d8f5c "${OBJECT_SPEC_PATH}"
@@ -130,12 +132,13 @@ if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/
 fi
 
 if [[ ${MODE} == formal ]]; then
-  "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" <<'PY'
+  "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" "${SOURCE_SNAPSHOT_ID}" <<'PY'
 import json,sys
 from pathlib import Path
 payload=json.loads(Path(sys.argv[1]).read_text())
 expected={"accepted":True,"world_size":32,"environments_per_rank":2048,
           "completed_iterations_per_rank":2,"commit_sha":sys.argv[2],"tree_sha":sys.argv[3],
+          "source_snapshot_id":sys.argv[4],
           "export_onnx":True,"onnx_checker_passed":True,"onnxruntime_load_passed":True,
           "pytorch_ort_parity_passed":True,"finite_metrics":True,"pure_ppo":True,
           "t1_precontact_total_weight":0.3}
@@ -145,7 +148,7 @@ PY
   if [[ ${NODE_RANK} == 0 ]]; then
     "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
       --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
-      --required-manifest-version 1 --expected-source-snapshot-id "git-${COMMIT_SHA}" \
+      --required-manifest-version 1 --expected-source-snapshot-id "${SOURCE_SNAPSHOT_ID}" \
       --expected-entity zihanw22 --expected-project carry-any --expected-run-id "${RUN_ID}" \
       --expected-run-name "${RUN_NAME}" --expected-world-size 32
   fi
@@ -169,9 +172,8 @@ export HOLOSOMA_RANK_LOCAL_CPU_AFFINITY=1 HOLOSOMA_SYNC_BEFORE_GRAD_ALLREDUCE=1
 export HOLOSOMA_SYNC_AFTER_GRAD_ALLREDUCE=0 HOLOSOMA_SYNC_AFTER_OPTIMIZER_STEP=0
 export HOLOSOMA_SYNC_AFTER_MICROBATCH_FORWARD=0 HOLOSOMA_CONTIGUOUS_MINIBATCHES=1
 
-readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
 export HOLOSOMA_SOURCE_ROOT="${SOURCE_ROOT}"
-export HOLOSOMA_SOURCE_SNAPSHOT_ID="src-${GIT_MANIFEST_SHA256}"
+export HOLOSOMA_SOURCE_SNAPSHOT_ID="${SOURCE_SNAPSHOT_ID}"
 export HOLOSOMA_SOURCE_MANIFEST_SHA256="${GIT_MANIFEST_SHA256}"
 export HOLOSOMA_GIT_REMOTE_URL="${REMOTE_URL}" HOLOSOMA_GIT_REMOTE_REF="${REMOTE_REF}"
 export HOLOSOMA_GIT_COMMIT_SHA="${COMMIT_SHA}" HOLOSOMA_GIT_TREE_SHA="${TREE_SHA}"
