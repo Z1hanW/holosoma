@@ -247,7 +247,6 @@ EXTRA_ARGS=(
   --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_ROOT}"
   --reward.terms.offline-contact-guidance.params.contact-region-names='["left_wrist","right_wrist","left_elbow","right_elbow","left_wrist_roll","right_wrist_roll","left_wrist_pitch","right_wrist_pitch","torso"]'
   --reward.terms.offline-contact-guidance.params.wrist-region-names='["left_wrist","right_wrist"]'
-  --reward.terms.offline-contact-guidance.weight=0.0
   --reward.terms.body-contact-reward-arms.weight=0.0
   --reward.terms.body-contact-reward-palms.weight=0.0
   --reward.terms.body-contact-reward-torso.weight=0.0
