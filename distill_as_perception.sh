@@ -543,6 +543,29 @@ case "${STUDENT_MOTION_END_MODE}" in
     exit 2
     ;;
 esac
+
+# Keep motion-end semantics and bad-tracking semantics independently
+# selectable.  Historically this wrapper overwrote STUDENT_TERMINATION_PROFILE
+# unconditionally from STUDENT_MOTION_END_MODE, which made an explicitly
+# requested z-only bad-tracking profile silently fall back to full XYZ.
+STUDENT_TERMINATION_PROFILE_OVERRIDE=${STUDENT_TERMINATION_PROFILE_OVERRIDE:-}
+if [[ -n "${STUDENT_TERMINATION_PROFILE_OVERRIDE}" ]]; then
+  _student_termination_override=$(echo "${STUDENT_TERMINATION_PROFILE_OVERRIDE}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+  if [[ "${STUDENT_MOTION_END_MODE}" != "episodic" ]]; then
+    echo "[ERROR] STUDENT_TERMINATION_PROFILE_OVERRIDE is supported only with STUDENT_MOTION_END_MODE=episodic." >&2
+    exit 2
+  fi
+  case "${_student_termination_override}" in
+    g1_29dof_wbt_generalist|g1_29dof_wbt_generalist_z_only|g1_29dof_wbt_generalist_all_position_z_only)
+      STUDENT_TERMINATION_PROFILE=${_student_termination_override}
+      ;;
+    *)
+      echo "[ERROR] Unsupported STUDENT_TERMINATION_PROFILE_OVERRIDE=${STUDENT_TERMINATION_PROFILE_OVERRIDE}." >&2
+      exit 2
+      ;;
+  esac
+  unset _student_termination_override
+fi
 export STUDENT_MOTION_END_MODE
 # Training semantics must not depend on inference/debug variables inherited
 # from the caller's shell.  The selected termination profile is the sole
