@@ -84,6 +84,7 @@ RUNTIME_CONTACT_REGION_FILE_SUFFIXES = (
 )
 SOURCE_SNAPSHOT_ID_ENV = "HOLOSOMA_SOURCE_SNAPSHOT_ID"
 SOURCE_MANIFEST_SHA256_ENV = "HOLOSOMA_SOURCE_MANIFEST_SHA256"
+FORMAL_GIT_VERIFICATION_PATH_ENV = "HOLOSOMA_FORMAL_GIT_VERIFICATION_PATH"
 PYTHON_RUNTIME_MANIFEST_SHA256_ENV = "HOLOSOMA_PYTHON_RUNTIME_MANIFEST_SHA256"
 PYTHON_RUNTIME_SITEPACKAGES_ENV = "PYTHON_RUNTIME_SITEPACKAGES"
 _SOURCE_SNAPSHOT_ID_RE = re.compile(r"^src-([0-9a-f]{64})$")
@@ -620,6 +621,55 @@ def _source_snapshot_identity_from_env() -> dict[str, str]:
     return {
         "source_snapshot_id": snapshot_id,
         "source_manifest_sha256": manifest_sha256,
+    }
+
+
+def _formal_git_identity_from_env() -> dict[str, Any]:
+    """Bind a previously fail-closed clean-checkout verification into provenance."""
+
+    raw_path = os.environ.get(FORMAL_GIT_VERIFICATION_PATH_ENV, "").strip()
+    if not raw_path:
+        return {}
+    path = Path(raw_path).expanduser().resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(
+            f"{FORMAL_GIT_VERIFICATION_PATH_ENV} must name one regular non-symlink JSON file"
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("formal Git verification payload must be a JSON object")
+    required_true = (
+        "tracked_diff_clean",
+        "untracked_clean",
+        "legacy_unmapped_gitlinks_inactive_and_empty",
+    )
+    for key in required_true:
+        if payload.get(key) is not True:
+            raise ValueError(f"formal Git verification requires {key}=true")
+    for key in ("commit_sha", "tree_sha", "fetched_ref_commit"):
+        value = payload.get(key)
+        if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+            raise ValueError(f"formal Git verification has malformed {key}: {value!r}")
+    if payload["commit_sha"] != payload["fetched_ref_commit"]:
+        raise ValueError("formal Git commit is not the commit fetched from the declared remote ref")
+    for key in ("remote_url", "remote_ref"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"formal Git verification has empty {key}")
+    declared_submodules = payload.get("declared_submodules")
+    if not isinstance(declared_submodules, list):
+        raise ValueError("formal Git verification declared_submodules must be a list")
+    return {
+        "source_distribution": "direct_remote_git_clean_checkout",
+        "git_remote_url": payload["remote_url"],
+        "git_remote_ref": payload["remote_ref"],
+        "git_commit_sha": payload["commit_sha"],
+        "git_tree_sha": payload["tree_sha"],
+        "git_fetched_ref_commit": payload["fetched_ref_commit"],
+        "git_declared_submodules": declared_submodules,
+        "git_checkout_tracked_diff_clean": True,
+        "git_checkout_untracked_clean": True,
+        "git_legacy_unmapped_gitlinks_inactive_and_empty": True,
     }
 
 
@@ -1454,6 +1504,7 @@ def compute_provenance(
             default=True,
         )
     provenance.update(_source_snapshot_identity_from_env())
+    provenance.update(_formal_git_identity_from_env())
     return provenance
 
 
@@ -1527,6 +1578,7 @@ def compute_generalist_provenance(
         "environment": _environment_metadata(),
     }
     provenance.update(_source_snapshot_identity_from_env())
+    provenance.update(_formal_git_identity_from_env())
     return validate_training_provenance(provenance)
 
 
