@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 16 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
-  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA" >&2
+if [[ ( $# -ne 16 && $# -ne 17 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
+  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA [RECIPE_PROFILE]" >&2
   exit 2
 fi
 
 readonly MODE=$1 ENCODER_ARM=$2 EXPECTED_IP=$3 SOURCE_ROOT=$4 PERSIST_ROOT=$5 MASTER_PORT=$6
 readonly RUN_ID=$7 RUN_NAME=$8 CONTRACT_PATH=$9 CONTRACT_SHA=${10} RULE90_PATH=${11}
 readonly RULE90_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15} TREE_SHA=${16}
+readonly RECIPE_PROFILE=${17:-ppo001to100_fullxyz}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly WORLD_SIZE=8 ENVIRONMENTS_PER_RANK=2048 TOTAL_ENVIRONMENTS=16384
@@ -48,6 +49,39 @@ if [[ ${MODE} == formal ]]; then
 else
   readonly TARGET_ITERATIONS=2 SAVE_INTERVAL=2 CURRICULUM_END_ITER=1
 fi
+
+case ${RECIPE_PROFILE} in
+  ppo001to100_fullxyz)
+    readonly STUDENT_TERMINATION_PROFILE_VALUE=g1-29dof-wbt-generalist
+    readonly BAD_REF_POS=0.5 BAD_REF_ORI=0.8 BAD_BODY_POS=0.25 BAD_OBJECT_POS=0.25 BAD_OBJECT_ORI=0.8
+    readonly PPO_START=0.01 PPO_TARGET=1.0 DAGGER_MATCH_STD_VALUE=False PPO_START_NOISE_STD_VALUE=0.1
+    readonly START_ZERO_END=0.2
+    if [[ ${MODE} == formal ]]; then
+      readonly START_ZERO_START_ITER=0 START_ZERO_END_ITER=39999
+    else
+      readonly START_ZERO_START_ITER=0 START_ZERO_END_ITER=1
+    fi
+    readonly SCHEDULE_NAME_VALUE=distill_7hvy40000_ppo0p01_to1p0_depth_ab
+    readonly SCHEDULE_SUMMARY='PPO/BC 0.01/0.99 to 1.0/0.0; full-XYZ default thresholds; timestep-zero probability fixed at 0.2'
+    ;;
+  sw_threshold_schedule)
+    readonly STUDENT_TERMINATION_PROFILE_VALUE=g1-29dof-wbt-generalist-z-only
+    readonly BAD_REF_POS=1.0 BAD_REF_ORI=1.2 BAD_BODY_POS=0.55 BAD_OBJECT_POS=0.65 BAD_OBJECT_ORI=1.2
+    readonly PPO_START=0.1 PPO_TARGET=0.9 DAGGER_MATCH_STD_VALUE=True PPO_START_NOISE_STD_VALUE=
+    readonly START_ZERO_END=1.0
+    if [[ ${MODE} == formal ]]; then
+      readonly START_ZERO_START_ITER=2500 START_ZERO_END_ITER=39999
+    else
+      readonly START_ZERO_START_ITER=0 START_ZERO_END_ITER=1
+    fi
+    readonly SCHEDULE_NAME_VALUE=distill_7hvy40000_sw_threshold_schedule_depth_ab
+    readonly SCHEDULE_SUMMARY='SW BadTrackingZOnly thresholds; PPO/BC 0.1/0.9 to 0.9/0.1; timestep-zero probability 0.2 to 1.0'
+    ;;
+  *)
+    echo "[ERROR] unsupported recipe profile: ${RECIPE_PROFILE}" >&2
+    exit 2
+    ;;
+esac
 
 check_sha() {
   local expected=$1 path=$2 actual
@@ -154,7 +188,8 @@ if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/
 fi
 
 if [[ ${MODE} == formal ]]; then
-  "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" "${SOURCE_SNAPSHOT_ID}" "${ENCODER_TYPE}" <<'PY'
+  "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" "${SOURCE_SNAPSHOT_ID}" \
+    "${ENCODER_TYPE}" "${RECIPE_PROFILE}" "${PPO_START}" "${PPO_TARGET}" <<'PY'
 import json, sys
 from pathlib import Path
 p=json.loads(Path(sys.argv[1]).read_text())
@@ -162,7 +197,8 @@ expected={"accepted":True,"world_size":8,"environments_per_rank":2048,
           "completed_iterations_per_rank":2,"commit_sha":sys.argv[2],"tree_sha":sys.argv[3],
           "source_snapshot_id":sys.argv[4],"encoder_type":sys.argv[5],
           "teacher_pt_sha256":"d627b6b5f5a2037761889810c4ef2e158d911941ef8a773f93257a283a68b129",
-          "ppo_start_coefficient":0.01,"ppo_target_coefficient":1.0,
+          "ppo_start_coefficient":float(sys.argv[7]),"ppo_target_coefficient":float(sys.argv[8]),
+          "recipe_profile":sys.argv[6],
           "positive_contact_reward":False,"export_onnx":True,
           "onnx_checker_passed":True,"onnxruntime_load_passed":True,
           "pytorch_ort_parity_passed":True,"finite_metrics":True,"distillation_enabled":True}
@@ -222,20 +258,31 @@ export STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]' STUDENT_POLICY_TYPE=mlp
 export PER_GPU_ENVS=${ENVIRONMENTS_PER_RANK} MIN_PER_GPU_ENVS=${ENVIRONMENTS_PER_RANK} TOTAL_NUM_ENVS=${TOTAL_ENVIRONMENTS}
 export TRAINING_SEED=42 NUM_LEARNING_ITERATIONS=${TARGET_ITERATIONS} TARGET_LEARNING_ITERATION=${TARGET_ITERATIONS}
 export SAVE_INTERVAL NUM_MINI_BATCHES=4 NUM_LEARNING_EPOCHS=7
-export PPO_START_EPOCH=0 DAGGER_END_EPOCH=4000 PPO_START_COEFF=0.01 PPO_TARGET_COEFF=1.0 PPO_SCHEDULE_STEP_EPOCHS=500
-export PPO_START_NOISE_STD=0.1 PPO_START_NOISE_STD_UNTIL_COEFF=0.1
-export DAGGER_LOSS_COEF=1.0 DAGGER_MATCH_STD=False DAGGER_REPLAY_ENABLED=False
+export PPO_START_EPOCH=0 DAGGER_END_EPOCH=4000 PPO_START_COEFF=${PPO_START} PPO_TARGET_COEFF=${PPO_TARGET} PPO_SCHEDULE_STEP_EPOCHS=500
+if [[ -n ${PPO_START_NOISE_STD_VALUE} ]]; then
+  export PPO_START_NOISE_STD=${PPO_START_NOISE_STD_VALUE}
+else
+  unset PPO_START_NOISE_STD
+fi
+export PPO_START_NOISE_STD_UNTIL_COEFF=0.1
+export DAGGER_LOSS_COEF=1.0 DAGGER_MATCH_STD=${DAGGER_MATCH_STD_VALUE} DAGGER_REPLAY_ENABLED=False
 export TEACHER_ACTION_MIX_RATIO=0 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=True
 export FIXED_BC_EVAL_LOG_INTERVAL=100 FIXED_BC_GUARD_ENABLED=False
-export START_AT_TIMESTEP_ZERO_PROB=0.2 START_AT_TIMESTEP_ZERO_PROB_END=0.2
-export START_AT_TIMESTEP_ZERO_PROB_START_ITER=0 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${CURRICULUM_END_ITER}
+export START_AT_TIMESTEP_ZERO_PROB=0.2 START_AT_TIMESTEP_ZERO_PROB_END=${START_ZERO_END}
+export START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_ZERO_START_ITER} START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_ZERO_END_ITER}
 export FREEZE_AT_TIMESTEP_ZERO_PROB=0.0 FREEZE_AT_TIMESTEP_ZERO_PROB_END=0.0
 export FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=0 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${CURRICULUM_END_ITER}
 export PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=402653184 PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=402653184
 export PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=134217728 PHYSX_GPU_COLLISION_STACK_SIZE=268435456
 export RUN_NAME TRAINING_NAME=${RUN_NAME} TRAINING_PROJECT=carry-any LOGGER_BASE_DIR PRINT_TRAIN_CMD=1
-export SCHEDULE_NAME=distill_7hvy40000_ppo0p01_to1p0_depth_ab
-export SCHEDULE_NOTES="Fresh 7hvy6x2i/model_40000 frozen label-teacher distillation on exact109; PPO/BC ramps 0.01/0.99 to 1.0/0.0 by iteration 4000; no positive contact reward; depth arm=${ENCODER_ARM} encoder=${ENCODER_TYPE}; all other A/B fields fixed."
+export SCHEDULE_NAME=${SCHEDULE_NAME_VALUE}
+export SCHEDULE_NOTES="Fresh 7hvy6x2i/model_40000 frozen label-teacher distillation on exact109; ${SCHEDULE_SUMMARY}; no positive contact reward; depth arm=${ENCODER_ARM} encoder=${ENCODER_TYPE}; all other A/B fields fixed."
+export STUDENT_TERMINATION_PROFILE=${STUDENT_TERMINATION_PROFILE_VALUE}
+export BAD_TRACKING_REF_POS_THRESHOLD_OVERRIDE=${BAD_REF_POS}
+export BAD_TRACKING_REF_ORI_THRESHOLD_OVERRIDE=${BAD_REF_ORI}
+export BAD_TRACKING_BODY_POS_THRESHOLD_OVERRIDE=${BAD_BODY_POS}
+export BAD_TRACKING_OBJECT_POS_THRESHOLD_OVERRIDE=${BAD_OBJECT_POS}
+export BAD_TRACKING_OBJECT_ORI_THRESHOLD_OVERRIDE=${BAD_OBJECT_ORI}
 
 if [[ ${MODE} == formal ]]; then
   unset WANDB_DISABLED
@@ -274,12 +321,12 @@ EXTRA_ARGS=(
 if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=must); fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  echo "[INFO] worker_preflight_ok mode=${MODE} encoder=${ENCODER_TYPE} teacher=${TEACHER_SHA256} ppo=0.01->1.0 contact_reward=0 export_onnx=true"
+  echo "[INFO] worker_preflight_ok mode=${MODE} encoder=${ENCODER_TYPE} teacher=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} contact_reward=0 export_onnx=true"
   exit 0
 fi
 if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d') ]]; then
   echo "[ERROR] GPU apps appeared after preflight" >&2; exit 2
 fi
 cd "${SOURCE_ROOT}"
-echo "[INFO] launch mode=${MODE} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} ppo_schedule=0.01_to_1.0 no_positive_contact_reward=true export_onnx=true"
+echo "[INFO] launch mode=${MODE} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo_schedule=${PPO_START}_to_${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} no_positive_contact_reward=true export_onnx=true"
 exec bash "${SOURCE_ROOT}/distill_as_button.sh" "${TEACHER}" "${EXTRA_ARGS[@]}"

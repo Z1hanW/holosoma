@@ -312,6 +312,27 @@ scale_threshold() {
   awk -v base="${base}" -v scale="${scale}" 'BEGIN { printf "%.6g", base * scale }'
 }
 
+resolve_bad_tracking_threshold() {
+  local default_value="$1"
+  local override_value="$2"
+  local variable_name="$3"
+  local normalized=""
+  if [[ -z "${override_value}" ]]; then
+    echo "${default_value}"
+    return 0
+  fi
+  if ! normalized=$(awk -v raw="${override_value}" 'BEGIN {
+      if (raw !~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/ || raw + 0 <= 0) {
+        exit 1
+      }
+      printf "%.6g", raw + 0
+    }'); then
+    echo "[ERROR] ${variable_name} must be a finite positive numeric threshold. Got: ${override_value}" >&2
+    exit 2
+  fi
+  echo "${normalized}"
+}
+
 normalize_checkpoint_ref() {
   local ref="$1"
   if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
@@ -1637,11 +1658,26 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
 fi
 
 BAD_TRACKING_THRESHOLD_AUGMENT_NORM="$(normalize_bad_tracking_threshold_augment "${BAD_TRACKING_THRESHOLD_AUGMENT}")"
-BAD_TRACKING_REF_POS_THRESHOLD="$(scale_threshold 0.5 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
-BAD_TRACKING_REF_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
-BAD_TRACKING_BODY_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
-BAD_TRACKING_OBJECT_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
-BAD_TRACKING_OBJECT_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
+BAD_TRACKING_REF_POS_THRESHOLD="$(resolve_bad_tracking_threshold \
+  "$(scale_threshold 0.5 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")" \
+  "${BAD_TRACKING_REF_POS_THRESHOLD_OVERRIDE:-}" \
+  BAD_TRACKING_REF_POS_THRESHOLD_OVERRIDE)"
+BAD_TRACKING_REF_ORI_THRESHOLD="$(resolve_bad_tracking_threshold \
+  "$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")" \
+  "${BAD_TRACKING_REF_ORI_THRESHOLD_OVERRIDE:-}" \
+  BAD_TRACKING_REF_ORI_THRESHOLD_OVERRIDE)"
+BAD_TRACKING_BODY_POS_THRESHOLD="$(resolve_bad_tracking_threshold \
+  "$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")" \
+  "${BAD_TRACKING_BODY_POS_THRESHOLD_OVERRIDE:-}" \
+  BAD_TRACKING_BODY_POS_THRESHOLD_OVERRIDE)"
+BAD_TRACKING_OBJECT_POS_THRESHOLD="$(resolve_bad_tracking_threshold \
+  "$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")" \
+  "${BAD_TRACKING_OBJECT_POS_THRESHOLD_OVERRIDE:-}" \
+  BAD_TRACKING_OBJECT_POS_THRESHOLD_OVERRIDE)"
+BAD_TRACKING_OBJECT_ORI_THRESHOLD="$(resolve_bad_tracking_threshold \
+  "$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")" \
+  "${BAD_TRACKING_OBJECT_ORI_THRESHOLD_OVERRIDE:-}" \
+  BAD_TRACKING_OBJECT_ORI_THRESHOLD_OVERRIDE)"
 holosoma_configure_all_reset_curricula NUM_LEARNING_ITERATIONS || exit
 
 TEACHER_REF_RUN_ID="5vlz6pj8"
