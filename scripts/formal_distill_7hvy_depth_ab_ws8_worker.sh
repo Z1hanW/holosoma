@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ( $# -ne 16 && $# -ne 17 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
-  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA [RECIPE_PROFILE]" >&2
+if [[ ( $# -ne 16 && $# -ne 17 && $# -ne 18 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
+  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA [RECIPE_PROFILE] [CONTACT_PROFILE]" >&2
   exit 2
 fi
 
@@ -10,6 +10,7 @@ readonly MODE=$1 ENCODER_ARM=$2 EXPECTED_IP=$3 SOURCE_ROOT=$4 PERSIST_ROOT=$5 MA
 readonly RUN_ID=$7 RUN_NAME=$8 CONTRACT_PATH=$9 CONTRACT_SHA=${10} RULE90_PATH=${11}
 readonly RULE90_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15} TREE_SHA=${16}
 readonly RECIPE_PROFILE=${17:-ppo001to100_fullxyz}
+readonly CONTACT_PROFILE=${18:-no_contact}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly WORLD_SIZE=8 ENVIRONMENTS_PER_RANK=2048 TOTAL_ENVIRONMENTS=16384
@@ -40,6 +41,23 @@ readonly RANK_SHARD_MANIFEST_SHA256=a639242ca42dec7ce7b0a60257a467e3b85960e1b2b9
 case ${ENCODER_ARM} in
   gap) readonly ENCODER_TYPE=far_tracking_cnn_small ;;
   spatial) readonly ENCODER_TYPE=far_tracking_cnn_spatial_softmax ;;
+esac
+
+case ${CONTACT_PROFILE} in
+  no_contact)
+    readonly DISTILL_REWARD_CONFIG_VALUE=g1-29dof-wbt-w-object-generalist-tracking-no-contact
+    readonly ENABLE_OFFLINE_CONTACT_GUIDANCE_VALUE=False POSITIVE_CONTACT_REWARD_VALUE=false
+    readonly CONTACT_SUMMARY='offline contact guidance disabled (weight 0)'
+    ;;
+  offline_guidance)
+    readonly DISTILL_REWARD_CONFIG_VALUE=g1-29dof-wbt-w-object-generalist-offline-contact-guidance
+    readonly ENABLE_OFFLINE_CONTACT_GUIDANCE_VALUE=True POSITIVE_CONTACT_REWARD_VALUE=true
+    readonly CONTACT_SUMMARY='offline contact guidance enabled (weight 1; contact/wrist 10/5; force threshold 1.0)'
+    ;;
+  *)
+    echo "[ERROR] unsupported contact profile: ${CONTACT_PROFILE}" >&2
+    exit 2
+    ;;
 esac
 
 if [[ ${MODE} == formal ]]; then
@@ -96,7 +114,7 @@ check_sha() {
 hostname -I | tr ' ' '\n' | grep -Fxq "${EXPECTED_IP}" || {
   echo "[ERROR] expected node IP ${EXPECTED_IP}, got $(hostname -I)" >&2; exit 2;
 }
-readonly VERIFY_ROOT=${PERSIST_ROOT}/${MODE}_${ENCODER_ARM}_git_verification
+readonly VERIFY_ROOT=${PERSIST_ROOT}/${MODE}_${ENCODER_ARM}_${CONTACT_PROFILE}_git_verification
 mkdir -p "${VERIFY_ROOT}"
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/verify_formal_git_checkout.py" \
   --source-root "${SOURCE_ROOT}" --remote-url "${REMOTE_URL}" --remote-ref "${REMOTE_REF}" \
@@ -140,9 +158,9 @@ check_sha "${SINGLE_SLOT_MAP_SHA256}" "${SINGLE_SLOT_DIR}/_clip_object_urdf_map.
 check_sha "${RANK_SHARD_MANIFEST_SHA256}" "${RANK_SHARD_DIR}/manifest.json"
 [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f -name '*.npz' | wc -l) -eq 109 ]]
 
-readonly RUN_ROOT=${PERSIST_ROOT}/${MODE}_${ENCODER_ARM}_${RUN_ID}
+readonly RUN_ROOT=${PERSIST_ROOT}/${MODE}_${ENCODER_ARM}_${CONTACT_PROFILE}_${RUN_ID}
 readonly LOGGER_BASE_DIR=${RUN_ROOT}/training_logs
-readonly SCRATCH_ROOT=/dev/shm/holosoma_distill_7hvy_${MODE}_${ENCODER_ARM}
+readonly SCRATCH_ROOT=/dev/shm/holosoma_distill_7hvy_${MODE}_${ENCODER_ARM}_${CONTACT_PROFILE}
 mkdir -p "${RUN_ROOT}" "${LOGGER_BASE_DIR}" "${PERSIST_ROOT}/wandb" \
   "${SCRATCH_ROOT}/tmp" "${SCRATCH_ROOT}/xdg-cache" "${SCRATCH_ROOT}/robot-usd-cache" \
   "${SCRATCH_ROOT}/object-usd-cache" "${SCRATCH_ROOT}/perception-mesh-cache" \
@@ -189,17 +207,19 @@ fi
 
 if [[ ${MODE} == formal ]]; then
   "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" "${SOURCE_SNAPSHOT_ID}" \
-    "${ENCODER_TYPE}" "${RECIPE_PROFILE}" "${PPO_START}" "${PPO_TARGET}" <<'PY'
+    "${ENCODER_TYPE}" "${RECIPE_PROFILE}" "${PPO_START}" "${PPO_TARGET}" \
+    "${POSITIVE_CONTACT_REWARD_VALUE}" "${CONTACT_PROFILE}" <<'PY'
 import json, sys
 from pathlib import Path
 p=json.loads(Path(sys.argv[1]).read_text())
+positive_contact_reward = sys.argv[9].lower() == "true"
 expected={"accepted":True,"world_size":8,"environments_per_rank":2048,
           "completed_iterations_per_rank":2,"commit_sha":sys.argv[2],"tree_sha":sys.argv[3],
           "source_snapshot_id":sys.argv[4],"encoder_type":sys.argv[5],
           "teacher_pt_sha256":"d627b6b5f5a2037761889810c4ef2e158d911941ef8a773f93257a283a68b129",
           "ppo_start_coefficient":float(sys.argv[7]),"ppo_target_coefficient":float(sys.argv[8]),
           "recipe_profile":sys.argv[6],
-          "positive_contact_reward":False,"export_onnx":True,
+          "contact_profile":sys.argv[10],"positive_contact_reward":positive_contact_reward,"export_onnx":True,
           "onnx_checker_passed":True,"onnxruntime_load_passed":True,
           "pytorch_ort_parity_passed":True,"finite_metrics":True,"distillation_enabled":True}
 for key,value in expected.items():
@@ -219,6 +239,21 @@ if sys.argv[6] == "sw_threshold_schedule":
     for key, value in sw_expected.items():
         if p.get(key) != value:
             raise SystemExit(f"invalid SW canary {key}: {p.get(key)!r} != {value!r}")
+if positive_contact_reward:
+    contact_expected = {
+        "weight": 1.0,
+        "contact_weight": 10.0,
+        "wrist_weight": 5.0,
+        "force_threshold": 1.0,
+        "position_sigma": 0.08,
+        "force_sigma": 10.0,
+    }
+    for key, value in contact_expected.items():
+        if p.get("offline_contact_guidance", {}).get(key) != value:
+            raise SystemExit(
+                f"invalid contact canary {key}: "
+                f"{p.get('offline_contact_guidance', {}).get(key)!r} != {value!r}"
+            )
 PY
   "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
     --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
@@ -259,8 +294,8 @@ export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=True
 
 export DISTILL_EXPERIMENT_CONFIG=g1-29dof-wbt-w-object-distill-sparse-root-cmd-teacher-linvel
 export EXP=${DISTILL_EXPERIMENT_CONFIG}
-export DISTILL_REWARD_CONFIG=g1-29dof-wbt-w-object-generalist-tracking-no-contact
-export ENABLE_OFFLINE_CONTACT_GUIDANCE=False
+export DISTILL_REWARD_CONFIG=${DISTILL_REWARD_CONFIG_VALUE}
+export ENABLE_OFFLINE_CONTACT_GUIDANCE=${ENABLE_OFFLINE_CONTACT_GUIDANCE_VALUE}
 export TEACHER_CHECKPOINT=${TEACHER} TEACHER_CHECKPOINT_EXPECTED_SHA256=${TEACHER_SHA256}
 export DEFAULT_AS_TEACHER_CHECKPOINT=${TEACHER}
 export EXPORT_ONNX=True
@@ -291,8 +326,8 @@ export FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=0 FREEZE_AT_TIMESTEP_ZERO_PROB_EN
 export PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=402653184 PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=402653184
 export PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=134217728 PHYSX_GPU_COLLISION_STACK_SIZE=268435456
 export RUN_NAME TRAINING_NAME=${RUN_NAME} TRAINING_PROJECT=carry-any LOGGER_BASE_DIR PRINT_TRAIN_CMD=1
-export SCHEDULE_NAME=${SCHEDULE_NAME_VALUE}
-export SCHEDULE_NOTES="Fresh 7hvy6x2i/model_40000 frozen label-teacher distillation on exact109; ${SCHEDULE_SUMMARY}; no positive contact reward; depth arm=${ENCODER_ARM} encoder=${ENCODER_TYPE}; all other A/B fields fixed."
+export SCHEDULE_NAME=${SCHEDULE_NAME_VALUE}_${CONTACT_PROFILE}
+export SCHEDULE_NOTES="Fresh 7hvy6x2i/model_40000 frozen label-teacher distillation on exact109; ${SCHEDULE_SUMMARY}; ${CONTACT_SUMMARY}; depth arm=${ENCODER_ARM} encoder=${ENCODER_TYPE}; all other fields fixed."
 export STUDENT_TERMINATION_PROFILE_OVERRIDE=${STUDENT_TERMINATION_PROFILE_VALUE}
 export BAD_TRACKING_REF_POS_THRESHOLD_OVERRIDE=${BAD_REF_POS}
 export BAD_TRACKING_REF_ORI_THRESHOLD_OVERRIDE=${BAD_REF_ORI}
@@ -325,24 +360,35 @@ EXTRA_ARGS=(
   --perception.camera-mount-quat='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
   --perception.camera-frame-quat='[-0.5,0.5,-0.5,0.5]'
   --perception.encoder-type="${ENCODER_TYPE}"
-  --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_ROOT}"
-  --reward.terms.offline-contact-guidance.params.contact-region-names='["left_wrist","right_wrist","left_elbow","right_elbow","left_wrist_roll","right_wrist_roll","left_wrist_pitch","right_wrist_pitch","torso"]'
-  --reward.terms.offline-contact-guidance.params.wrist-region-names='["left_wrist","right_wrist"]'
+  --reward.terms.offline-contact-guidance.params.contact-weight=10.0
+  --reward.terms.offline-contact-guidance.params.wrist-weight=5.0
+  --reward.terms.offline-contact-guidance.params.force-threshold=1.0
+  --reward.terms.offline-contact-guidance.params.position-sigma=0.08
+  --reward.terms.offline-contact-guidance.params.force-sigma=10.0
   --reward.terms.body-contact-reward-arms.weight=0.0
   --reward.terms.body-contact-reward-palms.weight=0.0
   --reward.terms.body-contact-reward-torso.weight=0.0
   --reward.terms.body-contact-reward-left-wrist-yaw.weight=0.0
   --reward.terms.body-contact-reward-right-wrist-yaw.weight=0.0
 )
+if [[ ${CONTACT_PROFILE} == no_contact ]]; then
+  # When guidance is disabled the generic launcher only emits the zero weight;
+  # preserve the exact immutable sidecar path and region metadata explicitly.
+  EXTRA_ARGS+=(
+    --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_ROOT}"
+    --reward.terms.offline-contact-guidance.params.contact-region-names='["left_wrist","right_wrist","left_elbow","right_elbow","left_wrist_roll","right_wrist_roll","left_wrist_pitch","right_wrist_pitch","torso"]'
+    --reward.terms.offline-contact-guidance.params.wrist-region-names='["left_wrist","right_wrist"]'
+  )
+fi
 if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=must); fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  echo "[INFO] worker_preflight_ok mode=${MODE} encoder=${ENCODER_TYPE} teacher=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} contact_reward=0 export_onnx=true"
+  echo "[INFO] worker_preflight_ok mode=${MODE} encoder=${ENCODER_TYPE} teacher=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
   exit 0
 fi
 if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d') ]]; then
   echo "[ERROR] GPU apps appeared after preflight" >&2; exit 2
 fi
 cd "${SOURCE_ROOT}"
-echo "[INFO] launch mode=${MODE} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo_schedule=${PPO_START}_to_${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} no_positive_contact_reward=true export_onnx=true"
+echo "[INFO] launch mode=${MODE} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo_schedule=${PPO_START}_to_${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
 exec bash "${SOURCE_ROOT}/distill_as_button.sh" "${TEACHER}" "${EXTRA_ARGS[@]}"
