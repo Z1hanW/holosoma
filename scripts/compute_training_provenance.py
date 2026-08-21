@@ -658,8 +658,19 @@ def _formal_git_identity_from_env() -> dict[str, Any]:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"formal Git verification has empty {key}")
     declared_submodules = payload.get("declared_submodules")
-    if not isinstance(declared_submodules, list):
-        raise ValueError("formal Git verification declared_submodules must be a list")
+    if not isinstance(declared_submodules, dict):
+        raise ValueError("formal Git verification declared_submodules must be an object")
+    for path_key, record in declared_submodules.items():
+        if not isinstance(path_key, str) or not path_key or not isinstance(record, dict):
+            raise ValueError("formal Git verification has malformed declared submodule record")
+        if record.get("status") != "clean":
+            raise ValueError(f"formal Git submodule {path_key!r} is not clean")
+        submodule_sha = record.get("sha")
+        if not isinstance(submodule_sha, str) or _GIT_OBJECT_ID_RE.fullmatch(submodule_sha) is None:
+            raise ValueError(f"formal Git submodule {path_key!r} has malformed SHA")
+        submodule_remote = record.get("remote_url")
+        if not isinstance(submodule_remote, str) or not submodule_remote.strip():
+            raise ValueError(f"formal Git submodule {path_key!r} has empty remote URL")
     return {
         "source_distribution": "direct_remote_git_clean_checkout",
         "git_remote_url": payload["remote_url"],
