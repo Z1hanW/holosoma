@@ -67,7 +67,7 @@ case ${RECIPE_PROFILE} in
   sw_threshold_schedule)
     readonly STUDENT_TERMINATION_PROFILE_VALUE=g1-29dof-wbt-generalist-z-only
     readonly BAD_REF_POS=1.0 BAD_REF_ORI=1.2 BAD_BODY_POS=0.55 BAD_OBJECT_POS=0.65 BAD_OBJECT_ORI=1.2
-    readonly PPO_START=0.1 PPO_TARGET=0.9 DAGGER_MATCH_STD_VALUE=True PPO_START_NOISE_STD_VALUE=
+    readonly PPO_START=0.1 PPO_TARGET=0.9 DAGGER_MATCH_STD_VALUE=True PPO_START_NOISE_STD_VALUE= PPO_START_NOISE_STD_FORCE_NONE_VALUE=True
     readonly START_ZERO_END=1.0
     if [[ ${MODE} == formal ]]; then
       readonly START_ZERO_START_ITER=2500 START_ZERO_END_ITER=39999
@@ -204,6 +204,21 @@ expected={"accepted":True,"world_size":8,"environments_per_rank":2048,
           "pytorch_ort_parity_passed":True,"finite_metrics":True,"distillation_enabled":True}
 for key,value in expected.items():
     if p.get(key)!=value: raise SystemExit(f"invalid canary {key}: {p.get(key)!r} != {value!r}")
+if sys.argv[6] == "sw_threshold_schedule":
+    sw_expected = {
+        "dagger_match_std": True,
+        "ppo_start_noise_std": None,
+        "termination_function": "holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
+        "bad_tracking_thresholds": {
+            "ref_pos": 1.0, "ref_ori": 1.2, "body_pos": 0.55,
+            "object_pos": 0.65, "object_ori": 1.2,
+        },
+        "start_at_timestep_zero_probability_start": 0.2,
+        "start_at_timestep_zero_probability_end": 1.0,
+    }
+    for key, value in sw_expected.items():
+        if p.get(key) != value:
+            raise SystemExit(f"invalid SW canary {key}: {p.get(key)!r} != {value!r}")
 PY
   "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
     --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
@@ -264,6 +279,7 @@ if [[ -n ${PPO_START_NOISE_STD_VALUE} ]]; then
 else
   unset PPO_START_NOISE_STD
 fi
+export PPO_START_NOISE_STD_FORCE_NONE=${PPO_START_NOISE_STD_FORCE_NONE_VALUE:-False}
 export PPO_START_NOISE_STD_UNTIL_COEFF=0.1
 export DAGGER_LOSS_COEF=1.0 DAGGER_MATCH_STD=${DAGGER_MATCH_STD_VALUE} DAGGER_REPLAY_ENABLED=False
 export TEACHER_ACTION_MIX_RATIO=0 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=True
