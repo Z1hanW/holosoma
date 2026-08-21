@@ -60,6 +60,7 @@ def run_logged(
 def wait_for_retarget_summary(
     run_root: Path,
     *,
+    expected_count: int,
     timeout_hours: float,
     poll_seconds: float,
 ) -> dict:
@@ -72,7 +73,11 @@ def wait_for_retarget_summary(
         result_count = len(
             list((run_root / "retarget_strict").glob("*/*_original.npz"))
         )
-        log(f"waiting for retarget: status={status_count}/68 results={result_count}/68")
+        log(
+            "waiting for retarget: "
+            f"status={status_count}/{expected_count} "
+            f"results={result_count}/{expected_count}"
+        )
         time.sleep(poll_seconds)
     summary = read_json(summary_path)
     log(
@@ -203,7 +208,11 @@ def build_seed_bank(args: argparse.Namespace) -> tuple[Path, dict]:
             }
         )
 
-    seed_bank = args.output_root / "seed_bank" / "heightmesh_strict68_qpos.npz"
+    seed_bank = (
+        args.output_root
+        / "seed_bank"
+        / f"heightmesh_strict{args.expected_count}_qpos.npz"
+    )
     seed_bank.parent.mkdir(parents=True, exist_ok=True)
     temporary = seed_bank.with_suffix(".npz.tmp")
     with temporary.open("wb") as stream:
@@ -528,6 +537,8 @@ def build_viewer(args: argparse.Namespace, summary: dict) -> dict:
 
 
 def stop_old_viewer(args: argparse.Namespace) -> None:
+    if args.baseline_root is None:
+        return
     pid_path = args.baseline_root / "viewer" / f"viser_{args.viewer_port}.pid"
     if not pid_path.is_file():
         return
@@ -624,7 +635,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-root", type=Path, required=True)
     parser.add_argument("--object-repo", type=Path, required=True)
     parser.add_argument("--trajopt-repo", type=Path, required=True)
-    parser.add_argument("--baseline-root", type=Path, required=True)
+    parser.add_argument("--baseline-root", type=Path)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--expected-count", type=int, default=68)
@@ -636,7 +647,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers-per-gpu", type=int, default=1)
     parser.add_argument("--viewer-port", type=int, default=9304)
     parser.add_argument("--viewer-sequence", default="prism_cf_bin_m0_v1")
-    return parser.parse_args()
+    parser.add_argument("--skip-comparison", action="store_true")
+    parser.add_argument("--skip-viewer", action="store_true")
+    args = parser.parse_args()
+    if args.baseline_root is None and not args.skip_comparison:
+        parser.error("--baseline-root is required unless --skip-comparison is set")
+    return args
 
 
 def main() -> int:
@@ -660,15 +676,20 @@ def main() -> int:
     try:
         summary = wait_for_retarget_summary(
             args.retarget_run_root,
+            expected_count=args.expected_count,
             timeout_hours=args.retarget_timeout_hours,
             poll_seconds=args.poll_seconds,
         )
         summary = recover_retarget(args, summary)
         seed_bank, seed_report = build_seed_bank(args)
         trajopt_summary = run_trajopt(args, seed_bank)
-        comparison = compare_with_baseline(args, trajopt_summary)
-        viewer = build_viewer(args, trajopt_summary)
-        viewer.update(start_viewer(args))
+        comparison = None
+        if not args.skip_comparison:
+            comparison = compare_with_baseline(args, trajopt_summary)
+        viewer = None
+        if not args.skip_viewer:
+            viewer = build_viewer(args, trajopt_summary)
+            viewer.update(start_viewer(args))
         state.update(
             {
                 "status": "complete",
