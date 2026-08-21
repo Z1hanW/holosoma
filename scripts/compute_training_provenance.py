@@ -89,6 +89,7 @@ PYTHON_RUNTIME_MANIFEST_SHA256_ENV = "HOLOSOMA_PYTHON_RUNTIME_MANIFEST_SHA256"
 PYTHON_RUNTIME_SITEPACKAGES_ENV = "PYTHON_RUNTIME_SITEPACKAGES"
 _SOURCE_SNAPSHOT_ID_RE = re.compile(r"^src-([0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _DATA_ASSET_CACHE_VERSION = 1
 _DATA_ASSET_CACHE_ROOT_ENV = "HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT"
 _DATA_ASSET_CACHE_THREAD_LOCKS: dict[str, threading.Lock] = {}
@@ -648,7 +649,7 @@ def _formal_git_identity_from_env() -> dict[str, Any]:
             raise ValueError(f"formal Git verification requires {key}=true")
     for key in ("commit_sha", "tree_sha", "fetched_ref_commit"):
         value = payload.get(key)
-        if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        if not isinstance(value, str) or _GIT_OBJECT_ID_RE.fullmatch(value) is None:
             raise ValueError(f"formal Git verification has malformed {key}: {value!r}")
     if payload["commit_sha"] != payload["fetched_ref_commit"]:
         raise ValueError("formal Git commit is not the commit fetched from the declared remote ref")
