@@ -19,9 +19,8 @@ readonly PYTHON_RUNTIME_SHA256=dd7ca81fa848917c362b3a239893a7a26f4c89d42b4f85cb5
 readonly NCCL_ROOT=/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly NCCL_SHA256=e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly MOTION_DIGEST=307e9662d498bd507b9d17ca9abf74a3654f7bf66ac6ab989c6f19c3889bddef
-readonly MOTION_DIR=/data/holosoma_inputs/corl79_plus_debug30_decoupled_turn_forward_v1/by-source/${MOTION_DIGEST}
-readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
-readonly CONTACT_ROOT=${MOTION_DIR}/contact_export_corl79_success133_plus_debug30_realmesh_model05000
+readonly SOURCE_MOTION_DIR=/data/holosoma_inputs/corl79_plus_debug30_decoupled_turn_forward_v1/by-source/${MOTION_DIGEST}
+readonly SOURCE_OBJECT_SPEC_PATH=${SOURCE_MOTION_DIR}/_clip_object_urdf_map.json
 readonly TEACHER_ROOT=/data/holosoma_runs/formal_distill_7hvy40000_depthab_ws8x2_20260821/teacher
 readonly TEACHER=${TEACHER_ROOT}/model_40000.pt
 readonly TEACHER_SHA256=d627b6b5f5a2037761889810c4ef2e158d911941ef8a773f93257a283a68b129
@@ -64,8 +63,8 @@ mkdir -p "${VERIFY_ROOT}"
 readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
 readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
-check_sha 2de9ee5ca188b70e877c32dd9f0d2975eea99d11aa077bb077cf06ea9ab897bb "${MOTION_DIR}/manifest.json"
-check_sha 70b466aad04837a79f6dd0f4491cb345a73c687209981acd3eb7f4a0365d8f5c "${OBJECT_SPEC_PATH}"
+check_sha 2de9ee5ca188b70e877c32dd9f0d2975eea99d11aa077bb077cf06ea9ab897bb "${SOURCE_MOTION_DIR}/manifest.json"
+check_sha 70b466aad04837a79f6dd0f4491cb345a73c687209981acd3eb7f4a0365d8f5c "${SOURCE_OBJECT_SPEC_PATH}"
 check_sha "${TEACHER_SHA256}" "${TEACHER}"
 check_sha "${TEACHER_ONNX_SHA256}" "${TEACHER_ONNX}"
 check_sha "${TEACHER_PAIR_SHA256}" "${TEACHER_PAIR}"
@@ -75,6 +74,24 @@ if [[ ${MODE} == formal ]]; then
   check_sha "${RULE90_SHA}" "${RULE90_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
 fi
+
+# The AS launcher requires the effective bank below its clean checkout's data
+# root.  Hard links preserve the already authenticated immutable bytes without
+# distributing source code or consuming a second copy of the asset bank.
+readonly LOCAL_MOTION_DIR=${SOURCE_ROOT}/data/formal_distill_7hvy_exact109_source
+if [[ ! -d ${LOCAL_MOTION_DIR} ]]; then
+  readonly LOCAL_MOTION_INCOMING=${LOCAL_MOTION_DIR}.incoming.$$
+  [[ ! -e ${LOCAL_MOTION_INCOMING} ]]
+  mkdir -p "$(dirname "${LOCAL_MOTION_DIR}")"
+  cp -al "${SOURCE_MOTION_DIR}" "${LOCAL_MOTION_INCOMING}"
+  mv "${LOCAL_MOTION_INCOMING}" "${LOCAL_MOTION_DIR}"
+fi
+readonly MOTION_DIR=${LOCAL_MOTION_DIR}
+readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
+readonly CONTACT_ROOT=${MOTION_DIR}/contact_export_corl79_success133_plus_debug30_realmesh_model05000
+check_sha 2de9ee5ca188b70e877c32dd9f0d2975eea99d11aa077bb077cf06ea9ab897bb "${MOTION_DIR}/manifest.json"
+check_sha 70b466aad04837a79f6dd0f4491cb345a73c687209981acd3eb7f4a0365d8f5c "${OBJECT_SPEC_PATH}"
+[[ $(find "${MOTION_DIR}" -maxdepth 1 -type f -name '*.npz' | wc -l) -eq 109 ]]
 
 readonly RUN_ROOT=${PERSIST_ROOT}/${MODE}_${ENCODER_ARM}_${RUN_ID}
 readonly LOGGER_BASE_DIR=${RUN_ROOT}/training_logs
