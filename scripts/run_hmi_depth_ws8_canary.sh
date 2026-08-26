@@ -58,6 +58,11 @@ source "${SOURCE_ROOT}/scripts/gpu_launch_defaults.sh"
 
 RUN_ROOT=/data/holosoma_canaries/${RUN_LABEL}_${EXPECTED_COMMIT:0:12}
 mkdir -p "${RUN_ROOT}"
+write_exit_code() {
+  local rc=$?
+  printf '%s\n' "${rc}" > "${RUN_ROOT}/exit_code.txt"
+}
+trap write_exit_code EXIT
 
 export PYTHONPATH="${SOURCE_ROOT}/src/holosoma:${SOURCE_ROOT}/src/holosoma_inference:${SOURCE_ROOT}/src"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
