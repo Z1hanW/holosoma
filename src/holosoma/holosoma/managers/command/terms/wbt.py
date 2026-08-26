@@ -1084,6 +1084,11 @@ class MotionLoader:
 
     def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
         clip_id = Path(motion_file).stem
+        # A colocated bank map is the portable source of truth. NPZs often
+        # retain absolute URDF paths from the machine that produced them, so
+        # using those paths after a clean-clone relocation breaks exact object
+        # assignment even when the mapped asset is present.
+        clip_object_map = self._load_clip_object_metadata_map(Path(motion_file).parent)
         clip_object_names: list[str] | None = None
         clip_object_urdfs: list[str] | None = None
         try:
@@ -1137,7 +1142,7 @@ class MotionLoader:
                     obj_name, obj_urdf = self._extract_object_clip_metadata(
                         data=data,
                         clip_id=clip_id,
-                        clip_map=None,
+                        clip_map=clip_object_map,
                         base_dir=Path(motion_file).parent,
                     )
                     clip_object_names = [obj_name]

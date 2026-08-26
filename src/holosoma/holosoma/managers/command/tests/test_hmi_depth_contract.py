@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -14,7 +15,11 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_w_object_hmi_depth_stage1,
     g1_29dof_wbt_w_object_hmi_depth_stage2,
 )
-from holosoma.managers.command.terms.wbt import MotionCommand, build_fixed_hmi_track_mask
+from holosoma.managers.command.terms.wbt import (
+    MotionCommand,
+    MotionLoader,
+    build_fixed_hmi_track_mask,
+)
 from holosoma.managers.observation.terms.wbt import _mask_hmi_generation_reference_rows
 from holosoma.managers.reward.terms.wbt import HMIObjectGoalReachedOnce
 from holosoma.managers.termination.terms.wbt import BodyGroupProximity
@@ -154,6 +159,31 @@ def test_hmi_default_motion_bank_has_complete_object_metadata():
         assert not urdf_root.findall(f".//{primitive}")
     for mesh in urdf_root.findall(".//mesh"):
         assert (object_path.parent / mesh.attrib["filename"]).is_file()
+
+
+def test_hmi_single_npz_loader_prefers_portable_bank_object_map():
+    repo_root = Path(__file__).resolve().parents[6]
+    config = g1_29dof_wbt_w_object_hmi_depth_stage1
+    motion_config = config.command.setup_terms["motion_command"].params[
+        "motion_config"
+    ]
+    motion_path = repo_root / motion_config.motion_file
+    expected_object_path = (
+        repo_root / config.robot.object.object_urdf_path
+    ).resolve()
+    with np.load(motion_path, allow_pickle=False) as data:
+        source_absolute_path = str(np.asarray(data["object_urdf_path"]).item())
+        body_names = data["body_names"].tolist()
+        joint_names = data["joint_names"].tolist()
+
+    assert Path(source_absolute_path) != expected_object_path
+    loader = MotionLoader(
+        str(motion_path),
+        robot_body_names=body_names,
+        robot_joint_names=joint_names,
+        device="cpu",
+    )
+    assert loader.clip_object_urdf_paths == [str(expected_object_path)]
 
 
 def test_hmi_stage_change_is_an_explicit_checkpoint_contract_change():
