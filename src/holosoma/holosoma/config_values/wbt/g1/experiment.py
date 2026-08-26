@@ -696,7 +696,7 @@ g1_29dof_wbt_w_object_hmi_depth_stage1 = replace(
         g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.robot,
         object=replace(
             g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.robot.object,
-            object_urdf_path="data_demo/_clip_object_urdf_map.json",
+            object_urdf_path="data_demo/objects/objects_largebox.urdf",
         ),
     ),
     simulator=replace(

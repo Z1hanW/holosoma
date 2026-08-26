@@ -2,6 +2,7 @@ import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import torch
 from torch import nn
@@ -90,12 +91,11 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         motion_config = config.command.setup_terms["motion_command"].params[
             "motion_config"
         ]
-        assert motion_config.motion_file == "data_demo"
-        assert config.robot.object.object_urdf_path == (
-            "data_demo/_clip_object_urdf_map.json"
+        assert motion_config.motion_file == (
+            "data_demo/sub10_largebox_032_mj_w_obj.npz"
         )
-        assert Path(config.robot.object.object_urdf_path).parent == Path(
-            motion_config.motion_file
+        assert config.robot.object.object_urdf_path == (
+            "data_demo/objects/objects_largebox.urdf"
         )
         assert motion_config.hmi.track_ratio == expected_track_ratio
         assert motion_config.use_adaptive_timesteps_sampler is True
@@ -135,23 +135,25 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
 
 def test_hmi_default_motion_bank_has_complete_object_metadata():
     repo_root = Path(__file__).resolve().parents[6]
-    motion_config = g1_29dof_wbt_w_object_hmi_depth_stage1.command.setup_terms[
+    config = g1_29dof_wbt_w_object_hmi_depth_stage1
+    motion_config = config.command.setup_terms[
         "motion_command"
     ].params["motion_config"]
-    motion_root = repo_root / motion_config.motion_file
-    object_map_path = repo_root / (
-        g1_29dof_wbt_w_object_hmi_depth_stage1.robot.object.object_urdf_path
-    )
-    assert object_map_path.parent == motion_root
+    motion_path = repo_root / motion_config.motion_file
+    object_map_path = motion_path.parent / "_clip_object_urdf_map.json"
+    object_path = repo_root / config.robot.object.object_urdf_path
     object_map = json.loads(object_map_path.read_text(encoding="utf-8"))["clips"]
-    clip_ids = {path.stem for path in motion_root.glob("*.npz")}
 
-    assert clip_ids
-    assert set(object_map) == clip_ids
-    for clip_id in clip_ids:
-        object_urdf = object_map[clip_id]["object_urdf_path"]
-        assert object_urdf
-        assert (motion_root / object_urdf).is_file()
+    assert motion_path.is_file()
+    object_urdf = object_map[motion_path.stem]["object_urdf_path"]
+    assert (motion_path.parent / object_urdf).resolve() == object_path.resolve()
+
+    urdf_root = ElementTree.parse(object_path).getroot()
+    assert urdf_root.findall(".//mesh")
+    for primitive in ("box", "sphere", "cylinder", "capsule"):
+        assert not urdf_root.findall(f".//{primitive}")
+    for mesh in urdf_root.findall(".//mesh"):
+        assert (object_path.parent / mesh.attrib["filename"]).is_file()
 
 
 def test_hmi_stage_change_is_an_explicit_checkpoint_contract_change():

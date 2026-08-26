@@ -60,11 +60,11 @@ Both experiment presets set `training.export_onnx=true`:
 - `exp:g1-29dof-wbt-w-object-hmi-depth-stage1`
 - `exp:g1-29dof-wbt-w-object-hmi-depth-stage2`
 
-The checked-in `data_demo` five-clip bank is the runnable preset default. It
-includes a complete `_clip_object_urdf_map.json`, which HMI's fixed env/clip
-partition requires. Production launches must override `motion_file` with the
-intended immutable motion view, override `robot.object.object_urdf_path` with
-that same view's map, and preserve the complete object-map contract.
+The checked-in, mesh-based `data_demo/sub10_largebox_032_mj_w_obj.npz` clip is
+the runnable preset default and has matching object metadata. Production
+launches must override `motion_file` with the intended immutable motion view,
+override `robot.object.object_urdf_path` with that view's object map, and
+preserve the complete object-map and real-mesh contracts.
 
 Before a formal run, the launcher must still bind an immutable remote Git SHA,
 immutable motion/object manifests, the exact depth observation contract, and a
