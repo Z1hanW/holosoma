@@ -142,6 +142,11 @@ _hmi_initial_pose_noise = replace(
 
 motion_config_w_object_hmi_depth_stage1 = replace(
     motion_config_w_object,
+    # HMI requires a bank-level clip -> object URDF map so the simulator's
+    # fixed env/object assignment can be matched to a compatible clip. Keep
+    # the checked-in five-clip bank as the runnable preset default; formal
+    # launches override this with their immutable single-slot motion view.
+    motion_file="data_demo",
     hmi=_hmi_stage1_cfg,
     noise_to_initial_pose=_hmi_initial_pose_noise,
     start_at_timestep_zero_prob=0.05,

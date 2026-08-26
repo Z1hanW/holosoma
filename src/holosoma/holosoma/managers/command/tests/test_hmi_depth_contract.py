@@ -1,4 +1,6 @@
 import inspect
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -85,15 +87,13 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         assert config.training.export_onnx is True
         assert config.simulator.config.sim.max_episode_length_s == 10.0
         assert config.algo.config.num_learning_iterations == expected_iterations
-        assert config.command.setup_terms["motion_command"].params[
+        motion_config = config.command.setup_terms["motion_command"].params[
             "motion_config"
-        ].hmi.track_ratio == expected_track_ratio
-        assert config.command.setup_terms["motion_command"].params[
-            "motion_config"
-        ].use_adaptive_timesteps_sampler is True
-        assert config.command.setup_terms["motion_command"].params[
-            "motion_config"
-        ].hmi.gen_start_at_timestep_zero_prob == 0.2
+        ]
+        assert motion_config.motion_file == "data_demo"
+        assert motion_config.hmi.track_ratio == expected_track_ratio
+        assert motion_config.use_adaptive_timesteps_sampler is True
+        assert motion_config.hmi.gen_start_at_timestep_zero_prob == 0.2
         assert actor.input_dim == [
             "actor_obs_hmi_goal_command",
             "actor_obs_drop_button",
@@ -125,6 +125,24 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         assert bad_tracking["bad_object_ori_threshold"] == 0.8
 
     assert not inspect.isabstract(BodyGroupProximity)
+
+
+def test_hmi_default_motion_bank_has_complete_object_metadata():
+    repo_root = Path(__file__).resolve().parents[6]
+    motion_config = g1_29dof_wbt_w_object_hmi_depth_stage1.command.setup_terms[
+        "motion_command"
+    ].params["motion_config"]
+    motion_root = repo_root / motion_config.motion_file
+    object_map_path = motion_root / "_clip_object_urdf_map.json"
+    object_map = json.loads(object_map_path.read_text(encoding="utf-8"))["clips"]
+    clip_ids = {path.stem for path in motion_root.glob("*.npz")}
+
+    assert clip_ids
+    assert set(object_map) == clip_ids
+    for clip_id in clip_ids:
+        object_urdf = object_map[clip_id]["object_urdf_path"]
+        assert object_urdf
+        assert (motion_root / object_urdf).is_file()
 
 
 def test_hmi_stage_change_is_an_explicit_checkpoint_contract_change():
