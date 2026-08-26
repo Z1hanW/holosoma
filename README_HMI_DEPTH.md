@@ -71,3 +71,8 @@ immutable motion/object manifests, the exact depth observation contract, and a
 real PyTorch/ONNX Runtime parity report. Stage 2 must use an explicit audited
 policy-init migration; it must not silently resume a Stage-1 run under changed
 reward and partition semantics.
+
+`scripts/run_hmi_depth_ws8_canary.sh` supports bounded `stage1` and `stage2`
+smokes. The Stage-2 form requires an exact Stage-1 checkpoint path and SHA256
+and performs actor-only policy init; its explicit legacy-load hatch is confined
+to the W&B-disabled, nonformal canary and is not valid for a formal lineage.
