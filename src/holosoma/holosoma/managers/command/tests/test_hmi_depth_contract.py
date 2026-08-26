@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import torch
@@ -13,6 +14,7 @@ from holosoma.config_values.wbt.g1.experiment import (
 from holosoma.managers.command.terms.wbt import MotionCommand, build_fixed_hmi_track_mask
 from holosoma.managers.observation.terms.wbt import _mask_hmi_generation_reference_rows
 from holosoma.managers.reward.terms.wbt import HMIObjectGoalReachedOnce
+from holosoma.managers.termination.terms.wbt import BodyGroupProximity
 from holosoma.perception.config_utils import apply_perception_overrides
 from holosoma.utils.inference_helpers import (
     export_policy_as_onnx,
@@ -81,6 +83,7 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         critic = config.algo.config.module_dict.critic
 
         assert config.training.export_onnx is True
+        assert config.simulator.config.sim.max_episode_length_s == 10.0
         assert config.algo.config.num_learning_iterations == expected_iterations
         assert config.command.setup_terms["motion_command"].params[
             "motion_config"
@@ -120,6 +123,8 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         assert bad_tracking["bad_motion_body_pos_threshold"] == 0.25
         assert bad_tracking["bad_object_pos_threshold"] == 0.3
         assert bad_tracking["bad_object_ori_threshold"] == 0.8
+
+    assert not inspect.isabstract(BodyGroupProximity)
 
 
 def test_hmi_stage_change_is_an_explicit_checkpoint_contract_change():

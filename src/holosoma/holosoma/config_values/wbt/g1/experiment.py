@@ -692,6 +692,16 @@ g1_29dof_wbt_w_object_hmi_depth_stage1 = replace(
         export_onnx=True,
     ),
     perception=perception.camera_depth_d435i,
+    simulator=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.simulator,
+        config=replace(
+            g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.simulator.config,
+            sim=replace(
+                g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.simulator.config.sim,
+                max_episode_length_s=10.0,
+            ),
+        ),
+    ),
     command=command.g1_29dof_wbt_command_w_object_hmi_depth_stage1,
     observation=observation.g1_29dof_wbt_observation_w_object_hmi_depth,
     reward=reward.g1_29dof_wbt_reward_w_object_hmi,

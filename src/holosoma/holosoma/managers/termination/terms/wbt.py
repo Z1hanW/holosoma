@@ -82,6 +82,9 @@ class BodyGroupProximity(TerminationTermBase):
             terminated |= torch.any(pairwise_dist < self.min_distance, dim=-1)
         return terminated
 
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        del env_ids
+
 
 class RobotFallenByTiltAfterIteration(TerminationTermBase):
     """Terminate on large base tilt, optionally only after DAgger ends."""
