@@ -21,6 +21,8 @@ from loguru import logger
 from holosoma.config_types.command import (
     CleanNoisyClipCurriculumConfig,
     FixedClipGroupAssignmentConfig,
+    HMIGoalPoseNoiseConfig,
+    HMIMotionConfig,
     MotionConfig,
     NoiseToInitialPoseConfig,
 )
@@ -56,6 +58,7 @@ from holosoma.utils.rotations import (
     quat_inverse,
     quat_mul,
     quat_mul_broadcast_left,
+    quat_normalize,
     quaternion_to_matrix,
     slerp,
     yaw_quat,
@@ -94,6 +97,31 @@ _CURRICULUM_LIVE_TRACKING_ERROR_KEYS = frozenset(
         "motion/error_object_ref_lin_vel",
     }
 )
+
+
+def build_fixed_hmi_track_mask(
+    num_envs: int,
+    track_ratio: float,
+    partition_seed: int,
+) -> torch.Tensor:
+    """Build HMI's immutable track/generation partition on CPU.
+
+    The dedicated generator makes the split reproducible without consuming the
+    simulator/training RNG stream.  This follows Hybrid-Motion-Imitation's
+    fixed-partition contract rather than resampling a task mode per episode.
+    """
+
+    if num_envs < 0:
+        raise ValueError(f"num_envs must be non-negative, got {num_envs}.")
+    if not 0.0 <= float(track_ratio) <= 1.0:
+        raise ValueError(f"HMI track_ratio must be in [0, 1], got {track_ratio}.")
+    num_track = max(0, min(num_envs, int(round(num_envs * float(track_ratio)))))
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(partition_seed))
+    shuffled_env_ids = torch.randperm(num_envs, generator=generator, device="cpu")
+    track_mask = torch.zeros(num_envs, dtype=torch.bool, device="cpu")
+    track_mask[shuffled_env_ids[:num_track]] = True
+    return track_mask
 
 
 def canonical_motion_transition_contract(contract: Any) -> dict[str, Any]:
@@ -3096,6 +3124,21 @@ class MotionCommand(CommandTermBase):
         self.hybrid_stage2_task_env_mask: torch.Tensor | None = None
         self.hybrid_velocity_task_env_mask: torch.Tensor | None = None
         self._hybrid_velocity_task_priority: torch.Tensor | None = None
+        self.hmi_cfg: HMIMotionConfig | None = self.motion_cfg.hmi
+        self.hmi_track_env_mask: torch.Tensor | None = None
+        self.hmi_gen_env_mask: torch.Tensor | None = None
+        self.hmi_exact_goal_object_pos_w: torch.Tensor | None = None
+        self.hmi_exact_goal_object_quat_w: torch.Tensor | None = None
+        self.hmi_goal_object_pos_w: torch.Tensor | None = None
+        self.hmi_goal_object_quat_w: torch.Tensor | None = None
+        self.hmi_goal_version: torch.Tensor | None = None
+        self.hmi_goal_reached: torch.Tensor | None = None
+        self.hmi_goal_noise_scale: torch.Tensor | None = None
+        self.hmi_goal_success_ema: torch.Tensor | None = None
+        self.hmi_goal_success_ema_initialized = False
+        self.hmi_goal_success_sum: torch.Tensor | None = None
+        self.hmi_goal_success_count: torch.Tensor | None = None
+        self.hmi_last_curriculum_update_iteration = 0
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
@@ -3231,6 +3274,7 @@ class MotionCommand(CommandTermBase):
         """Expose the current PPO iteration so command curriculum can follow the training schedule exactly."""
         self._training_iteration = int(iteration)
         self._training_total_iterations = None if total_iterations is None else int(total_iterations)
+        self._update_hmi_goal_noise_curriculum(int(iteration))
         self._refresh_current_clip_sampling_weights()
 
     def get_checkpoint_state(self) -> dict[str, Any]:
@@ -3248,6 +3292,10 @@ class MotionCommand(CommandTermBase):
             "distributed_loss_weight": float(self.distributed_loss_weight),
             "contact_prior": self._get_contact_prior_checkpoint_state(),
         }
+        hmi_contract = self._hmi_checkpoint_contract()
+        if hmi_contract is not None:
+            state["hmi_contract"] = hmi_contract
+            state["hmi_state"] = self._hmi_checkpoint_state()
         if self.adaptive_timesteps_sampler is not None:
             state["adaptive_timesteps_sampler"] = self.adaptive_timesteps_sampler.state_dict()
         for key in ("_clip_success_counts", "_clip_total_counts", "_raw_clip_sampling_weights"):
@@ -3255,6 +3303,78 @@ class MotionCommand(CommandTermBase):
             if isinstance(value, torch.Tensor):
                 state[key.removeprefix("_")] = value.detach().to("cpu").clone()
         return state
+
+    def _hmi_checkpoint_contract(self) -> dict[str, Any] | None:
+        """Return the immutable HMI semantics that must match on exact resume."""
+
+        cfg = getattr(self, "hmi_cfg", None)
+        if cfg is None:
+            return None
+        goal_noise = cfg.object_goal_noise
+        return {
+            "version": 1,
+            "upstream_repository": str(cfg.upstream_repository),
+            "upstream_commit": str(cfg.upstream_commit),
+            "interface": str(cfg.actor_interface_semantics),
+            "track_ratio": float(cfg.track_ratio),
+            "env_partition_seed": int(cfg.env_partition_seed),
+            "gen_start_at_timestep_zero_prob": (
+                None
+                if cfg.gen_start_at_timestep_zero_prob is None
+                else float(cfg.gen_start_at_timestep_zero_prob)
+            ),
+            "object_goal_noise": {
+                "pos_std_xyz": [float(value) for value in goal_noise.pos_std_xyz],
+                "pos_clip_xyz": [float(value) for value in goal_noise.pos_clip_xyz],
+                "rpy_std": [float(value) for value in goal_noise.rpy_std],
+                "rpy_clip": [float(value) for value in goal_noise.rpy_clip],
+            },
+            "gen_step_zero_root_pos_std_xyz": [
+                float(value) for value in cfg.gen_step_zero_root_pos_std_xyz
+            ],
+            "gen_step_zero_root_pos_clip_xyz": [
+                float(value) for value in cfg.gen_step_zero_root_pos_clip_xyz
+            ],
+            "gen_step_zero_root_rpy_std": [
+                float(value) for value in cfg.gen_step_zero_root_rpy_std
+            ],
+            "gen_step_zero_root_rpy_clip": [
+                float(value) for value in cfg.gen_step_zero_root_rpy_clip
+            ],
+            "goal_noise_curriculum": {
+                "initial_scale": float(cfg.goal_noise_initial_scale),
+                "min_scale": float(cfg.goal_noise_min_scale),
+                "max_scale": float(cfg.goal_noise_max_scale),
+                "scale_step": float(cfg.goal_noise_scale_step),
+                "success_threshold_up": float(cfg.goal_noise_success_threshold_up),
+                "success_threshold_down": float(cfg.goal_noise_success_threshold_down),
+                "update_interval": int(cfg.goal_noise_update_interval),
+                "ema_alpha": float(cfg.goal_noise_ema_alpha),
+            },
+        }
+
+    def _hmi_checkpoint_state(self) -> dict[str, Any]:
+        tensors = {
+            "goal_noise_scale": self.hmi_goal_noise_scale,
+            "goal_success_ema": self.hmi_goal_success_ema,
+            "goal_success_sum": self.hmi_goal_success_sum,
+            "goal_success_count": self.hmi_goal_success_count,
+        }
+        missing = [name for name, value in tensors.items() if value is None]
+        if missing:
+            raise RuntimeError(f"HMI checkpoint state requested before buffer initialization: {missing}.")
+        return {
+            "version": 1,
+            **{
+                name: value.detach().to("cpu").clone()
+                for name, value in tensors.items()
+                if value is not None
+            },
+            "goal_success_ema_initialized": bool(self.hmi_goal_success_ema_initialized),
+            "last_curriculum_update_iteration": int(
+                self.hmi_last_curriculum_update_iteration
+            ),
+        }
 
     @staticmethod
     def _contact_prior_checkpoint_tensor_names() -> tuple[str, ...]:
@@ -3488,6 +3608,84 @@ class MotionCommand(CommandTermBase):
         self._validate_contact_prior_tensor_invariants(restored_tensors)
         return restored_tensors
 
+    def _prepare_hmi_checkpoint_state(self, state: Any) -> dict[str, Any] | None:
+        if not self.hmi_enabled():
+            if state is not None:
+                raise ValueError("Non-HMI runtime cannot restore HMI curriculum state.")
+            return None
+        if not isinstance(state, dict):
+            raise ValueError("HMI exact resume requires motion_command.hmi_state.")
+        expected_keys = {
+            "version",
+            "goal_noise_scale",
+            "goal_success_ema",
+            "goal_success_sum",
+            "goal_success_count",
+            "goal_success_ema_initialized",
+            "last_curriculum_update_iteration",
+        }
+        if set(state) != expected_keys:
+            raise ValueError(
+                "Motion command HMI state keys differ from the exact-resume schema: "
+                f"missing={sorted(expected_keys - set(state))}, "
+                f"unexpected={sorted(set(state) - expected_keys)}."
+            )
+        version = AdaptiveTimestepsSampler._checkpoint_integer_scalar(
+            state["version"], path="motion_command.hmi_state.version", minimum=1
+        )
+        if version != 1:
+            raise ValueError(f"Unsupported HMI checkpoint-state version {version}.")
+        assert self.hmi_cfg is not None
+
+        def finite_scalar(name: str, *, nonnegative: bool = True) -> torch.Tensor:
+            value = torch.as_tensor(state[name], device=self.device)
+            if value.numel() != 1 or not value.is_floating_point():
+                raise ValueError(f"HMI checkpoint {name} must be one floating scalar.")
+            value = value.reshape(()).to(dtype=torch.float32)
+            if not bool(torch.isfinite(value).item()):
+                raise ValueError(f"HMI checkpoint {name} must be finite.")
+            if nonnegative and float(value.item()) < 0.0:
+                raise ValueError(f"HMI checkpoint {name} must be non-negative.")
+            return value.clone()
+
+        scale = finite_scalar("goal_noise_scale")
+        ema = finite_scalar("goal_success_ema")
+        success_sum = finite_scalar("goal_success_sum")
+        count_raw = torch.as_tensor(state["goal_success_count"], device=self.device)
+        if count_raw.numel() != 1 or count_raw.dtype == torch.bool or count_raw.is_floating_point():
+            raise ValueError("HMI checkpoint goal_success_count must be one integer scalar.")
+        success_count = count_raw.reshape(()).to(dtype=torch.long).clone()
+        if int(success_count.item()) < 0:
+            raise ValueError("HMI checkpoint goal_success_count must be non-negative.")
+        if float(success_sum.item()) > float(success_count.item()):
+            raise ValueError("HMI checkpoint success sum cannot exceed its count.")
+        if not (
+            float(self.hmi_cfg.goal_noise_min_scale)
+            <= float(scale.item())
+            <= float(self.hmi_cfg.goal_noise_max_scale)
+        ):
+            raise ValueError("HMI checkpoint goal-noise scale is outside configured bounds.")
+        if not 0.0 <= float(ema.item()) <= 1.0:
+            raise ValueError("HMI checkpoint success EMA must be in [0, 1].")
+        ema_initialized = state["goal_success_ema_initialized"]
+        if type(ema_initialized) is not bool:
+            raise ValueError("HMI checkpoint EMA-initialized flag must be boolean.")
+        if not ema_initialized and float(ema.item()) != 0.0:
+            raise ValueError("Uninitialized HMI success EMA must be zero.")
+        last_update = AdaptiveTimestepsSampler._checkpoint_integer_scalar(
+            state["last_curriculum_update_iteration"],
+            path="motion_command.hmi_state.last_curriculum_update_iteration",
+            minimum=0,
+        )
+        return {
+            "goal_noise_scale": scale,
+            "goal_success_ema": ema,
+            "goal_success_sum": success_sum,
+            "goal_success_count": success_count,
+            "goal_success_ema_initialized": ema_initialized,
+            "last_curriculum_update_iteration": last_update,
+        }
+
     def _process_checkpoint_state(
         self,
         state: dict[str, Any] | None,
@@ -3505,6 +3703,15 @@ class MotionCommand(CommandTermBase):
         )
         if version not in (1, 2, 3):
             raise ValueError(f"Unsupported motion command checkpoint version: {state.get('version')!r}.")
+        checkpoint_hmi_contract = state.get("hmi_contract")
+        current_hmi_contract = self._hmi_checkpoint_contract()
+        if checkpoint_hmi_contract != current_hmi_contract:
+            raise ValueError(
+                "Motion command checkpoint HMI contract differs from the current runtime: "
+                f"checkpoint={checkpoint_hmi_contract!r}, current={current_hmi_contract!r}. "
+                "Stage-1 to Stage-2 is a policy initialization, not an exact resume."
+            )
+        restored_hmi_state = self._prepare_hmi_checkpoint_state(state.get("hmi_state"))
         current_contact_prior_active, _ = self._contact_prior_runtime_flags()
         if version < 3 and current_contact_prior_active:
             raise ValueError(
@@ -3657,6 +3864,23 @@ class MotionCommand(CommandTermBase):
             tensor_targets[key].copy_(restored)
         if training_iteration is not None:
             self._training_iteration = training_iteration
+        if restored_hmi_state is not None:
+            hmi_targets = {
+                "goal_noise_scale": self.hmi_goal_noise_scale,
+                "goal_success_ema": self.hmi_goal_success_ema,
+                "goal_success_sum": self.hmi_goal_success_sum,
+                "goal_success_count": self.hmi_goal_success_count,
+            }
+            for key, target in hmi_targets.items():
+                if target is None:
+                    raise RuntimeError(f"HMI runtime target {key} is not initialized.")
+                target.copy_(restored_hmi_state[key])
+            self.hmi_goal_success_ema_initialized = restored_hmi_state[
+                "goal_success_ema_initialized"
+            ]
+            self.hmi_last_curriculum_update_iteration = restored_hmi_state[
+                "last_curriculum_update_iteration"
+            ]
         self._refresh_current_clip_sampling_weights()
         # Commit the six mutually constrained contact-prior buffers last.  All
         # potentially fallible validation and curriculum refresh work has
@@ -4078,6 +4302,329 @@ class MotionCommand(CommandTermBase):
 
         return ~self.get_hybrid_stage2_task_active_mask()
 
+    def hmi_enabled(self) -> bool:
+        return getattr(self, "hmi_cfg", None) is not None
+
+    def _configure_hmi_partition(self) -> None:
+        """Create HMI's fixed track/gen environment identity."""
+
+        self.hmi_cfg = self.motion_cfg.hmi
+        if self.hmi_cfg is None:
+            self.hmi_track_env_mask = torch.ones(
+                (self.num_envs,), device=self.device, dtype=torch.bool
+            )
+            self.hmi_gen_env_mask = torch.zeros_like(self.hmi_track_env_mask)
+            return
+        if not self.motion.has_object:
+            raise ValueError("HMI object training requires motion clips with object trajectories.")
+        incompatible = {
+            "hybrid_stage2": bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False)),
+            "hybrid_velocity": self.hybrid_velocity_enabled(),
+            "pure_rl_policy_command_after_lift": self.pure_rl_policy_command_after_lift_enabled(),
+        }
+        enabled_incompatible = [name for name, enabled in incompatible.items() if enabled]
+        if enabled_incompatible:
+            raise ValueError(
+                "motion_config.hmi is mutually exclusive with "
+                + ", ".join(enabled_incompatible)
+                + "."
+            )
+        track_mask = build_fixed_hmi_track_mask(
+            self.num_envs,
+            float(self.hmi_cfg.track_ratio),
+            int(self.hmi_cfg.env_partition_seed),
+        )
+        self.hmi_track_env_mask = track_mask.to(device=self.device)
+        self.hmi_gen_env_mask = ~self.hmi_track_env_mask
+        logger.info(
+            "Enabled HMI fixed partition: track_envs={}/{} ({:.3f}), gen_envs={}, seed={}, "
+            "actor_reference_leakage=False.",
+            int(self.hmi_track_env_mask.sum().item()),
+            self.num_envs,
+            float(self.hmi_track_env_mask.float().mean().item()),
+            int(self.hmi_gen_env_mask.sum().item()),
+            int(self.hmi_cfg.env_partition_seed),
+        )
+
+    def get_hmi_track_env_mask(self) -> torch.Tensor:
+        if not self.hmi_enabled() or self.hmi_track_env_mask is None:
+            raise RuntimeError("HMI track mask requested without motion_config.hmi.")
+        return self.hmi_track_env_mask
+
+    def get_hmi_gen_env_mask(self) -> torch.Tensor:
+        if not self.hmi_enabled() or self.hmi_gen_env_mask is None:
+            raise RuntimeError("HMI generation mask requested without motion_config.hmi.")
+        return self.hmi_gen_env_mask
+
+    def _hmi_goal_noise_axis_scales(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.hmi_goal_noise_scale is None:
+            raise RuntimeError("HMI goal-noise scale requested before buffer initialization.")
+        scale = self.hmi_goal_noise_scale.to(device=self.device, dtype=torch.float32)
+        one = torch.ones((), device=self.device, dtype=torch.float32)
+        return torch.stack((scale, scale, one)), torch.stack((one, one, scale))
+
+    def _record_hmi_completed_goal_outcomes(self, env_ids: torch.Tensor) -> None:
+        """Accumulate one binary outcome for each completed generation episode."""
+
+        if not self.hmi_enabled():
+            return
+        if (
+            self.hmi_goal_reached is None
+            or self.hmi_goal_success_sum is None
+            or self.hmi_goal_success_count is None
+        ):
+            raise RuntimeError("HMI success buffers are not initialized.")
+        previous_action = self._base_reset_has_previous_action_mask(env_ids)
+        completed_gen = self.get_hmi_gen_env_mask()[env_ids] & previous_action
+        if torch.any(completed_gen):
+            completed_ids = env_ids[completed_gen]
+            self.hmi_goal_success_sum.add_(
+                self.hmi_goal_reached[completed_ids].to(dtype=torch.float32).sum()
+            )
+            self.hmi_goal_success_count.add_(completed_ids.numel())
+        self.hmi_goal_reached[env_ids] = False
+
+    def mark_hmi_goal_reached(self, env_ids: torch.Tensor) -> None:
+        if not self.hmi_enabled() or self.hmi_goal_reached is None:
+            raise RuntimeError("HMI goal success reported without initialized HMI buffers.")
+        ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+        self.hmi_goal_reached[ids] = True
+
+    def _reapply_hmi_gen_goal_noise(self) -> None:
+        if not self.hmi_enabled():
+            return
+        gen_env_ids = torch.where(self.get_hmi_gen_env_mask())[0]
+        if gen_env_ids.numel() == 0:
+            return
+        if (
+            self.hmi_exact_goal_object_pos_w is None
+            or self.hmi_exact_goal_object_quat_w is None
+            or self.hmi_goal_object_pos_w is None
+            or self.hmi_goal_object_quat_w is None
+            or self.hmi_goal_version is None
+        ):
+            raise RuntimeError("HMI goal buffers are not initialized.")
+        assert self.hmi_cfg is not None
+        pos_noise, quat_noise = self._sample_hmi_goal_noise(
+            int(gen_env_ids.numel()), self.hmi_cfg.object_goal_noise
+        )
+        self.hmi_goal_object_pos_w[gen_env_ids] = (
+            self.hmi_exact_goal_object_pos_w[gen_env_ids] + pos_noise
+        )
+        self.hmi_goal_object_quat_w[gen_env_ids] = quat_normalize(
+            quat_mul(
+                quat_noise,
+                self.hmi_exact_goal_object_quat_w[gen_env_ids],
+                w_last=True,
+            )
+        )
+        self.hmi_goal_version[gen_env_ids] += 1
+        if self.hmi_goal_reached is not None:
+            self.hmi_goal_reached[gen_env_ids] = False
+
+    def _update_hmi_goal_noise_curriculum(self, iteration: int) -> None:
+        """Update the upstream HMI goal curriculum at a PPO boundary.
+
+        Sufficient statistics are reduced globally before the shared objective
+        changes, so all ranks keep the same goal distribution.
+        """
+
+        if not self.hmi_enabled() or iteration <= 0:
+            return
+        assert self.hmi_cfg is not None
+        interval = int(self.hmi_cfg.goal_noise_update_interval)
+        if (
+            iteration % interval != 0
+            or iteration <= int(self.hmi_last_curriculum_update_iteration)
+        ):
+            return
+        if (
+            self.hmi_goal_success_sum is None
+            or self.hmi_goal_success_count is None
+            or self.hmi_goal_success_ema is None
+            or self.hmi_goal_noise_scale is None
+        ):
+            raise RuntimeError("HMI curriculum buffers are not initialized.")
+
+        distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        collective_device = self.device
+        if distributed and str(torch.distributed.get_backend()).lower() != "nccl":
+            collective_device = torch.device("cpu")
+        sufficient_stats = torch.tensor(
+            [
+                float(self.hmi_goal_success_sum.item()),
+                float(self.hmi_goal_success_count.item()),
+            ],
+            device=collective_device,
+            dtype=torch.float64,
+        )
+        if distributed:
+            torch.distributed.all_reduce(sufficient_stats, op=torch.distributed.ReduceOp.SUM)
+        success_sum = sufficient_stats[0]
+        success_count = sufficient_stats[1]
+        if float(success_count.item()) > 0.0:
+            batch_success = success_sum / success_count
+            alpha = float(self.hmi_cfg.goal_noise_ema_alpha)
+            if self.hmi_goal_success_ema_initialized:
+                self.hmi_goal_success_ema.copy_(
+                    (1.0 - alpha) * self.hmi_goal_success_ema
+                    + alpha * batch_success.to(dtype=torch.float32)
+                )
+            else:
+                self.hmi_goal_success_ema.copy_(batch_success.to(dtype=torch.float32))
+                self.hmi_goal_success_ema_initialized = True
+
+            old_scale = self.hmi_goal_noise_scale.clone()
+            ema = float(self.hmi_goal_success_ema.item())
+            if ema > float(self.hmi_cfg.goal_noise_success_threshold_up):
+                self.hmi_goal_noise_scale.add_(float(self.hmi_cfg.goal_noise_scale_step))
+            elif ema < float(self.hmi_cfg.goal_noise_success_threshold_down):
+                self.hmi_goal_noise_scale.sub_(float(self.hmi_cfg.goal_noise_scale_step))
+            self.hmi_goal_noise_scale.clamp_(
+                min=float(self.hmi_cfg.goal_noise_min_scale),
+                max=float(self.hmi_cfg.goal_noise_max_scale),
+            )
+            if not torch.equal(old_scale, self.hmi_goal_noise_scale):
+                self._reapply_hmi_gen_goal_noise()
+
+        self.hmi_goal_success_sum.zero_()
+        self.hmi_goal_success_count.zero_()
+        self.hmi_last_curriculum_update_iteration = int(iteration)
+
+    def _sample_hmi_goal_noise(
+        self,
+        count: int,
+        cfg: HMIGoalPoseNoiseConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pos_axis_scale, rpy_axis_scale = self._hmi_goal_noise_axis_scales()
+
+        def clipped(
+            std_values: list[float],
+            clip_values: list[float],
+            axis_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            std = (
+                torch.tensor(std_values, device=self.device, dtype=torch.float32)
+                * axis_scale
+            ).unsqueeze(0)
+            clip = (
+                torch.tensor(clip_values, device=self.device, dtype=torch.float32)
+                * axis_scale
+            ).unsqueeze(0)
+            values = torch.randn((count, 3), device=self.device, dtype=torch.float32) * std
+            return torch.clamp(values, min=-clip, max=clip)
+
+        pos_noise = clipped(cfg.pos_std_xyz, cfg.pos_clip_xyz, pos_axis_scale)
+        rpy_noise = clipped(cfg.rpy_std, cfg.rpy_clip, rpy_axis_scale)
+        quat_noise = quat_from_euler_xyz(
+            rpy_noise[:, 0], rpy_noise[:, 1], rpy_noise[:, 2]
+        )
+        return pos_noise, quat_normalize(quat_noise)
+
+    def _refresh_hmi_terminal_object_goals(self, env_ids: torch.Tensor) -> None:
+        """Bind each reset row to its active clip's terminal object pose."""
+
+        if not self.hmi_enabled():
+            return
+        if (
+            self.hmi_exact_goal_object_pos_w is None
+            or self.hmi_exact_goal_object_quat_w is None
+            or self.hmi_goal_object_pos_w is None
+            or self.hmi_goal_object_quat_w is None
+            or self.hmi_goal_version is None
+        ):
+            raise RuntimeError("HMI goal buffers are not initialized.")
+        assert self.hmi_cfg is not None
+        clip_ids = self.clip_ids[env_ids]
+        final_indices = (
+            self.motion.clip_offsets[clip_ids]
+            + self.motion.clip_lengths[clip_ids]
+            - 1
+        )
+        exact_pos = self.motion.object_pos_w[final_indices]
+        exact_quat = self.motion.object_quat_w[final_indices]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            exact_pos = self._apply_motion_alignment_pos(exact_pos, env_ids)
+            exact_quat = self._apply_motion_alignment_quat(exact_quat, env_ids)
+        else:
+            exact_pos = exact_pos + self._get_env_offsets(env_ids)
+
+        self.hmi_exact_goal_object_pos_w[env_ids] = exact_pos
+        self.hmi_exact_goal_object_quat_w[env_ids] = exact_quat
+        self.hmi_goal_object_pos_w[env_ids] = exact_pos
+        self.hmi_goal_object_quat_w[env_ids] = exact_quat
+
+        gen_env_ids = env_ids[self.get_hmi_gen_env_mask()[env_ids]]
+        if gen_env_ids.numel() > 0:
+            pos_noise, quat_noise = self._sample_hmi_goal_noise(
+                int(gen_env_ids.numel()), self.hmi_cfg.object_goal_noise
+            )
+            self.hmi_goal_object_pos_w[gen_env_ids] = (
+                self.hmi_exact_goal_object_pos_w[gen_env_ids] + pos_noise
+            )
+            self.hmi_goal_object_quat_w[gen_env_ids] = quat_normalize(
+                quat_mul(
+                    quat_noise,
+                    self.hmi_exact_goal_object_quat_w[gen_env_ids],
+                    w_last=True,
+                )
+            )
+        self.hmi_goal_version[env_ids] += 1
+
+    def get_hmi_object_goal_command(self) -> torch.Tensor:
+        """Return terminal object ``[x, y, yaw]`` in the current robot heading frame."""
+
+        if not self.hmi_enabled() or self.hmi_goal_object_pos_w is None or self.hmi_goal_object_quat_w is None:
+            raise RuntimeError("HMI goal command requested before HMI goal initialization.")
+        heading_inv = calc_heading_quat_inv(self.robot_ref_quat_w, w_last=True)
+        goal_delta_w = self.hmi_goal_object_pos_w - self.robot_ref_pos_w
+        goal_delta_heading = quat_apply(heading_inv, goal_delta_w, w_last=True)
+        goal_yaw = normalize_angle(
+            calc_heading(self.hmi_goal_object_quat_w)
+            - calc_heading(self.robot_ref_quat_w)
+        )
+        return torch.cat((goal_delta_heading[:, :2], goal_yaw.unsqueeze(-1)), dim=-1)
+
+    def _apply_hmi_step_zero_root_noise(
+        self,
+        env_ids: torch.Tensor,
+        root_pos: torch.Tensor,
+        root_rot: torch.Tensor,
+        target_root_pos: torch.Tensor,
+        target_root_rot: torch.Tensor,
+    ) -> None:
+        """Override gen rows at clip frame zero with HMI's clipped Gaussian noise."""
+
+        if not self.hmi_enabled():
+            return
+        assert self.hmi_cfg is not None
+        local_mask = self.get_hmi_gen_env_mask()[env_ids] & (self.time_steps[env_ids] == 0)
+        count = int(local_mask.sum().item())
+        if count == 0:
+            return
+
+        def clipped(std_values: list[float], clip_values: list[float]) -> torch.Tensor:
+            std = torch.tensor(std_values, device=self.device, dtype=torch.float32).unsqueeze(0)
+            clip = torch.tensor(clip_values, device=self.device, dtype=torch.float32).unsqueeze(0)
+            values = torch.randn((count, 3), device=self.device, dtype=torch.float32) * std
+            return torch.clamp(values, min=-clip, max=clip)
+
+        pos_noise = clipped(
+            self.hmi_cfg.gen_step_zero_root_pos_std_xyz,
+            self.hmi_cfg.gen_step_zero_root_pos_clip_xyz,
+        )
+        rpy_noise = clipped(
+            self.hmi_cfg.gen_step_zero_root_rpy_std,
+            self.hmi_cfg.gen_step_zero_root_rpy_clip,
+        )
+        quat_noise = quat_from_euler_xyz(
+            rpy_noise[:, 0], rpy_noise[:, 1], rpy_noise[:, 2]
+        )
+        target_root_pos[local_mask] = root_pos[local_mask] + pos_noise
+        target_root_rot[local_mask] = quat_normalize(
+            quat_mul(quat_noise, root_rot[local_mask], w_last=True)
+        )
+
     def setup(self) -> None:
         self._validate_reset_sampling_curriculum_config(self.motion_cfg)
         self.num_envs = self._env.num_envs
@@ -4259,6 +4806,7 @@ class MotionCommand(CommandTermBase):
         # the requested tracking/task fraction independently.
         self.hybrid_stage2_task_env_mask = self._build_hybrid_stage2_task_env_mask()
         self._configure_hybrid_velocity_task_assignment()
+        self._configure_hmi_partition()
         if self.pure_rl_policy_command_after_lift_enabled():
             if bool(getattr(self.motion_cfg, "hybrid_stage2_enabled", False)):
                 raise ValueError(
@@ -5322,6 +5870,10 @@ class MotionCommand(CommandTermBase):
         """Record the old state/action visit and reset outcome before clip/time replacement."""
         if not self.use_adaptive_timesteps_sampler or bool(getattr(self._env, "is_evaluating", False)):
             return
+        if self.hmi_enabled():
+            env_ids = env_ids[self.get_hmi_track_env_mask()[env_ids]]
+            if env_ids.numel() == 0:
+                return
         previous_action = self._base_reset_has_previous_action_mask(env_ids)
 
         # BaseTask has already zeroed episode_length_buf, but clip_ids/time_steps
@@ -5340,6 +5892,8 @@ class MotionCommand(CommandTermBase):
         if not self.use_adaptive_timesteps_sampler or bool(getattr(self._env, "is_evaluating", False)):
             return
         visited = self._env.episode_length_buf > 0
+        if self.hmi_enabled():
+            visited &= self.get_hmi_track_env_mask()
         self.adaptive_timesteps_sampler.update_current_bin_exposure_count(
             self.time_steps,
             clip_ids=self.clip_ids,
@@ -5365,6 +5919,7 @@ class MotionCommand(CommandTermBase):
         )
 
         self._update_adaptive_timestep_failure_stats_before_resample(env_ids)
+        self._record_hmi_completed_goal_outcomes(env_ids)
 
         if use_fixed_tile_layout:
             row_count = max(1, int(self._terrain_row_count))
@@ -5461,10 +6016,41 @@ class MotionCommand(CommandTermBase):
             sampled = (torch.rand(env_ids.numel(), device=self.device) * nonzero_counts).long() + 1
             self.time_steps[env_ids] = torch.where(valid_starts > 1, sampled, torch.zeros_like(sampled))
 
+        # HMI keeps the adaptive reset distribution only for tracking rows.
+        # Generation rows sample a uniform nonzero reference frame before the
+        # explicit frame-zero mixture below, matching the upstream contract.
+        if self.hmi_enabled() and self.use_adaptive_timesteps_sampler:
+            gen_local_mask = self.get_hmi_gen_env_mask()[env_ids]
+            if torch.any(gen_local_mask):
+                gen_valid_starts = valid_starts[gen_local_mask]
+                nonzero_counts = torch.clamp(gen_valid_starts - 1, min=1)
+                sampled = (
+                    torch.rand(
+                        int(gen_local_mask.sum().item()), device=self.device
+                    )
+                    * nonzero_counts
+                ).long() + 1
+                self.time_steps[env_ids[gen_local_mask]] = torch.where(
+                    gen_valid_starts > 1,
+                    sampled,
+                    torch.zeros_like(sampled),
+                )
+
         # Handle start_at_timestep_zero_prob.
         base_prob = self._current_start_at_timestep_zero_prob()
-        if self._forced_reset_timestep is None and base_prob > 0.0:
+        hmi_gen_zero_prob = (
+            None
+            if not self.hmi_enabled() or self.hmi_cfg is None
+            else self.hmi_cfg.gen_start_at_timestep_zero_prob
+        )
+        if self._forced_reset_timestep is None and (
+            base_prob > 0.0
+            or (hmi_gen_zero_prob is not None and hmi_gen_zero_prob > 0.0)
+        ):
             probs = torch.full((env_ids.numel(),), base_prob, device=self.device, dtype=torch.float32)
+            if hmi_gen_zero_prob is not None:
+                gen_local_mask = self.get_hmi_gen_env_mask()[env_ids]
+                probs[gen_local_mask] = float(hmi_gen_zero_prob)
             probs = torch.clamp(probs, 0.0, 1.0)
             subset = self.time_steps[env_ids]
             rand_vals = torch.rand_like(subset, dtype=torch.float32)
@@ -5484,6 +6070,7 @@ class MotionCommand(CommandTermBase):
 
         if self.motion_cfg.align_motion_to_init_yaw:
             self._update_motion_alignment(env_ids)
+        self._refresh_hmi_terminal_object_goals(env_ids)
         self._clear_runtime_default_pose_prepend(env_ids)
 
         # 1. Get the reference root/body poses
@@ -5594,6 +6181,14 @@ class MotionCommand(CommandTermBase):
             target_root_ang_vel = root_ang_vel + (
                 torch.rand(root_ang_vel.shape, device=self.device) - 0.5
             ) * 2 * root_ang_vel_noise_rpy.unsqueeze(0) * reset_noise_scale_3
+
+        self._apply_hmi_step_zero_root_noise(
+            env_ids,
+            root_pos,
+            root_rot,
+            target_root_pos,
+            target_root_rot,
+        )
 
         # 3. Set the robot states in simulator
         self._env.simulator.dof_pos[env_ids] = target_dof_pos
@@ -5710,6 +6305,18 @@ class MotionCommand(CommandTermBase):
 
     def _handle_clip_rollover(self) -> None:
         """Apply the continuous-clip fallback when termination does not own it."""
+
+        if self.hmi_enabled():
+            # HMI holds the terminal reference goal through the remainder of
+            # the 10-second task episode; reaching the motion end is not an
+            # episode termination and must not resample the command.
+            current_clip_lengths = self._current_clip_lengths()
+            ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
+            if ended_env_ids.numel() > 0:
+                self.time_steps[ended_env_ids] = torch.clamp(
+                    current_clip_lengths[ended_env_ids] - 1, min=0
+                )
+            return
 
         if self._termination_owns_clip_rollover():
             # BaseTask evaluated motion_ends before resetting and entering this
@@ -7842,6 +8449,54 @@ class MotionCommand(CommandTermBase):
         self._align_quat = torch.zeros(self.num_envs, 4, device=self.device)
         self._align_quat[:, 3] = 1.0
         self._align_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        if self.hmi_enabled():
+            self.hmi_exact_goal_object_pos_w = torch.zeros(
+                (self.num_envs, 3), device=self.device, dtype=torch.float32
+            )
+            self.hmi_exact_goal_object_quat_w = torch.zeros(
+                (self.num_envs, 4), device=self.device, dtype=torch.float32
+            )
+            self.hmi_exact_goal_object_quat_w[:, 3] = 1.0
+            self.hmi_goal_object_pos_w = torch.zeros_like(
+                self.hmi_exact_goal_object_pos_w
+            )
+            self.hmi_goal_object_quat_w = self.hmi_exact_goal_object_quat_w.clone()
+            self.hmi_goal_version = torch.zeros(
+                (self.num_envs,), device=self.device, dtype=torch.long
+            )
+            self.hmi_goal_reached = torch.zeros(
+                (self.num_envs,), device=self.device, dtype=torch.bool
+            )
+            assert self.hmi_cfg is not None
+            self.hmi_goal_noise_scale = torch.tensor(
+                float(self.hmi_cfg.goal_noise_initial_scale),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.hmi_goal_success_ema = torch.zeros(
+                (), device=self.device, dtype=torch.float32
+            )
+            self.hmi_goal_success_ema_initialized = False
+            self.hmi_goal_success_sum = torch.zeros(
+                (), device=self.device, dtype=torch.float32
+            )
+            self.hmi_goal_success_count = torch.zeros(
+                (), device=self.device, dtype=torch.long
+            )
+            self.hmi_last_curriculum_update_iteration = 0
+        else:
+            self.hmi_exact_goal_object_pos_w = None
+            self.hmi_exact_goal_object_quat_w = None
+            self.hmi_goal_object_pos_w = None
+            self.hmi_goal_object_quat_w = None
+            self.hmi_goal_version = None
+            self.hmi_goal_reached = None
+            self.hmi_goal_noise_scale = None
+            self.hmi_goal_success_ema = None
+            self.hmi_goal_success_ema_initialized = False
+            self.hmi_goal_success_sum = None
+            self.hmi_goal_success_count = None
+            self.hmi_last_curriculum_update_iteration = 0
         num_regions = len(_CONTACT_PRIOR_REGION_NAMES)
         self._contact_prior_total_count = torch.zeros(
             (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT),
@@ -8560,6 +9215,31 @@ class MotionCommand(CommandTermBase):
             self.metrics["hybrid_velocity/lifted_fraction_of_task"] = (
                 lifted_fraction_of_task.expand(self.num_envs)
             )
+
+        if self.hmi_enabled():
+            track_mask = self.get_hmi_track_env_mask()
+            gen_mask = self.get_hmi_gen_env_mask()
+            self.metrics["hmi/track_env"] = track_mask.to(dtype=torch.float32)
+            self.metrics["hmi/gen_env"] = gen_mask.to(dtype=torch.float32)
+            if self.hmi_goal_object_pos_w is not None:
+                goal_pos_error = torch.linalg.vector_norm(
+                    self.hmi_goal_object_pos_w - self.simulator_object_pos_w,
+                    dim=-1,
+                )
+                self.metrics["hmi/object_goal_pos_error"] = goal_pos_error
+            if self.hmi_goal_object_quat_w is not None:
+                self.metrics["hmi/object_goal_ori_error"] = quat_error_magnitude(
+                    self.hmi_goal_object_quat_w,
+                    self.simulator_object_quat_w,
+                )
+            if self.hmi_goal_noise_scale is not None:
+                self.metrics["hmi/goal_noise_scale"] = self.hmi_goal_noise_scale.expand(
+                    self.num_envs
+                )
+            if self.hmi_goal_success_ema is not None:
+                self.metrics["hmi/goal_success_ema"] = self.hmi_goal_success_ema.expand(
+                    self.num_envs
+                )
 
         if self.precomputed_turn_then_forward_enabled():
             phase = self.get_precomputed_turn_then_forward_phase()

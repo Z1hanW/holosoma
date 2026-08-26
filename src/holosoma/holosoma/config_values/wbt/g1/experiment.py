@@ -8,6 +8,7 @@ from holosoma.config_values import (
     command,
     curriculum,
     observation,
+    perception,
     randomization,
     reward,
     robot,
@@ -574,6 +575,27 @@ _pure_rl_critic317_module_dict = replace(
     ),
 )
 
+_hmi_depth_critic317_inputs = [
+    "critic_obs",
+    "critic_actions",
+    "actor_obs_hmi_goal_command",
+    "actor_obs_drop_button",
+]
+_hmi_depth_base_module_dict = _policy_command_module_dict(
+    "actor_obs_hmi_goal_command"
+)
+_hmi_depth_module_dict = replace(
+    _hmi_depth_base_module_dict,
+    critic=replace(
+        _hmi_depth_base_module_dict.critic,
+        input_dim=_hmi_depth_critic317_inputs,
+        layer_config=replace(
+            _hmi_depth_base_module_dict.critic.layer_config,
+            module_input_name=tuple(_hmi_depth_critic317_inputs),
+        ),
+    ),
+)
+
 
 g1_29dof_wbt_w_object_policy_world_velocity = replace(
     g1_29dof_wbt_w_object_distill_sparse_root_cmd,
@@ -658,6 +680,45 @@ g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317 = replace(
         config=replace(
             g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift.algo.config,
             module_dict=_pure_rl_critic317_module_dict,
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_hmi_depth_stage1 = replace(
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317,
+    training=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.training,
+        name="g1_29dof_wbt_w_object_hmi_depth_stage1",
+        export_onnx=True,
+    ),
+    perception=perception.camera_depth_d435i,
+    command=command.g1_29dof_wbt_command_w_object_hmi_depth_stage1,
+    observation=observation.g1_29dof_wbt_observation_w_object_hmi_depth,
+    reward=reward.g1_29dof_wbt_reward_w_object_hmi,
+    termination=termination.g1_29dof_wbt_termination_hmi,
+    algo=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.algo.config,
+            module_dict=_hmi_depth_module_dict,
+            num_learning_iterations=15000,
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_hmi_depth_stage2 = replace(
+    g1_29dof_wbt_w_object_hmi_depth_stage1,
+    training=replace(
+        g1_29dof_wbt_w_object_hmi_depth_stage1.training,
+        name="g1_29dof_wbt_w_object_hmi_depth_stage2",
+        export_onnx=True,
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hmi_depth_stage2,
+    algo=replace(
+        g1_29dof_wbt_w_object_hmi_depth_stage1.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_hmi_depth_stage1.algo.config,
+            num_learning_iterations=20000,
         ),
     ),
 )
@@ -818,6 +879,8 @@ __all__ = [
     "g1_29dof_wbt_w_object_policy_world_root_error",
     "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift",
     "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317",
+    "g1_29dof_wbt_w_object_hmi_depth_stage1",
+    "g1_29dof_wbt_w_object_hmi_depth_stage2",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",

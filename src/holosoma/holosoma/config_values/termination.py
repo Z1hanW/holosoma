@@ -10,6 +10,7 @@ from holosoma.config_values.wbt.g1.termination import (
     g1_29dof_wbt_termination_generalist_z_only,
     g1_29dof_wbt_termination_hybrid_stage2,
     g1_29dof_wbt_termination_hybrid_velocity,
+    g1_29dof_wbt_termination_hmi,
 )
 
 none = None
@@ -26,5 +27,6 @@ DEFAULTS = {
     ),
     "g1_29dof_wbt_hybrid_stage2": g1_29dof_wbt_termination_hybrid_stage2,
     "g1_29dof_wbt_hybrid_velocity": g1_29dof_wbt_termination_hybrid_velocity,
+    "g1_29dof_wbt_hmi": g1_29dof_wbt_termination_hmi,
     "g1_29dof_wbt_distill": g1_29dof_wbt_termination_distill,
 }

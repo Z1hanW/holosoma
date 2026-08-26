@@ -874,6 +874,69 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317 = replace(
     },
 )
 
+hmi_goal_command_terms = {
+    "hmi_object_goal_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:hmi_object_goal_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+hmi_zero_drop_button_terms = {
+    "hmi_zero_drop_button": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:hmi_zero_drop_button",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+hmi_critic_terms = critic_obs_w_object_command_distill_terms.copy()
+hmi_critic_terms["motion_command"] = replace(
+    hmi_critic_terms["motion_command"],
+    func="holosoma.managers.observation.terms.wbt:hmi_masked_motion_command",
+)
+hmi_critic_terms["motion_ref_pos_b"] = replace(
+    hmi_critic_terms["motion_ref_pos_b"],
+    func="holosoma.managers.observation.terms.wbt:hmi_masked_motion_ref_pos_b",
+)
+hmi_critic_terms["motion_ref_ori_b"] = replace(
+    hmi_critic_terms["motion_ref_ori_b"],
+    func="holosoma.managers.observation.terms.wbt:hmi_masked_motion_ref_ori_b",
+)
+hmi_critic_terms["obj_target_pos_b"] = replace(
+    hmi_critic_terms["obj_target_pos_b"],
+    func="holosoma.managers.observation.terms.wbt:hmi_masked_obj_target_pos_b",
+)
+hmi_critic_terms["obj_target_ori_b"] = replace(
+    hmi_critic_terms["obj_target_ori_b"],
+    func="holosoma.managers.observation.terms.wbt:hmi_masked_obj_target_ori_b",
+)
+
+g1_29dof_wbt_observation_w_object_hmi_depth = replace(
+    g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317,
+    groups={
+        **g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317.groups,
+        "actor_obs_hmi_goal_command": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317.groups[
+                "actor_obs_root_contact_aware"
+            ],
+            terms=hmi_goal_command_terms,
+        ),
+        "actor_obs_drop_button": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317.groups[
+                "actor_obs_drop_button"
+            ],
+            terms=hmi_zero_drop_button_terms,
+        ),
+        "critic_obs": replace(
+            g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317.groups[
+                "critic_obs"
+            ],
+            terms=hmi_critic_terms,
+        ),
+    },
+)
+
 hybrid_stage2_critic_terms = critic_obs_w_object_command_distill_terms.copy()
 hybrid_stage2_critic_terms["hybrid_stage2_task_indicator"] = ObsTermCfg(
     func="holosoma.managers.observation.terms.wbt:hybrid_stage2_task_indicator",
@@ -1264,6 +1327,7 @@ __all__ = [
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317",
+    "g1_29dof_wbt_observation_w_object_hmi_depth",
     "g1_29dof_wbt_observation_w_object_hybrid_stage2",
     "g1_29dof_wbt_observation_w_object_hybrid_velocity",
     "g1_29dof_wbt_observation_w_object_hybrid_world_velocity",

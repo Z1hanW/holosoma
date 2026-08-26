@@ -1209,6 +1209,54 @@ def hybrid_velocity_masked_obj_target_ori_b(env: WholeBodyTrackingManager) -> to
     return _mask_hybrid_velocity_reference_rows(env, obj_target_ori_b(env))
 
 
+def hmi_object_goal_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Terminal object ``[x, y, yaw]`` command for the fixed HMI actor interface."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_hmi_object_goal_command()
+
+
+def hmi_zero_drop_button(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Preserve the one-dimensional drop slot without leaking reference phase."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.hmi_enabled():
+        raise RuntimeError("HMI drop-button term requires motion_config.hmi.")
+    return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+
+
+def _mask_hmi_generation_reference_rows(
+    env: WholeBodyTrackingManager,
+    value: torch.Tensor,
+) -> torch.Tensor:
+    """Hide per-step reference state from HMI generation-row critics."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    gen_mask = motion_command.get_hmi_gen_env_mask()
+    expanded_mask = gen_mask.view(gen_mask.shape[0], *([1] * (value.ndim - 1)))
+    return torch.where(expanded_mask, torch.zeros_like(value), value)
+
+
+def hmi_masked_motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hmi_generation_reference_rows(env, motion_command(env))
+
+
+def hmi_masked_motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hmi_generation_reference_rows(env, motion_ref_pos_b(env))
+
+
+def hmi_masked_motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hmi_generation_reference_rows(env, motion_ref_ori_b(env))
+
+
+def hmi_masked_obj_target_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hmi_generation_reference_rows(env, obj_target_pos_b(env))
+
+
+def hmi_masked_obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    return _mask_hmi_generation_reference_rows(env, obj_target_ori_b(env))
+
+
 @reusable_observation_base_term
 def obj_size(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Active object size from motion metadata."""

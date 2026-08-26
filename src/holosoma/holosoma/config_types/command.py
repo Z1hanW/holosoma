@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import Field
@@ -104,6 +105,122 @@ class FixedClipGroupAssignmentConfig:
 
     group_env_fraction: float = 0.25
     """Fraction of environments assigned to the fixed group."""
+
+
+@dataclass(frozen=True)
+class HMIGoalPoseNoiseConfig:
+    """Clipped Gaussian terminal-goal noise for Hybrid Motion Imitation.
+
+    This is the shape-preserving HoloSoma adapter for the goal-noise contract
+    introduced by Hybrid-Motion-Imitation.  Position noise is expressed in the
+    world frame and rotation noise is roll/pitch/yaw in radians.
+    """
+
+    pos_std_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    pos_clip_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    rpy_std: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    rpy_clip: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+
+    def __post_init__(self) -> None:
+        for name in ("pos_std_xyz", "pos_clip_xyz", "rpy_std", "rpy_clip"):
+            values = getattr(self, name)
+            if len(values) != 3:
+                raise ValueError(f"HMIGoalPoseNoiseConfig.{name} must contain exactly three values.")
+            if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in values):
+                raise ValueError(
+                    f"HMIGoalPoseNoiseConfig.{name} values must be finite and non-negative."
+                )
+
+
+@dataclass(frozen=True)
+class HMIMotionConfig:
+    """Hybrid Motion Imitation track/generation training contract.
+
+    Environment identity is fixed for the process lifetime.  Tracking rows use
+    dense reference imitation; generation rows hide reference targets from the
+    actor/critic and receive only terminal-goal task reward plus shared
+    regularization.
+    """
+
+    upstream_repository: Literal[
+        "https://github.com/jiashunwang/Hybrid-Motion-Imitation"
+    ] = "https://github.com/jiashunwang/Hybrid-Motion-Imitation"
+    upstream_commit: Literal[
+        "c353731999b3578c41ad5a00f896415b45e6a9f5"
+    ] = "c353731999b3578c41ad5a00f896415b45e6a9f5"
+    actor_interface_semantics: Literal[
+        "actor94_depth5046_action29_terminal_object_xy_yaw_v1"
+    ] = "actor94_depth5046_action29_terminal_object_xy_yaw_v1"
+    track_ratio: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.5
+    env_partition_seed: Annotated[int, Field(strict=True, ge=0)] = 0
+    gen_start_at_timestep_zero_prob: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] | None = 0.1
+    object_goal_noise: HMIGoalPoseNoiseConfig = field(default_factory=HMIGoalPoseNoiseConfig)
+    gen_step_zero_root_pos_std_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    gen_step_zero_root_pos_clip_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    gen_step_zero_root_rpy_std: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    gen_step_zero_root_rpy_clip: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    goal_noise_initial_scale: Annotated[
+        float,
+        Field(strict=True, ge=0.0, allow_inf_nan=False),
+    ] = 0.3
+    goal_noise_min_scale: Annotated[
+        float,
+        Field(strict=True, ge=0.0, allow_inf_nan=False),
+    ] = 0.3
+    goal_noise_max_scale: Annotated[
+        float,
+        Field(strict=True, ge=0.0, allow_inf_nan=False),
+    ] = 1.0
+    goal_noise_scale_step: Annotated[
+        float,
+        Field(strict=True, ge=0.0, allow_inf_nan=False),
+    ] = 0.01
+    goal_noise_success_threshold_up: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.90
+    goal_noise_success_threshold_down: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.80
+    goal_noise_update_interval: Annotated[int, Field(strict=True, ge=1)] = 20
+    goal_noise_ema_alpha: Annotated[
+        float,
+        Field(strict=True, gt=0.0, le=1.0, allow_inf_nan=False),
+    ] = 0.5
+
+    def __post_init__(self) -> None:
+        for name in (
+            "gen_step_zero_root_pos_std_xyz",
+            "gen_step_zero_root_pos_clip_xyz",
+            "gen_step_zero_root_rpy_std",
+            "gen_step_zero_root_rpy_clip",
+        ):
+            values = getattr(self, name)
+            if len(values) != 3:
+                raise ValueError(f"HMIMotionConfig.{name} must contain exactly three values.")
+            if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in values):
+                raise ValueError(
+                    f"HMIMotionConfig.{name} values must be finite and non-negative."
+                )
+        if not (
+            self.goal_noise_min_scale
+            <= self.goal_noise_initial_scale
+            <= self.goal_noise_max_scale
+        ):
+            raise ValueError(
+                "HMI goal-noise scales must satisfy min <= initial <= max."
+            )
+        if self.goal_noise_success_threshold_down > self.goal_noise_success_threshold_up:
+            raise ValueError(
+                "HMI goal-noise thresholds must satisfy down <= up."
+            )
 
 
 @dataclass(frozen=True)
@@ -326,6 +443,14 @@ class MotionConfig:
         Field(strict=True, gt=0.0, le=1.0, allow_inf_nan=False),
     ] = 0.10
     """Object world-height increase that saturates task lift progress."""
+
+    hmi: HMIMotionConfig | None = None
+    """Optional Hybrid Motion Imitation track/generation contract.
+
+    This is intentionally separate from the older ``hybrid_stage2`` and
+    ``hybrid_velocity`` experiments, whose objectives and actor commands are
+    different.
+    """
 
     pure_rl_policy_command_after_lift_enabled: bool = False
     """Replace only the actor's sparse root command around the runtime lift latch.

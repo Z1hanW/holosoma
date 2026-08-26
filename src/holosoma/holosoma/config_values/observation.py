@@ -16,6 +16,7 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_w_object_hybrid_stage2,
     g1_29dof_wbt_observation_w_object_hybrid_velocity,
     g1_29dof_wbt_observation_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_observation_w_object_hmi_depth,
     g1_29dof_wbt_observation_w_object_policy_world_root_error,
     g1_29dof_wbt_observation_w_object_policy_world_velocity,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_teacher_linvel,
@@ -47,6 +48,9 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_observation_w_object_hybrid_velocity,
     "g1_29dof_wbt_w_object_hybrid_world_velocity": (
         g1_29dof_wbt_observation_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth": (
+        g1_29dof_wbt_observation_w_object_hmi_depth
     ),
     "g1_29dof_wbt_w_object_policy_world_velocity": (
         g1_29dof_wbt_observation_w_object_policy_world_velocity

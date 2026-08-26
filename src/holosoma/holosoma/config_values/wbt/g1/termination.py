@@ -119,6 +119,38 @@ g1_29dof_wbt_termination_hybrid_velocity = TerminationManagerCfg(
     }
 )
 
+g1_29dof_wbt_termination_hmi = TerminationManagerCfg(
+    terms={
+        "timeout": g1_29dof_wbt_termination_generalist.terms["timeout"],
+        "body_proximity": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:BodyGroupProximity",
+            params={
+                "min_distance": 0.05,
+                "body_groups": [
+                    ["left_foot_contact_point", "right_foot_contact_point"]
+                ],
+            },
+        ),
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination_generalist.terms["bad_tracking"],
+            func="holosoma.managers.termination.terms.wbt:HMIBadTracking",
+            params={
+                **g1_29dof_wbt_termination_generalist.terms["bad_tracking"].params,
+                "bad_ref_pos_threshold": 0.40,
+                "bad_ref_ori_threshold": 0.40,
+                "bad_motion_body_pos_threshold": 0.25,
+                "bad_object_pos_threshold": 0.30,
+                "bad_object_ori_threshold": 0.80,
+                "min_root_height": 0.45,
+                "gen_bad_ref_pos_z_threshold": 0.40,
+                "gen_bad_ref_pos_xyz_threshold": 100.0,
+                "gen_bad_object_pos_z_threshold": 0.60,
+                "gen_bad_object_ori_threshold": 1.0,
+            },
+        ),
+    }
+)
+
 g1_29dof_wbt_termination_distill = TerminationManagerCfg(
     terms={
         "timeout": TerminationTermCfg(
@@ -173,5 +205,6 @@ __all__ = [
     "g1_29dof_wbt_termination_generalist_all_position_z_only",
     "g1_29dof_wbt_termination_hybrid_stage2",
     "g1_29dof_wbt_termination_hybrid_velocity",
+    "g1_29dof_wbt_termination_hmi",
     "g1_29dof_wbt_termination_distill",
 ]

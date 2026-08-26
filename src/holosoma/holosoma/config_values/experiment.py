@@ -21,6 +21,8 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_w_object_hybrid_stage2,
     g1_29dof_wbt_w_object_hybrid_velocity,
     g1_29dof_wbt_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_w_object_hmi_depth_stage1,
+    g1_29dof_wbt_w_object_hmi_depth_stage2,
     g1_29dof_wbt_w_object_policy_world_root_error,
     g1_29dof_wbt_w_object_policy_world_velocity,
     g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift,
@@ -61,6 +63,12 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_w_object_hybrid_velocity,
     "g1_29dof_wbt_w_object_hybrid_world_velocity": (
         g1_29dof_wbt_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage1": (
+        g1_29dof_wbt_w_object_hmi_depth_stage1
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage2": (
+        g1_29dof_wbt_w_object_hmi_depth_stage2
     ),
     "g1_29dof_wbt_w_object_policy_world_velocity": (
         g1_29dof_wbt_w_object_policy_world_velocity

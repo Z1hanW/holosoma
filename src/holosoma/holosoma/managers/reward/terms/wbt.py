@@ -126,6 +126,91 @@ def hybrid_velocity_tracking_reward(
     return reward * mask.to(dtype=reward.dtype)
 
 
+def hmi_tracking_reward(
+    env: WholeBodyTrackingManager,
+    reward_func: str,
+    reward_params: dict[str, object],
+) -> torch.Tensor:
+    """Apply dense per-step imitation only to HMI tracking environments."""
+
+    if reward_func not in _FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS:
+        raise ValueError(
+            f"Unsupported HMI tracking reward {reward_func!r}; expected one of "
+            f"{sorted(_FORWARD_AFTER_LIFT_TRACKING_REWARD_FUNCTIONS)}."
+        )
+    func = globals().get(reward_func)
+    if not callable(func):
+        raise RuntimeError(f"HMI tracking reward {reward_func!r} is unavailable.")
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.hmi_enabled():
+        raise RuntimeError("HMI tracking reward requires motion_config.hmi.")
+    reward = func(env, **reward_params)
+    track_mask = motion_command.get_hmi_track_env_mask()
+    # Upstream masks an exponential reference term on generation rows to a
+    # constant 0.5.  It carries no action gradient, while preserving the value
+    # target offset used by the released HMI recipe.
+    return torch.where(track_mask, reward, torch.full_like(reward, 0.5))
+
+
+class HMIObjectGoalReachedOnce(RewardTermBase):
+    """One-time sparse terminal object-goal bonus for HMI generation rows."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.pos_threshold = float(cfg.params.get("pos_threshold", 0.20))
+        self.ori_threshold = float(cfg.params.get("ori_threshold", np.pi / 6.0))
+        self.bonus = float(cfg.params.get("bonus", 3.0))
+        if self.pos_threshold <= 0.0 or self.ori_threshold <= 0.0 or self.bonus <= 0.0:
+            raise ValueError("HMI sparse-goal thresholds and bonus must be positive.")
+        self._awarded_goal_version = torch.full(
+            (env.num_envs,), -1, device=env.device, dtype=torch.long
+        )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._awarded_goal_version.fill_(-1)
+            return
+        ids = torch.as_tensor(env_ids, device=self.env.device, dtype=torch.long).flatten()
+        self._awarded_goal_version[ids] = -1
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        del kwargs
+        motion_command = _get_motion_command_and_assert_type(env)
+        if (
+            not motion_command.hmi_enabled()
+            or motion_command.hmi_goal_object_pos_w is None
+            or motion_command.hmi_goal_object_quat_w is None
+            or motion_command.hmi_goal_version is None
+        ):
+            raise RuntimeError("HMI sparse goal reward requires initialized HMI object goals.")
+        pos_error = torch.linalg.vector_norm(
+            motion_command.hmi_goal_object_pos_w
+            - motion_command.simulator_object_pos_w,
+            dim=-1,
+        )
+        ori_error = quat_error_magnitude(
+            motion_command.hmi_goal_object_quat_w,
+            motion_command.simulator_object_quat_w,
+        )
+        reached = (
+            (pos_error <= self.pos_threshold)
+            & (ori_error <= self.ori_threshold)
+            & motion_command.get_hmi_gen_env_mask()
+        )
+        newly_reached = reached & (
+            self._awarded_goal_version != motion_command.hmi_goal_version
+        )
+        self._awarded_goal_version[newly_reached] = motion_command.hmi_goal_version[
+            newly_reached
+        ]
+        motion_command.mark_hmi_goal_reached(torch.where(newly_reached)[0])
+        # RewardManager integrates terms with dt, so divide here to make
+        # ``bonus`` an episode-level impulse independent of control frequency.
+        return newly_reached.to(dtype=torch.float32) * (
+            self.bonus / max(float(env.dt), 1.0e-6)
+        )
+
+
 def _forward_after_lift_task_state(
     env: WholeBodyTrackingManager,
     *,

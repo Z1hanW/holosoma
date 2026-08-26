@@ -523,6 +523,18 @@ def _hybrid_velocity_tracking_term(term: RewardTermCfg) -> RewardTermCfg:
     )
 
 
+def _hmi_tracking_term(term: RewardTermCfg) -> RewardTermCfg:
+    return RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:hmi_tracking_reward",
+        params={
+            "reward_func": term.func.rsplit(":", 1)[-1],
+            "reward_params": dict(term.params),
+        },
+        weight=term.weight,
+        tags=[*term.tags, "hmi_tracking"],
+    )
+
+
 g1_29dof_wbt_reward_w_object_hybrid_stage2 = RewardManagerCfg(
     terms={
         **{
@@ -588,6 +600,31 @@ g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact = RewardManagerCfg(
                 "offline_contact_guidance"
             ],
             weight=0.0,
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_hmi = RewardManagerCfg(
+    terms={
+        **{
+            name: (
+                _hmi_tracking_term(term)
+                if name in _FORWARD_AFTER_LIFT_TRACKING_TERM_NAMES
+                else term
+            )
+            for name, term in (
+                g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact.terms.items()
+            )
+        },
+        "hmi_object_goal_reached_once": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:HMIObjectGoalReachedOnce",
+            params={
+                "pos_threshold": 0.20,
+                "ori_threshold": 0.5235987755982988,
+                "bonus": 3.0,
+            },
+            weight=1.0,
+            tags=["hmi_generation", "sparse_goal"],
         ),
     }
 )
@@ -804,6 +841,7 @@ __all__ = [
     "g1_29dof_wbt_reward_w_object_generalist",
     "g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance",
     "g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact",
+    "g1_29dof_wbt_reward_w_object_hmi",
     "g1_29dof_wbt_reward_w_object_hybrid_stage2",
     "g1_29dof_wbt_reward_w_object_hybrid_velocity",
     "g1_29dof_wbt_reward_w_object_r2s_contact_guidance",

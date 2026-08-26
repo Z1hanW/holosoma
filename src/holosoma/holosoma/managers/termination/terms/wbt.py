@@ -34,6 +34,55 @@ def drop_task_base_height_below_threshold(env, min_height: float = 0.45) -> torc
     return env.simulator.robot_root_states[:, 2] < min_height
 
 
+class BodyGroupProximity(TerminationTermBase):
+    """Terminate when any configured pair of robot bodies gets too close."""
+
+    def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.min_distance = float(cfg.params.get("min_distance", 0.05))
+        if not math.isfinite(self.min_distance) or self.min_distance <= 0.0:
+            raise ValueError("BodyGroupProximity min_distance must be finite and positive.")
+        simulator_body_names = list(self.env.simulator.body_names)
+        self._group_pair_indices: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for group_idx, body_group in enumerate(
+            cfg.params.get(
+                "body_groups",
+                [["left_foot_contact_point", "right_foot_contact_point"]],
+            )
+        ):
+            if len(body_group) < 2:
+                raise ValueError(
+                    f"body_groups[{group_idx}] must contain at least two body names."
+                )
+            missing = [name for name in body_group if name not in simulator_body_names]
+            if missing:
+                raise ValueError(
+                    f"BodyGroupProximity bodies are missing from the simulator: {missing}."
+                )
+            body_indices = torch.tensor(
+                [simulator_body_names.index(name) for name in body_group],
+                device=self.env.device,
+                dtype=torch.long,
+            )
+            pair_i, pair_j = torch.triu_indices(
+                len(body_group), len(body_group), offset=1, device=self.env.device
+            )
+            self._group_pair_indices.append((body_indices[pair_i], body_indices[pair_j]))
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        del kwargs
+        body_pos_w = self.env.simulator._rigid_body_pos
+        terminated = torch.zeros(
+            self.env.num_envs, dtype=torch.bool, device=self.env.device
+        )
+        for body_i, body_j in self._group_pair_indices:
+            pairwise_dist = torch.linalg.vector_norm(
+                body_pos_w[:, body_i, :] - body_pos_w[:, body_j, :], dim=-1
+            )
+            terminated |= torch.any(pairwise_dist < self.min_distance, dim=-1)
+        return terminated
+
+
 class RobotFallenByTiltAfterIteration(TerminationTermBase):
     """Terminate on large base tilt, optionally only after DAgger ends."""
 
@@ -367,3 +416,94 @@ class HybridVelocityBadTracking(BadTracking):
             task_object_dropped=task_mask & dropped,
         )
         return torch.where(task_mask, task_failure, reference_failure)
+
+
+class HMIBadTracking(BadTracking):
+    """Strict full-XYZ tracking rows plus HMI generation-row safety gates."""
+
+    def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.min_root_height = float(cfg.params.get("min_root_height", 0.45))
+        self.gen_bad_ref_pos_z_threshold = float(
+            cfg.params.get("gen_bad_ref_pos_z_threshold", 0.40)
+        )
+        self.gen_bad_ref_pos_xyz_threshold = float(
+            cfg.params.get("gen_bad_ref_pos_xyz_threshold", 100.0)
+        )
+        self.gen_bad_object_pos_z_threshold = float(
+            cfg.params.get("gen_bad_object_pos_z_threshold", 0.60)
+        )
+        self.gen_bad_object_ori_threshold = float(
+            cfg.params.get("gen_bad_object_ori_threshold", 1.0)
+        )
+        thresholds = (
+            self.min_root_height,
+            self.gen_bad_ref_pos_z_threshold,
+            self.gen_bad_ref_pos_xyz_threshold,
+            self.gen_bad_object_pos_z_threshold,
+            self.gen_bad_object_ori_threshold,
+        )
+        if any(value <= 0.0 for value in thresholds):
+            raise ValueError("HMI generation safety thresholds must be positive.")
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        reference_failure = super().__call__(env, **kwargs)
+        motion_command = self.env.command_manager.get_state("motion_command")
+        if not motion_command.hmi_enabled():
+            raise RuntimeError("HMIBadTracking requires motion_config.hmi.")
+        if self.env.is_evaluating:
+            return reference_failure
+
+        track_mask = motion_command.get_hmi_track_env_mask()
+        gen_mask = motion_command.get_hmi_gen_env_mask()
+        reference_components = self.get_last_component_results()
+        track_failure = reference_failure & track_mask
+
+        low_root_height = motion_command.robot_root_pos_w[:, 2] < self.min_root_height
+        gen_ref_pos_z = (
+            torch.abs(
+                motion_command.ref_pos_w[:, 2]
+                - motion_command.robot_ref_pos_w[:, 2]
+            )
+            > self.gen_bad_ref_pos_z_threshold
+        )
+        gen_ref_pos_xyz = (
+            torch.linalg.vector_norm(
+                motion_command.ref_pos_w - motion_command.robot_ref_pos_w,
+                dim=-1,
+            )
+            > self.gen_bad_ref_pos_xyz_threshold
+        )
+        gen_object_pos_z = (
+            torch.abs(
+                motion_command.object_pos_w[:, 2]
+                - motion_command.simulator_object_pos_w[:, 2]
+            )
+            > self.gen_bad_object_pos_z_threshold
+        )
+        gen_object_ori = (
+            quat_error_magnitude(
+                motion_command.object_quat_w,
+                motion_command.simulator_object_quat_w,
+            )
+            > self.gen_bad_object_ori_threshold
+        )
+        gen_failure = gen_mask & (
+            low_root_height
+            | gen_ref_pos_z
+            | gen_ref_pos_xyz
+            | gen_object_pos_z
+            | gen_object_ori
+        )
+        self._set_component_results(
+            **{
+                name: track_mask & component
+                for name, component in reference_components.items()
+            },
+            hmi_gen_low_root_height=gen_mask & low_root_height,
+            hmi_gen_ref_position_z=gen_mask & gen_ref_pos_z,
+            hmi_gen_ref_position_xyz=gen_mask & gen_ref_pos_xyz,
+            hmi_gen_object_position_z=gen_mask & gen_object_pos_z,
+            hmi_gen_object_orientation=gen_mask & gen_object_ori,
+        )
+        return track_failure | gen_failure
