@@ -91,6 +91,12 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
             "motion_config"
         ]
         assert motion_config.motion_file == "data_demo"
+        assert config.robot.object.object_urdf_path == (
+            "data_demo/_clip_object_urdf_map.json"
+        )
+        assert Path(config.robot.object.object_urdf_path).parent == Path(
+            motion_config.motion_file
+        )
         assert motion_config.hmi.track_ratio == expected_track_ratio
         assert motion_config.use_adaptive_timesteps_sampler is True
         assert motion_config.hmi.gen_start_at_timestep_zero_prob == 0.2
@@ -133,7 +139,10 @@ def test_hmi_default_motion_bank_has_complete_object_metadata():
         "motion_command"
     ].params["motion_config"]
     motion_root = repo_root / motion_config.motion_file
-    object_map_path = motion_root / "_clip_object_urdf_map.json"
+    object_map_path = repo_root / (
+        g1_29dof_wbt_w_object_hmi_depth_stage1.robot.object.object_urdf_path
+    )
+    assert object_map_path.parent == motion_root
     object_map = json.loads(object_map_path.read_text(encoding="utf-8"))["clips"]
     clip_ids = {path.stem for path in motion_root.glob("*.npz")}
 

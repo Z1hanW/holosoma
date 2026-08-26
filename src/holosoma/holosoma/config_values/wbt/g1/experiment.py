@@ -692,6 +692,13 @@ g1_29dof_wbt_w_object_hmi_depth_stage1 = replace(
         export_onnx=True,
     ),
     perception=perception.camera_depth_d435i,
+    robot=replace(
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.robot,
+        object=replace(
+            g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.robot.object,
+            object_urdf_path="data_demo/_clip_object_urdf_map.json",
+        ),
+    ),
     simulator=replace(
         g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317.simulator,
         config=replace(

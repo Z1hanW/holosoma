@@ -63,8 +63,8 @@ Both experiment presets set `training.export_onnx=true`:
 The checked-in `data_demo` five-clip bank is the runnable preset default. It
 includes a complete `_clip_object_urdf_map.json`, which HMI's fixed env/clip
 partition requires. Production launches must override `motion_file` with the
-intended immutable motion view and preserve the same complete object-map
-contract.
+intended immutable motion view, override `robot.object.object_urdf_path` with
+that same view's map, and preserve the complete object-map contract.
 
 Before a formal run, the launcher must still bind an immutable remote Git SHA,
 immutable motion/object manifests, the exact depth observation contract, and a
