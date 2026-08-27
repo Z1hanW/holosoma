@@ -79,3 +79,20 @@ to the W&B-disabled, nonformal canary and is not valid for a formal lineage.
 The optional final argument is total environments across eight ranks; it must
 be divisible by eight. Canary physics keeps the production
 `convex_decomposition` collider with object contact sensors disabled.
+
+For a production-bank canary, set the complete
+`HMI_CANARY_MOTION_DIR`, `HMI_CANARY_OBJECT_MAP`,
+`HMI_CANARY_SHARD_ROOT`, `HMI_CANARY_SHARD_MANIFEST_SHA256`,
+`HMI_CANARY_CONTACT_ROOT`, and `HMI_CANARY_EXPECTED_CLIP_COUNT` set. Partial
+sets fail closed. The canary verifies that the rank shards exactly partition
+the bank and that every local clip count divides the requested environments per
+rank.
+
+The single-node formal Stage-1 entrypoint is
+`scripts/run_hmi_depth_stage1_ws8_formal.sh`. It requires a clean clone fetched
+directly from the pushed experiment branch, binds the exact Git commit/tree,
+CORL79 single-slot view, 8-rank/4096-env shard topology, real ONNX receipt,
+immutable run contract, and remotely verified Rule-90 manifest before checking
+GPU idleness or starting workers. It launches fresh Stage 1 only: 8 ranks,
+4096 environments per rank, 15,000 iterations, 1,000-iteration atomic PT+ONNX
+checkpoints, and no resume or policy initialization.

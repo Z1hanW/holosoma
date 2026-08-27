@@ -12,6 +12,12 @@ HMI_STAGE=${3:-stage1}
 POLICY_INIT_CHECKPOINT=${4:-}
 POLICY_INIT_SHA256=${5:-}
 TOTAL_ENVS=${6:-512}
+EXTERNAL_MOTION_DIR=${HMI_CANARY_MOTION_DIR:-}
+EXTERNAL_OBJECT_MAP=${HMI_CANARY_OBJECT_MAP:-}
+EXTERNAL_SHARD_ROOT=${HMI_CANARY_SHARD_ROOT:-}
+EXTERNAL_SHARD_MANIFEST_SHA256=${HMI_CANARY_SHARD_MANIFEST_SHA256:-}
+EXTERNAL_CONTACT_ROOT=${HMI_CANARY_CONTACT_ROOT:-}
+EXTERNAL_EXPECTED_CLIP_COUNT=${HMI_CANARY_EXPECTED_CLIP_COUNT:-}
 
 if [[ -z ${EXPECTED_COMMIT} || ! ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
@@ -22,6 +28,33 @@ if [[ ! ${TOTAL_ENVS} =~ ^[1-9][0-9]*$ ]] || (( TOTAL_ENVS % 8 != 0 )); then
   exit 2
 fi
 ENVS_PER_RANK=$((TOTAL_ENVS / 8))
+
+EXTERNAL_INPUT_VALUES=(
+  "${EXTERNAL_MOTION_DIR}"
+  "${EXTERNAL_OBJECT_MAP}"
+  "${EXTERNAL_SHARD_ROOT}"
+  "${EXTERNAL_SHARD_MANIFEST_SHA256}"
+  "${EXTERNAL_CONTACT_ROOT}"
+  "${EXTERNAL_EXPECTED_CLIP_COUNT}"
+)
+EXTERNAL_INPUT_COUNT=0
+for VALUE in "${EXTERNAL_INPUT_VALUES[@]}"; do
+  [[ -n ${VALUE} ]] && EXTERNAL_INPUT_COUNT=$((EXTERNAL_INPUT_COUNT + 1))
+done
+if (( EXTERNAL_INPUT_COUNT != 0 && EXTERNAL_INPUT_COUNT != ${#EXTERNAL_INPUT_VALUES[@]} )); then
+  echo "[ERROR] external HMI canary inputs must be provided as one complete set" >&2
+  exit 2
+fi
+if (( EXTERNAL_INPUT_COUNT > 0 )); then
+  [[ ${EXTERNAL_SHARD_MANIFEST_SHA256} =~ ^[0-9a-f]{64}$ ]] || {
+    echo "[ERROR] HMI_CANARY_SHARD_MANIFEST_SHA256 must be lowercase SHA256" >&2
+    exit 2
+  }
+  [[ ${EXTERNAL_EXPECTED_CLIP_COUNT} =~ ^[1-9][0-9]*$ ]] || {
+    echo "[ERROR] HMI_CANARY_EXPECTED_CLIP_COUNT must be positive" >&2
+    exit 2
+  }
+fi
 case "${HMI_STAGE}" in
   stage1)
     EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage1
@@ -129,6 +162,102 @@ TRAINING_ARGS=(
   --algo.config.num-mini-batches=1
   --logger.base-dir="${RUN_ROOT}"
 )
+if (( EXTERNAL_INPUT_COUNT > 0 )); then
+  for PATH_TO_CHECK in \
+    "${EXTERNAL_MOTION_DIR}" \
+    "${EXTERNAL_SHARD_ROOT}" \
+    "${EXTERNAL_CONTACT_ROOT}"; do
+    [[ -d ${PATH_TO_CHECK} && ! -L ${PATH_TO_CHECK} ]] || {
+      echo "[ERROR] expected non-symlink external directory: ${PATH_TO_CHECK}" >&2
+      exit 2
+    }
+  done
+  [[ -f ${EXTERNAL_OBJECT_MAP} && ! -L ${EXTERNAL_OBJECT_MAP} ]] || {
+    echo "[ERROR] expected non-symlink external object map: ${EXTERNAL_OBJECT_MAP}" >&2
+    exit 2
+  }
+  SHARD_MANIFEST=${EXTERNAL_SHARD_ROOT}/manifest.json
+  [[ -f ${SHARD_MANIFEST} && ! -L ${SHARD_MANIFEST} ]] || {
+    echo "[ERROR] missing rank-shard manifest: ${SHARD_MANIFEST}" >&2
+    exit 2
+  }
+  ACTUAL_SHARD_MANIFEST_SHA256=$(sha256sum "${SHARD_MANIFEST}" | awk '{print $1}')
+  [[ ${ACTUAL_SHARD_MANIFEST_SHA256} == "${EXTERNAL_SHARD_MANIFEST_SHA256}" ]] || {
+    echo "[ERROR] rank-shard manifest SHA256 mismatch" >&2
+    exit 2
+  }
+
+  readarray -t EXTERNAL_METADATA < <(
+    "${PYTHON_BIN}" - \
+      "${EXTERNAL_MOTION_DIR}/manifest.json" \
+      "${SHARD_MANIFEST}" \
+      "${EXTERNAL_EXPECTED_CLIP_COUNT}" \
+      "${ENVS_PER_RANK}" <<'PY'
+import json
+import sys
+
+view_path, shard_path, expected_clips_raw, expected_envs_raw = sys.argv[1:]
+expected_clips = int(expected_clips_raw)
+expected_envs = int(expected_envs_raw)
+with open(view_path, "r", encoding="utf-8") as stream:
+    view = json.load(stream)
+with open(shard_path, "r", encoding="utf-8") as stream:
+    shards = json.load(stream)
+if view.get("clip_count") != expected_clips:
+    raise SystemExit("view clip_count mismatch")
+if shards.get("world_size") != 8 or shards.get("clip_count") != expected_clips:
+    raise SystemExit("rank-shard topology mismatch")
+if shards.get("environments_per_rank") != expected_envs:
+    raise SystemExit("rank-shard environment count mismatch")
+if shards.get("exact_clip_partition") is not True:
+    raise SystemExit("rank shards do not exactly partition the motion bank")
+if shards.get("rank_clip_counts_divide_environments_per_rank") is not True:
+    raise SystemExit("rank-shard clip counts do not divide environments-per-rank")
+if len(shards.get("shards", [])) != 8:
+    raise SystemExit("rank-shard manifest does not contain eight shards")
+if set(shards.get("clip_cover_counts", {}).values()) != {1}:
+    raise SystemExit("rank shards do not cover every clip exactly once")
+for role, value in (
+    ("single-slot source digest", view.get("source_digest")),
+    ("single-slot view digest", view.get("view_digest")),
+    ("rank-shard source digest", shards.get("source_digest")),
+):
+    if not isinstance(value, str) or len(value) != 64:
+        raise SystemExit(f"invalid {role}")
+    print(value)
+PY
+  )
+  [[ ${#EXTERNAL_METADATA[@]} -eq 3 ]] || {
+    echo "[ERROR] failed to bind external HMI provenance" >&2
+    exit 2
+  }
+  export MOTION_DIR="${EXTERNAL_MOTION_DIR}"
+  export OBJECT_SPEC_PATH="${EXTERNAL_OBJECT_MAP}"
+  export OBJECT_URDF="${EXTERNAL_OBJECT_MAP}"
+  export CONTACT_EXPORT_ROOT="${EXTERNAL_CONTACT_ROOT}"
+  export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST="${EXTERNAL_METADATA[0]}"
+  export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST="${EXTERNAL_METADATA[1]}"
+  export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR="${EXTERNAL_MOTION_DIR}"
+  export HOLOSOMA_EXTERNAL_AS_RANK_SHARD_SOURCE_DIGEST="${EXTERNAL_METADATA[2]}"
+  export HOLOSOMA_EXTERNAL_AS_WORLD_SIZE=8
+  export HOLOSOMA_RANK_LOCAL_MOTION_ROOT="${EXTERNAL_SHARD_ROOT}"
+  export HOLOSOMA_MOTION_SHARD_MANIFEST="${SHARD_MANIFEST}"
+  export HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED=1
+  export HOLOSOMA_REQUIRE_RANK_LOCAL_SHARD_PROVENANCE=1
+  export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=0
+  export HOLOSOMA_OBJECT_SPAWN_MODE=single_slot_multi_urdf
+  export HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=1
+  export HOLOSOMA_REQUIRE_OBJECT_MESH_ASSETS=1
+  export HOLOSOMA_ALLOW_LEGACY_OBJECT_URDF_FALLBACK=0
+  export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=mesh
+  export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1
+  TRAINING_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.motion-file="${EXTERNAL_MOTION_DIR}"
+    --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
+    --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${EXTERNAL_CONTACT_ROOT}/clips"
+    --robot.object.object-urdf-path="${EXTERNAL_OBJECT_MAP}"
+  )
+fi
 if [[ ${HMI_STAGE} == stage2 ]]; then
   # This is an explicitly nonformal canary with a locally SHA-pinned Stage-1
   # artifact, not a scientific lineage. Formal Stage 2 must attach finalized
@@ -141,7 +270,7 @@ echo "[INFO] validating the exact deployment graph with ONNX checker and ORT par
 "${PYTHON_BIN}" -m pytest -q \
   src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_depth_actor_real_onnx_checker_and_ort_parity
 
-echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 collider=convex_decomposition contact_sensors=0 export_onnx=true"
+echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 collider=convex_decomposition contact_sensors=0 export_onnx=true external_clip_count=${EXTERNAL_EXPECTED_CLIP_COUNT:-default}"
 "${PYTHON_BIN}" -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
