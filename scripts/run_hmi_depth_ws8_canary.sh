@@ -158,14 +158,15 @@ TRAINING_ARGS=(
   --algo.config.num-steps-per-env=8
   --algo.config.num-learning-epochs=1
   --algo.config.num-mini-batches=1
-  # The single-slot multi-URDF scene briefly overlaps all 4096 environments
-  # during PhysX startup.  These are the e4096 scaling values of the accepted
-  # e2048 formal object-generalist contract; smaller buffers silently drop
-  # broadphase interactions before the environments are reset apart.
-  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity=1073741824
-  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity=1073741824
-  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity=268435456
-  --simulator.config.sim.physx.gpu-collision-stack-size=536870912
+  # Keep independent environments physically separated during startup.  With
+  # env-spacing=0, 4096 robots and objects temporarily overlap and PhysX asks
+  # for roughly one billion broadphase pairs even though those interactions
+  # are scientifically meaningless.
+  --simulator.config.scene.env-spacing=5.0
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity=335544320
+  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity=469762048
+  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity=83886080
+  --simulator.config.sim.physx.gpu-collision-stack-size=268435456
   --simulator.config.sim.physx.gpu-heap-capacity=67108864
   --simulator.config.sim.physx.gpu-temp-buffer-capacity=16777216
   --logger.base-dir="${RUN_ROOT}"

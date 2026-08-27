@@ -33,10 +33,11 @@ readonly ENVS_PER_RANK=4096
 readonly TOTAL_ENVS=32768
 readonly TARGET_ITERATIONS=15000
 readonly MASTER_PORT=31491
-readonly PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=1073741824
-readonly PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=1073741824
-readonly PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=268435456
-readonly PHYSX_GPU_COLLISION_STACK_SIZE=536870912
+readonly ENV_SPACING_M=5.0
+readonly PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=335544320
+readonly PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=469762048
+readonly PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=83886080
+readonly PHYSX_GPU_COLLISION_STACK_SIZE=268435456
 readonly PHYSX_GPU_HEAP_CAPACITY=67108864
 readonly PHYSX_GPU_TEMP_BUFFER_CAPACITY=16777216
 
@@ -143,11 +144,12 @@ assert contract["training"]["export_onnx"] is True
 assert contract["training"]["fresh"] is True
 assert contract["training"]["resume_checkpoint"] is None
 assert contract["training"]["policy_init_checkpoint"] is None
+assert contract["training"]["environment_spacing_m"] == 5.0
 assert contract["training"]["physx_gpu_buffers"] == {
-    "found_lost_pairs_capacity": 1073741824,
-    "found_lost_aggregate_pairs_capacity": 1073741824,
-    "total_aggregate_pairs_capacity": 268435456,
-    "collision_stack_size": 536870912,
+    "found_lost_pairs_capacity": 335544320,
+    "found_lost_aggregate_pairs_capacity": 469762048,
+    "total_aggregate_pairs_capacity": 83886080,
+    "collision_stack_size": 268435456,
     "heap_capacity": 67108864,
     "temp_buffer_capacity": 16777216,
 }
@@ -320,6 +322,7 @@ TRAIN_ARGS=(
   --algo.config.normalize-critic-obs=False
   --algo.config.save-interval=1000
   --algo.config.reset-rollout-at-checkpoint=False
+  --simulator.config.scene.env-spacing="${ENV_SPACING_M}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
   --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
   --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
