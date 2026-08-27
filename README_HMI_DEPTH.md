@@ -83,10 +83,16 @@ be divisible by eight. Canary physics keeps the production
 For a production-bank canary, set the complete
 `HMI_CANARY_MOTION_DIR`, `HMI_CANARY_OBJECT_MAP`,
 `HMI_CANARY_SHARD_ROOT`, `HMI_CANARY_SHARD_MANIFEST_SHA256`,
-`HMI_CANARY_CONTACT_ROOT`, and `HMI_CANARY_EXPECTED_CLIP_COUNT` set. Partial
+and `HMI_CANARY_EXPECTED_CLIP_COUNT` set. Partial
 sets fail closed. The canary verifies that the rank shards exactly partition
 the bank and that every local clip count divides the requested environments per
 rank.
+
+The CORL79 contact sidecars belong to the older appended timeline and are not
+part of the HMI contract. HMI's tracking rows still use the released adaptive
+failure-based reset sampler; the launcher deliberately leaves
+`adaptive_sampling_contact_interval_root` unset instead of clipping or
+reinterpreting incompatible historical windows.
 
 The single-node formal Stage-1 entrypoint is
 `scripts/run_hmi_depth_stage1_ws8_formal.sh`. It requires a clean clone fetched

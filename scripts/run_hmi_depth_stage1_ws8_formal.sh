@@ -37,7 +37,6 @@ readonly MASTER_PORT=31491
 readonly BANK=/home/ubuntu/FAR/holosoma/data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball
 readonly MOTION_VIEW="${BANK}/_scientific_corl79_single_slot/by-source/6209b4742cce3b2989c7ea1f96a55a27d57bcf91eeb90699d409747187ca2cca"
 readonly OBJECT_MAP="${MOTION_VIEW}/_clip_object_urdf_map.json"
-readonly CONTACT_ROOT="${BANK}/contact_export_from_teacher_success133_final0p5"
 readonly SHARD_ROOT=/data/holosoma_inputs/hmi_depth_corl79_rank_shards_ws8_e4096/by-source/d0caf5664810488f84eeaf4cb5a8c3f10db465d5b9ce4f16ce093dec240f3800
 readonly SHARD_MANIFEST="${SHARD_ROOT}/manifest.json"
 
@@ -148,12 +147,6 @@ assert onnx["terminal_pair"]["onnxruntime_loaded"] is True
 assert onnx["terminal_pair"]["pytorch_vs_ort"] is True
 PY
 
-"${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_contact_sidecars.py" \
-  --motion-dir "${MOTION_VIEW}" \
-  --contact-root "${CONTACT_ROOT}" \
-  --expected-total 79 \
-  --motion-end-mode episodic >/dev/null
-
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
   --manifest "${RULE90_MANIFEST}" \
   --expected-manifest-sha256 "${RULE90_MANIFEST_SHA256}" \
@@ -250,7 +243,7 @@ export HOLOSOMA_FORMAL_GIT_VERIFICATION_PATH="${FORMAL_GIT_VERIFICATION}"
 export HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT="${RUN_ROOT}/provenance-cache"
 
 export MOTION_DIR="${MOTION_VIEW}"
-export OBJECT_SPEC_PATH="${OBJECT_MAP}" OBJECT_URDF="${OBJECT_MAP}" CONTACT_EXPORT_ROOT="${CONTACT_ROOT}"
+export OBJECT_SPEC_PATH="${OBJECT_MAP}" OBJECT_URDF="${OBJECT_MAP}"
 export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_SOURCE_DIGEST="${SINGLE_SLOT_SOURCE_DIGEST}"
 export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_VIEW_DIGEST="${SINGLE_SLOT_VIEW_DIGEST}"
 export HOLOSOMA_EXTERNAL_AS_SINGLE_SLOT_DIR="${MOTION_VIEW}"
@@ -263,7 +256,6 @@ export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=0 HOLOSOMA_OBJECT_SPAWN_MODE=single_
 export HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=1 HOLOSOMA_REQUIRE_OBJECT_MESH_ASSETS=1
 export HOLOSOMA_ALLOW_LEGACY_OBJECT_URDF_FALLBACK=0 HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=mesh
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=convex_decomposition HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0
-export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1
 
 unset RESUME_CKPT RESUME_CHECKPOINT RESUME_MODEL_FILE RESUME_STEP
 unset POLICY_INIT_CKPT POLICY_INIT_CHECKPOINT RESUME_FROM_BOX BOX_RESUME_CKPT
@@ -277,9 +269,7 @@ HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_t
   --training-regime pure_rl \
   --motion-dir "${MOTION_VIEW}" \
   --object-map "${OBJECT_MAP}" \
-  --contact-root "${CONTACT_ROOT}" \
   --motion-shard-manifest "${SHARD_MANIFEST}" \
-  --contact-interval-runtime-prepend-compensation false \
   --source-root "${SOURCE_ROOT}")
 export HOLOSOMA_TRAINING_PROVENANCE
 
@@ -318,8 +308,6 @@ TRAIN_ARGS=(
   --algo.config.reset-rollout-at-checkpoint=False
   --command.setup-terms.motion-command.params.motion-config.motion-file="${MOTION_VIEW}"
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
-  --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${CONTACT_ROOT}/clips"
-  --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation=False
   --robot.object.object-urdf-path="${OBJECT_MAP}"
   --logger.base-dir="${RUN_ROOT}/training_logs"
 )
