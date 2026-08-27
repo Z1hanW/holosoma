@@ -76,3 +76,6 @@ reward and partition semantics.
 smokes. The Stage-2 form requires an exact Stage-1 checkpoint path and SHA256
 and performs actor-only policy init; its explicit legacy-load hatch is confined
 to the W&B-disabled, nonformal canary and is not valid for a formal lineage.
+The optional final argument is total environments across eight ranks; it must
+be divisible by eight. Canary physics keeps the production
+`convex_decomposition` collider with object contact sensors disabled.

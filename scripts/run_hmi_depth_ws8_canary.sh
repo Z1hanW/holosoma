@@ -11,11 +11,17 @@ RUN_LABEL=${2:-hmi_depth_stage1_ws8_canary}
 HMI_STAGE=${3:-stage1}
 POLICY_INIT_CHECKPOINT=${4:-}
 POLICY_INIT_SHA256=${5:-}
+TOTAL_ENVS=${6:-512}
 
 if [[ -z ${EXPECTED_COMMIT} || ! ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]]; then
-  echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256]" >&2
+  echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
   exit 2
 fi
+if [[ ! ${TOTAL_ENVS} =~ ^[1-9][0-9]*$ ]] || (( TOTAL_ENVS % 8 != 0 )); then
+  echo "[ERROR] total-envs must be a positive integer divisible by 8" >&2
+  exit 2
+fi
+ENVS_PER_RANK=$((TOTAL_ENVS / 8))
 case "${HMI_STAGE}" in
   stage1)
     EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage1
@@ -107,12 +113,13 @@ export HOLOSOMA_SYNC_BEFORE_GRAD_ALLREDUCE=1 HOLOSOMA_CONTIGUOUS_MINIBATCHES=1
 export HOLOSOMA_SKIP_INITIAL_CHECKPOINT=1
 export WANDB_MODE=disabled WANDB_DISABLED=true WANDB_CONSOLE=off HOLOSOMA_REQUIRE_WANDB_RUN=0
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y HEADLESS=1 OMP_NUM_THREADS=1
-export HOLOSOMA_OBJECT_COLLIDER_TYPE=convex_hull
+export HOLOSOMA_OBJECT_COLLIDER_TYPE=convex_decomposition
+export HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0
 
 TRAINING_ARGS=(
   "${EXPERIMENT_PRESET}"
   --training.multigpu=True
-  --training.num-envs=512
+  --training.num-envs="${TOTAL_ENVS}"
   --training.seed=42
   --training.export-onnx=True
   --algo.config.num-learning-iterations=2
@@ -134,7 +141,7 @@ echo "[INFO] validating the exact deployment graph with ONNX checker and ORT par
 "${PYTHON_BIN}" -m pytest -q \
   src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_depth_actor_real_onnx_checker_and_ort_parity
 
-echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=512 iterations=2 export_onnx=true"
+echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 collider=convex_decomposition contact_sensors=0 export_onnx=true"
 "${PYTHON_BIN}" -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
