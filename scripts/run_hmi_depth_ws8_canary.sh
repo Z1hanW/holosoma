@@ -158,6 +158,16 @@ TRAINING_ARGS=(
   --algo.config.num-steps-per-env=8
   --algo.config.num-learning-epochs=1
   --algo.config.num-mini-batches=1
+  # The single-slot multi-URDF scene briefly overlaps all 4096 environments
+  # during PhysX startup.  These are the e4096 scaling values of the accepted
+  # e2048 formal object-generalist contract; smaller buffers silently drop
+  # broadphase interactions before the environments are reset apart.
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity=1073741824
+  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity=1073741824
+  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity=268435456
+  --simulator.config.sim.physx.gpu-collision-stack-size=536870912
+  --simulator.config.sim.physx.gpu-heap-capacity=67108864
+  --simulator.config.sim.physx.gpu-temp-buffer-capacity=16777216
   --logger.base-dir="${RUN_ROOT}"
 )
 if (( EXTERNAL_INPUT_COUNT > 0 )); then
@@ -272,3 +282,10 @@ echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} w
   src/holosoma/holosoma/train_agent_rank_visible.py \
   "${TRAINING_ARGS[@]}" \
   2>&1 | tee "${RUN_ROOT}/train.log"
+
+if grep -Eq \
+  'increase PxGpuDynamicsMemoryConfig::(foundLostPairsCapacity|foundLostAggregatePairsCapacity)|CUDA out of memory' \
+  "${RUN_ROOT}/train.log"; then
+  echo "[ERROR] e4096 canary observed an undersized PhysX GPU buffer or CUDA OOM" >&2
+  exit 2
+fi

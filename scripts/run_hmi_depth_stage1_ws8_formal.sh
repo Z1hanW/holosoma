@@ -33,6 +33,12 @@ readonly ENVS_PER_RANK=4096
 readonly TOTAL_ENVS=32768
 readonly TARGET_ITERATIONS=15000
 readonly MASTER_PORT=31491
+readonly PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=1073741824
+readonly PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=1073741824
+readonly PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=268435456
+readonly PHYSX_GPU_COLLISION_STACK_SIZE=536870912
+readonly PHYSX_GPU_HEAP_CAPACITY=67108864
+readonly PHYSX_GPU_TEMP_BUFFER_CAPACITY=16777216
 
 readonly BANK=/home/ubuntu/FAR/holosoma/data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball
 readonly MOTION_VIEW="${BANK}/_scientific_corl79_single_slot/by-source/6209b4742cce3b2989c7ea1f96a55a27d57bcf91eeb90699d409747187ca2cca"
@@ -137,6 +143,14 @@ assert contract["training"]["export_onnx"] is True
 assert contract["training"]["fresh"] is True
 assert contract["training"]["resume_checkpoint"] is None
 assert contract["training"]["policy_init_checkpoint"] is None
+assert contract["training"]["physx_gpu_buffers"] == {
+    "found_lost_pairs_capacity": 1073741824,
+    "found_lost_aggregate_pairs_capacity": 1073741824,
+    "total_aggregate_pairs_capacity": 268435456,
+    "collision_stack_size": 536870912,
+    "heap_capacity": 67108864,
+    "temp_buffer_capacity": 16777216,
+}
 assert contract["data"]["rank_shard_manifest_sha256"] == "5abba6c9aa00336f00d3273c77a3d24e1cbaf0e0ce9baead65902b91ef816043"
 assert onnx["accepted"] is True and onnx["source_commit"] == commit
 assert onnx["world_size"] == 8 and onnx["environments_per_rank"] == 4096
@@ -306,6 +320,12 @@ TRAIN_ARGS=(
   --algo.config.normalize-critic-obs=False
   --algo.config.save-interval=1000
   --algo.config.reset-rollout-at-checkpoint=False
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
+  --simulator.config.sim.physx.gpu-heap-capacity="${PHYSX_GPU_HEAP_CAPACITY}"
+  --simulator.config.sim.physx.gpu-temp-buffer-capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
   --command.setup-terms.motion-command.params.motion-config.motion-file="${MOTION_VIEW}"
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
   --robot.object.object-urdf-path="${OBJECT_MAP}"
@@ -320,3 +340,10 @@ echo "[INFO] formal_hmi_depth_stage1 commit=${EXPECTED_COMMIT} tree=${EXPECTED_T
   "${SOURCE_ROOT}/src/holosoma/holosoma/train_agent_rank_visible.py" \
   "${TRAIN_ARGS[@]}" \
   2>&1 | tee "${RUN_ROOT}/logs/formal_console.log"
+
+if grep -Eq \
+  'increase PxGpuDynamicsMemoryConfig::(foundLostPairsCapacity|foundLostAggregatePairsCapacity)|CUDA out of memory' \
+  "${RUN_ROOT}/logs/formal_console.log"; then
+  echo "[ERROR] formal e4096 run observed an undersized PhysX GPU buffer or CUDA OOM" >&2
+  exit 2
+fi
