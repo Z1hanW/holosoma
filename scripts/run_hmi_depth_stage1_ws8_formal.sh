@@ -34,10 +34,10 @@ readonly TOTAL_ENVS=32768
 readonly TARGET_ITERATIONS=15000
 readonly MASTER_PORT=31491
 readonly ENV_SPACING_M=5.0
-readonly PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=335544320
-readonly PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=469762048
-readonly PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=83886080
-readonly PHYSX_GPU_COLLISION_STACK_SIZE=268435456
+readonly PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=134217728
+readonly PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=134217728
+readonly PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=67108864
+readonly PHYSX_GPU_COLLISION_STACK_SIZE=67108864
 readonly PHYSX_GPU_HEAP_CAPACITY=67108864
 readonly PHYSX_GPU_TEMP_BUFFER_CAPACITY=16777216
 
@@ -146,10 +146,10 @@ assert contract["training"]["resume_checkpoint"] is None
 assert contract["training"]["policy_init_checkpoint"] is None
 assert contract["training"]["environment_spacing_m"] == 5.0
 assert contract["training"]["physx_gpu_buffers"] == {
-    "found_lost_pairs_capacity": 335544320,
-    "found_lost_aggregate_pairs_capacity": 469762048,
-    "total_aggregate_pairs_capacity": 83886080,
-    "collision_stack_size": 268435456,
+    "found_lost_pairs_capacity": 134217728,
+    "found_lost_aggregate_pairs_capacity": 134217728,
+    "total_aggregate_pairs_capacity": 67108864,
+    "collision_stack_size": 67108864,
     "heap_capacity": 67108864,
     "temp_buffer_capacity": 16777216,
 }

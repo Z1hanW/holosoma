@@ -142,6 +142,7 @@ export HOLOSOMA_GLOO_SMALL_COLLECTIVES=1 HOLOSOMA_HIERARCHICAL_GRAD_REDUCE=0
 export HOLOSOMA_RANK_VISIBLE_DEVICES=1 HOLOSOMA_RANK_LOCAL_CPU_AFFINITY=1
 export HOLOSOMA_SYNC_BEFORE_GRAD_ALLREDUCE=1 HOLOSOMA_CONTIGUOUS_MINIBATCHES=1
 export HOLOSOMA_SKIP_INITIAL_CHECKPOINT=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=disabled WANDB_DISABLED=true WANDB_CONSOLE=off HOLOSOMA_REQUIRE_WANDB_RUN=0
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y HEADLESS=1 OMP_NUM_THREADS=1
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=convex_decomposition
@@ -155,18 +156,18 @@ TRAINING_ARGS=(
   --training.export-onnx=True
   --algo.config.num-learning-iterations=2
   --algo.config.save-interval=1
-  --algo.config.num-steps-per-env=8
+  --algo.config.num-steps-per-env=24
   --algo.config.num-learning-epochs=1
-  --algo.config.num-mini-batches=1
+  --algo.config.num-mini-batches=4
   # Keep independent environments physically separated during startup.  With
   # env-spacing=0, 4096 robots and objects temporarily overlap and PhysX asks
   # for roughly one billion broadphase pairs even though those interactions
   # are scientifically meaningless.
   --simulator.config.scene.env-spacing=5.0
-  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity=335544320
-  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity=469762048
-  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity=83886080
-  --simulator.config.sim.physx.gpu-collision-stack-size=268435456
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity=134217728
+  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity=134217728
+  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity=67108864
+  --simulator.config.sim.physx.gpu-collision-stack-size=67108864
   --simulator.config.sim.physx.gpu-heap-capacity=67108864
   --simulator.config.sim.physx.gpu-temp-buffer-capacity=16777216
   --logger.base-dir="${RUN_ROOT}"
@@ -275,7 +276,7 @@ echo "[INFO] validating the exact deployment graph with ONNX checker and ORT par
 "${PYTHON_BIN}" -m pytest -q \
   src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_depth_actor_real_onnx_checker_and_ort_parity
 
-echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 collider=convex_decomposition contact_sensors=0 export_onnx=true external_clip_count=${EXTERNAL_EXPECTED_CLIP_COUNT:-default}"
+echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 steps_per_env=24 mini_batches=4 collider=convex_decomposition contact_sensors=0 export_onnx=true external_clip_count=${EXTERNAL_EXPECTED_CLIP_COUNT:-default}"
 "${PYTHON_BIN}" -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
