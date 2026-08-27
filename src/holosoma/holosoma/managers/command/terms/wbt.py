@@ -4581,6 +4581,21 @@ class MotionCommand(CommandTermBase):
 
         if not self.hmi_enabled() or self.hmi_goal_object_pos_w is None or self.hmi_goal_object_quat_w is None:
             raise RuntimeError("HMI goal command requested before HMI goal initialization.")
+        if getattr(self, "manual_control_enabled", False):
+            actual_semantics = getattr(
+                self,
+                "_manual_forward_after_lift_command_semantics",
+                "legacy_constant_robot_heading_frame",
+            )
+            expected_semantics = "legacy_constant_robot_heading_frame"
+            if actual_semantics != expected_semantics:
+                raise RuntimeError(
+                    "Manual HMI evaluation command semantics mismatch: "
+                    f"actual={actual_semantics!r}, expected={expected_semantics!r}."
+                )
+            if self.manual_xy_rel is None or self.manual_yaw_rel is None:
+                raise RuntimeError("Manual HMI command tensors are not initialized.")
+            return torch.cat((self.manual_xy_rel, self.manual_yaw_rel), dim=-1)
         heading_inv = calc_heading_quat_inv(self.robot_ref_quat_w, w_last=True)
         goal_delta_w = self.hmi_goal_object_pos_w - self.robot_ref_pos_w
         goal_delta_heading = quat_apply(heading_inv, goal_delta_w, w_last=True)

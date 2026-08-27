@@ -70,3 +70,27 @@ def test_recording_finalizes_video_before_reporting_failed_lift() -> None:
     )
 
     assert finalization_comment < stop_recording < failed_lift
+
+
+def test_recording_refreshes_initial_hmi_command_after_manual_latch_setup() -> None:
+    source = Path("scripts/record_checkpoint_inference.py").read_text(
+        encoding="utf-8"
+    )
+    pre_evaluate = source.index("obs_dict = algo._pre_evaluate_policy()")
+    configure_latch = source.index("configure_after_lift(**configure_kwargs)")
+    refresh_comment = source.index(
+        "The initial observation was assembled before the manual latch was"
+    )
+    refresh_command = source.index(
+        "obs_dict[hmi_goal_key] = get_hmi_command()",
+        refresh_comment,
+    )
+    create_actor_state = source.index("actor_state = algo._create_actor_state()")
+
+    assert (
+        pre_evaluate
+        < configure_latch
+        < refresh_comment
+        < refresh_command
+        < create_actor_state
+    )

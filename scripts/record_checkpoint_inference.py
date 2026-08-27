@@ -465,6 +465,21 @@ def run_recording(
                     "[INFO] Verified legacy forward-after-lift button contract: "
                     "native pickup retained; drop forced to zero."
                 )
+            hmi_goal_key = "actor_obs_hmi_goal_command"
+            if hmi_goal_key in obs_dict:
+                get_hmi_command = getattr(
+                    motion_command,
+                    "get_hmi_object_goal_command",
+                    None,
+                )
+                if not callable(get_hmi_command):
+                    raise RuntimeError(
+                        "HMI actor observation requires a refreshable HMI goal command."
+                    )
+                # The initial observation was assembled before the manual latch was
+                # configured. Refresh only this command term so frame zero obeys the
+                # zero-before-lift contract without advancing perception or clocks.
+                obs_dict[hmi_goal_key] = get_hmi_command()
         algo.eval_policy = algo.get_inference_policy()
 
         init_actions = torch.zeros(env.num_envs, algo.num_act, device=device)

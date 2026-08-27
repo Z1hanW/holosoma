@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from xml.etree import ElementTree
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -282,6 +283,51 @@ def test_hmi_reference_mask_preserves_track_rows_and_zeros_gen_rows():
 
     assert torch.equal(masked[track_mask], values[track_mask])
     assert torch.equal(masked[~track_mask], torch.zeros_like(masked[~track_mask]))
+
+
+def test_hmi_goal_command_uses_manual_eval_override_without_changing_native_mode():
+    command = _minimal_hmi_command(torch.ones(2, dtype=torch.bool))
+    command.hmi_goal_object_pos_w = torch.tensor(
+        [[1.0, 2.0, 0.5], [-3.0, 4.0, 0.5]], dtype=torch.float32
+    )
+    command.hmi_goal_object_quat_w = torch.tensor(
+        [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]], dtype=torch.float32
+    )
+    command.ref_body_index = 0
+    command._env = SimpleNamespace(
+        simulator=SimpleNamespace(
+            _rigid_body_pos=torch.zeros((2, 1, 3), dtype=torch.float32),
+            _rigid_body_rot=torch.tensor(
+                [[[0.0, 0.0, 0.0, 1.0]], [[0.0, 0.0, 0.0, 1.0]]],
+                dtype=torch.float32,
+            ),
+        )
+    )
+    command.manual_control_enabled = False
+
+    native = command.get_hmi_object_goal_command()
+    assert torch.equal(
+        native,
+        torch.tensor([[1.0, 2.0, 0.0], [-3.0, 4.0, 0.0]]),
+    )
+
+    command.manual_control_enabled = True
+    command.manual_xy_rel = torch.tensor([[0.0, 0.0], [0.15, 0.0]])
+    command.manual_yaw_rel = torch.zeros((2, 1), dtype=torch.float32)
+    command._manual_forward_after_lift_command_semantics = (
+        "legacy_constant_robot_heading_frame"
+    )
+    assert torch.equal(
+        command.get_hmi_object_goal_command(),
+        torch.tensor([[0.0, 0.0, 0.0], [0.15, 0.0, 0.0]]),
+    )
+
+    command._manual_forward_after_lift_command_semantics = "robot_heading_velocity_mps"
+    with pytest.raises(
+        RuntimeError,
+        match="Manual HMI evaluation command semantics mismatch",
+    ):
+        command.get_hmi_object_goal_command()
 
 
 def test_hmi_sparse_goal_bonus_is_gen_only_and_once_per_goal_version():
