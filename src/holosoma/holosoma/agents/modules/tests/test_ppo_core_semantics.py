@@ -1737,7 +1737,7 @@ def test_pure_bc_rollout_uses_distribution_mean_without_advancing_torch_rng():
     critic_obs = torch.tensor([[3.0]])
 
     rng_before = torch.get_rng_state().clone()
-    actions, values, actor_hidden, critic_hidden, error = ppo._try_compute_student_rollout_outputs(
+    actions, values, recurrent_state, error = ppo._try_compute_student_rollout_outputs(
         actor_obs=actor_obs,
         critic_obs=critic_obs,
         actor_perception_obs=None,
@@ -1748,8 +1748,7 @@ def test_pure_bc_rollout_uses_distribution_mean_without_advancing_torch_rng():
     assert error is None
     assert torch.equal(actions, mean)
     assert torch.equal(values, torch.tensor([[1.0]]))
-    assert actor_hidden is None
-    assert critic_hidden is None
+    assert recurrent_state == {}
     assert torch.equal(torch.get_rng_state(), rng_before)
     ppo.actor.update_distribution_from_policy_state.assert_called_once_with(
         {"actor_obs": actor_obs}

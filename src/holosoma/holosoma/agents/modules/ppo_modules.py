@@ -132,7 +132,15 @@ class PPOActor(nn.Module):
         ]
 
     def reset(self, dones=None):
-        pass
+        self.actor_module.reset_recurrent_state(dones)
+
+    @property
+    def is_recurrent(self) -> bool:
+        return self.actor_module.is_recurrent
+
+    @property
+    def recurrent_kind(self) -> str | None:
+        return self.actor_module.recurrent_kind
 
     def forward(self):
         raise NotImplementedError
@@ -224,6 +232,24 @@ class PPOActor(nn.Module):
             self.distribution = Normal(mean, scale)
         _debug_actor_log("update_distribution normal built loc={} scale={}", tuple(mean.shape), tuple(scale.shape))
 
+    def update_distribution_from_mean(self, mean: torch.Tensor) -> None:
+        """Build the rollout distribution from an already evaluated recurrent sequence."""
+
+        safe_std = self._safe_std()
+        if self.min_mean_noise_std and bool(torch.isfinite(safe_std).all().item()):
+            current_mean = safe_std.mean()
+            if current_mean < self.min_mean_noise_std:
+                if self.max_noise_std is not None:
+                    alpha = (self.min_mean_noise_std - current_mean) / (
+                        self.max_noise_std - current_mean
+                    )
+                    alpha = torch.clamp(alpha, min=0.0, max=1.0)
+                    safe_std = safe_std + alpha * (self.max_noise_std - safe_std)
+                else:
+                    safe_std = safe_std * (self.min_mean_noise_std / current_mean)
+        scale = self._sanitize_scale(self._expand_std_like(safe_std, mean))
+        self.distribution = Normal(mean, scale)
+
     def _sanitize_distribution(self):
         """Rebuild with a positive finite scale without concealing corruption.
 
@@ -270,6 +296,40 @@ class PPOActor(nn.Module):
         _debug_actor_log("act_inference base actor forward finished actions={}", tuple(actions.shape))
         return actions
 
+    def recurrent_state_before_step(
+        self,
+        actor_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.actor_module.recurrent_state_before_step(actor_obs)
+
+    def act_inference_recurrent_explicit(
+        self,
+        actor_obs: torch.Tensor,
+        hidden_state: torch.Tensor,
+        cell_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.actor_module.forward_recurrent_explicit(
+            actor_obs,
+            hidden_state,
+            cell_state,
+        )
+
+    def recurrent_mean_sequence(
+        self,
+        actor_obs: torch.Tensor,
+        *,
+        dones: torch.Tensor | None,
+        initial_hidden: torch.Tensor,
+        initial_cell: torch.Tensor,
+    ) -> torch.Tensor:
+        means, _, _ = self.actor_module.forward_recurrent_sequence(
+            actor_obs,
+            dones=dones,
+            initial_hidden=initial_hidden,
+            initial_cell=initial_cell,
+        )
+        return means
+
     @property
     def supports_flow_matching(self) -> bool:
         return bool(getattr(self.actor_module, "supports_flow_matching", False))
@@ -301,7 +361,15 @@ class PPOCritic(nn.Module):
         return self.critic_module
 
     def reset(self, dones=None):
-        pass
+        self.critic_module.reset_recurrent_state(dones)
+
+    @property
+    def is_recurrent(self) -> bool:
+        return self.critic_module.is_recurrent
+
+    @property
+    def recurrent_kind(self) -> str | None:
+        return self.critic_module.recurrent_kind
 
     def evaluate(self, policy_state_dict):
         critic_obs = policy_state_dict["critic_obs"]
@@ -313,6 +381,34 @@ class PPOCritic(nn.Module):
 
     def set_hidden_states(self, hidden_states):
         pass
+
+    def recurrent_state_before_step(
+        self,
+        critic_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.critic_module.recurrent_state_before_step(critic_obs)
+
+    def recurrent_value_sequence(
+        self,
+        critic_obs: torch.Tensor,
+        *,
+        dones: torch.Tensor | None,
+        initial_hidden: torch.Tensor,
+        initial_cell: torch.Tensor,
+    ) -> torch.Tensor:
+        values, _, _ = self.critic_module.forward_recurrent_sequence(
+            critic_obs,
+            dones=dones,
+            initial_hidden=initial_hidden,
+            initial_cell=initial_cell,
+        )
+        return values
+
+    def snapshot_recurrent_state(self):
+        return self.critic_module.snapshot_recurrent_state()
+
+    def restore_recurrent_state(self, state) -> None:
+        self.critic_module.restore_recurrent_state(state)
 
 
 class PPOActorEncoder(PPOActor):

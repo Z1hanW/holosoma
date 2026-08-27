@@ -127,28 +127,51 @@ def export_policy_as_onnx(
 ):
     # Ensure parent directory exists
     os.makedirs(Path(onnx_file_path).parent, exist_ok=True)
-    example_inputs = [example_obs_dict["actor_obs"]]
-    input_names = ["actor_obs"]
-    extra_input_names = [name for name in example_obs_dict if name != "actor_obs"]
-    if perception_input_name:
-        if perception_input_name in {"obs", "actor_obs", "time_step"}:
+    declared_input_names = getattr(wrapper, "onnx_input_names", None)
+    declared_output_names = getattr(wrapper, "onnx_output_names", None)
+    declared_dynamic_axes = getattr(wrapper, "onnx_dynamic_axes", None)
+    if declared_input_names is not None:
+        if perception_input_name:
+            raise ValueError("A custom ONNX I/O contract cannot also request a perception input.")
+        input_names = list(declared_input_names)
+        output_names = list(declared_output_names or ())
+        if not input_names or not output_names:
+            raise ValueError("Custom ONNX I/O contracts require non-empty input and output names.")
+        if set(example_obs_dict) != set(input_names):
             raise ValueError(
-                f"Perception input name {perception_input_name!r} is reserved for actor/time inputs."
+                "Custom ONNX examples do not match the declared inputs: "
+                f"declared={input_names}, examples={list(example_obs_dict)}."
             )
-        if perception_input_name not in example_obs_dict:
+        if not isinstance(declared_dynamic_axes, Mapping):
+            raise ValueError("Custom ONNX I/O contracts require explicit dynamic axes.")
+        dynamic_axes = copy.deepcopy(dict(declared_dynamic_axes))
+        example_inputs = [example_obs_dict[name] for name in input_names]
+    else:
+        example_inputs = [example_obs_dict["actor_obs"]]
+        input_names = ["actor_obs"]
+        output_names = ["action"]
+        extra_input_names = [name for name in example_obs_dict if name != "actor_obs"]
+        if perception_input_name:
+            if perception_input_name in {"obs", "actor_obs", "time_step"}:
+                raise ValueError(
+                    f"Perception input name {perception_input_name!r} is reserved for actor/time inputs."
+                )
+            if perception_input_name not in example_obs_dict:
+                raise ValueError(
+                    f"Requested perception input {perception_input_name!r} is absent from example_obs_dict."
+                )
+            extra_input_names = [perception_input_name]
+        if len(extra_input_names) > 1:
             raise ValueError(
-                f"Requested perception input {perception_input_name!r} is absent from example_obs_dict."
+                "Pure policy ONNX export supports at most one external perception input, "
+                f"got {extra_input_names}."
             )
-        extra_input_names = [perception_input_name]
-    if len(extra_input_names) > 1:
-        raise ValueError(
-            "Pure policy ONNX export supports at most one external perception input, "
-            f"got {extra_input_names}."
-        )
-    if extra_input_names:
-        perception_name = extra_input_names[0]
-        example_inputs.append(example_obs_dict[perception_name])
-        input_names.append(perception_name)
+        if extra_input_names:
+            perception_name = extra_input_names[0]
+            example_inputs.append(example_obs_dict[perception_name])
+            input_names.append(perception_name)
+        dynamic_axes = {name: {0: "batch"} for name in input_names}
+        dynamic_axes["action"] = {0: "batch"}
 
     # --- SUPPRESS LOGS START ---
     # Silence onnxscript and onnx_ir debug/info noise
@@ -159,15 +182,13 @@ def export_policy_as_onnx(
     # --- SUPPRESS LOGS END ---
 
     export_inputs = tuple(example_inputs) if len(example_inputs) > 1 else example_inputs[0]
-    dynamic_axes = {name: {0: "batch"} for name in input_names}
-    dynamic_axes["action"] = {0: "batch"}
     torch.onnx.export(
         wrapper,
         export_inputs,
         onnx_file_path,
         verbose=False,
         input_names=input_names,
-        output_names=["action"],
+        output_names=output_names,
         dynamic_axes=dynamic_axes,
         opset_version=14,
         dynamo=False,
@@ -202,9 +223,22 @@ def validate_exported_policy_onnx(
         path.read_bytes(),
         providers=["CPUExecutionProvider"],
     )
-    expected_input_names = ["actor_obs"]
-    if perception_input_name:
-        expected_input_names.append(perception_input_name)
+    declared_input_names = getattr(wrapper, "onnx_input_names", None)
+    declared_output_names = getattr(wrapper, "onnx_output_names", None)
+    declared_dynamic_axes = getattr(wrapper, "onnx_dynamic_axes", None)
+    if declared_input_names is not None:
+        if perception_input_name:
+            raise ValueError("A custom ONNX I/O contract cannot also request a perception input.")
+        expected_input_names = list(declared_input_names)
+        expected_output_names = list(declared_output_names or ())
+        dynamic_axes = dict(declared_dynamic_axes or {})
+    else:
+        expected_input_names = ["actor_obs"]
+        if perception_input_name:
+            expected_input_names.append(perception_input_name)
+        expected_output_names = ["action"]
+        dynamic_axes = {name: {0: "batch"} for name in expected_input_names}
+        dynamic_axes["action"] = {0: "batch"}
     actual_input_names = [value.name for value in session.get_inputs()]
     if actual_input_names != expected_input_names:
         raise RuntimeError(
@@ -212,9 +246,10 @@ def validate_exported_policy_onnx(
             f"expected={expected_input_names}, actual={actual_input_names}."
         )
     output_names = [value.name for value in session.get_outputs()]
-    if output_names != ["action"]:
+    if output_names != expected_output_names:
         raise RuntimeError(
-            f"Exported ONNX must expose exactly one 'action' output, got {output_names}."
+            "Exported ONNX outputs do not match the deployment contract: "
+            f"expected={expected_output_names}, actual={output_names}."
         )
     if not math.isfinite(float(rtol)) or not math.isfinite(float(atol)) or rtol < 0 or atol < 0:
         raise ValueError("ONNX parity tolerances must be finite and non-negative.")
@@ -272,7 +307,18 @@ def validate_exported_policy_onnx(
         for input_index, (name, example) in enumerate(
             zip(expected_input_names, example_inputs, strict=True)
         ):
-            shape = (batch_size, *tuple(example.shape[1:]))
+            batch_axes = [
+                int(axis)
+                for axis, label in dynamic_axes.get(name, {}).items()
+                if label == "batch"
+            ]
+            if len(batch_axes) != 1:
+                raise ValueError(
+                    f"ONNX input {name!r} must declare exactly one dynamic batch axis."
+                )
+            shape_list = list(example.shape)
+            shape_list[batch_axes[0]] = batch_size
+            shape = tuple(shape_list)
             element_count = int(np.prod(shape))
             if amplitude == 0.0:
                 probe = torch.zeros(shape, dtype=example.dtype, device="cpu")
@@ -291,35 +337,54 @@ def validate_exported_policy_onnx(
 
         with torch.no_grad():
             torch_output = cpu_wrapper(*torch_inputs)
-        if isinstance(torch_output, tuple):
-            torch_output = torch_output[0]
-        if not isinstance(torch_output, torch.Tensor):
+        if isinstance(torch_output, torch.Tensor):
+            torch_outputs = [torch_output]
+        elif isinstance(torch_output, (tuple, list)):
+            torch_outputs = list(torch_output)
+        else:
             raise TypeError(
-                f"PyTorch ONNX wrapper returned {type(torch_output).__name__}, expected Tensor."
+                "PyTorch ONNX wrapper must return a tensor or tensor sequence, "
+                f"got {type(torch_output).__name__}."
             )
-        expected = torch_output.detach().cpu().numpy()
-        actual = session.run(["action"], ort_feed)[0]
-        if expected.shape != actual.shape:
-            raise RuntimeError(
-                "PyTorch and ORT action shapes differ: "
-                f"torch={expected.shape}, ort={actual.shape}."
+        if len(torch_outputs) != len(expected_output_names) or not all(
+            isinstance(value, torch.Tensor) for value in torch_outputs
+        ):
+            raise TypeError(
+                "PyTorch ONNX wrapper output count/types do not match the contract: "
+                f"expected={expected_output_names}, got={len(torch_outputs)} outputs."
             )
-        if not np.all(np.isfinite(expected)) or not np.all(np.isfinite(actual)):
-            raise RuntimeError("PyTorch/ORT parity probe produced NaN or infinity.")
-        difference = np.abs(actual - expected)
-        relative = difference / np.maximum(np.abs(expected), np.float32(atol))
-        max_abs_error = max(max_abs_error, float(np.max(difference, initial=0.0)))
-        max_rel_error = max(max_rel_error, float(np.max(relative, initial=0.0)))
-        if not np.allclose(actual, expected, rtol=rtol, atol=atol):
-            raise RuntimeError(
-                "Exported ONNX failed PyTorch-vs-ORT action parity: "
-                f"batch={batch_size}, max_abs_error={max_abs_error:.9g}, "
-                f"max_rel_error={max_rel_error:.9g}, rtol={rtol}, atol={atol}."
-            )
+        ort_outputs = session.run(expected_output_names, ort_feed)
+        for output_name, torch_value, actual in zip(
+            expected_output_names,
+            torch_outputs,
+            ort_outputs,
+            strict=True,
+        ):
+            expected = torch_value.detach().cpu().numpy()
+            if expected.shape != actual.shape:
+                raise RuntimeError(
+                    f"PyTorch and ORT {output_name!r} shapes differ: "
+                    f"torch={expected.shape}, ort={actual.shape}."
+                )
+            if not np.all(np.isfinite(expected)) or not np.all(np.isfinite(actual)):
+                raise RuntimeError(
+                    f"PyTorch/ORT parity probe for {output_name!r} produced NaN or infinity."
+                )
+            difference = np.abs(actual - expected)
+            relative = difference / np.maximum(np.abs(expected), np.float32(atol))
+            max_abs_error = max(max_abs_error, float(np.max(difference, initial=0.0)))
+            max_rel_error = max(max_rel_error, float(np.max(relative, initial=0.0)))
+            if not np.allclose(actual, expected, rtol=rtol, atol=atol):
+                parity_kind = "action parity" if output_name in {"action", "actions"} else "state parity"
+                raise RuntimeError(
+                    f"Exported ONNX failed PyTorch-vs-ORT {parity_kind} for {output_name!r}: "
+                    f"batch={batch_size}, max_abs_error={max_abs_error:.9g}, "
+                    f"max_rel_error={max_rel_error:.9g}, rtol={rtol}, atol={atol}."
+                )
         probe_count += batch_size
 
     return {
-        "version": 1,
+        "version": 2 if declared_input_names is not None else 1,
         "checker": "onnx.checker.check_model",
         "runtime": "onnxruntime_cpu",
         "pytorch_vs_ort": True,

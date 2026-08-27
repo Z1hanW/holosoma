@@ -9,8 +9,10 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import onnx
@@ -46,6 +48,7 @@ from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub
 from holosoma_inference.utils.policy_contract import (
     perception_observation_contract_sha256_from_metadata,
+    recurrent_policy_contract_from_metadata,
     validate_onnx_policy_contract,
 )
 from holosoma_inference.utils.rate import RateLimiter
@@ -210,6 +213,81 @@ class BasePolicy:
             self.last_policy_action.fill(0.0)
         if hasattr(self, "scaled_policy_action"):
             self.scaled_policy_action.fill(0.0)
+        self._reset_policy_recurrent_state()
+
+    def _configure_policy_recurrent_state(self, metadata: Mapping[str, Any]) -> None:
+        contract = recurrent_policy_contract_from_metadata(metadata)
+        self._recurrent_policy_contract = None if contract is None else dict(contract)
+        self._policy_recurrent_state: dict[str, np.ndarray] = {}
+        if contract is None:
+            return
+        shape = (
+            int(contract["num_layers"]),
+            1,
+            int(contract["hidden_dim"]),
+        )
+        for name in contract["state_input_names"]:
+            self._policy_recurrent_state[str(name)] = np.zeros(shape, dtype=np.float32)
+
+    def _reset_policy_recurrent_state(self) -> None:
+        state = getattr(self, "_policy_recurrent_state", None)
+        if isinstance(state, dict):
+            for value in state.values():
+                value.fill(0.0)
+
+    def _policy_observation_input_names(self) -> list[str]:
+        contract = getattr(self, "_recurrent_policy_contract", None)
+        state_inputs = set(contract["state_input_names"]) if contract is not None else set()
+        return [name for name in self.onnx_input_names if name not in state_inputs]
+
+    def _run_policy_onnx(
+        self,
+        input_feed: dict[str, np.ndarray],
+        requested_outputs: list[str],
+    ) -> dict[str, np.ndarray]:
+        prepared_feed = self._prepare_policy_input_feed(input_feed)
+        contract = getattr(self, "_recurrent_policy_contract", None)
+        fetch_names = list(requested_outputs)
+        if contract is not None:
+            state_inputs = [str(name) for name in contract["state_input_names"]]
+            state_outputs = [str(name) for name in contract["state_output_names"]]
+            overlap = set(prepared_feed).intersection(state_inputs)
+            if overlap:
+                raise ValueError(
+                    "Recurrent state is runtime-owned and cannot be supplied by an observation caller: "
+                    f"{sorted(overlap)}."
+                )
+            for name in state_inputs:
+                prepared_feed[name] = self._policy_recurrent_state[name]
+            fetch_names.extend(state_outputs)
+
+        raw_outputs = self.onnx_policy_session.run(fetch_names, prepared_feed)
+        validated = {
+            name: self._require_finite_array(value, label=f"ONNX output {name!r}")
+            for name, value in zip(fetch_names, raw_outputs, strict=True)
+        }
+        if contract is not None:
+            for input_name, output_name in zip(
+                contract["state_input_names"],
+                contract["state_output_names"],
+                strict=True,
+            ):
+                state_value = validated[str(output_name)]
+                expected_shape = self._policy_recurrent_state[str(input_name)].shape
+                if state_value.shape != expected_shape or state_value.dtype != np.float32:
+                    raise ValueError(
+                        f"ONNX recurrent state output {output_name!r} must have shape/dtype "
+                        f"{expected_shape}/float32, got {state_value.shape}/{state_value.dtype}."
+                    )
+            self._policy_recurrent_state = {
+                str(input_name): validated[str(output_name)].copy()
+                for input_name, output_name in zip(
+                    contract["state_input_names"],
+                    contract["state_output_names"],
+                    strict=True,
+                )
+            }
+        return {name: validated[name] for name in requested_outputs}
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
@@ -323,6 +401,11 @@ class BasePolicy:
             "onnx_metadata": getattr(self, "_onnx_metadata", None),
             "onnx_artifact_sha256": getattr(self, "_onnx_artifact_sha256", None),
             "perception_contract_sha256": getattr(self, "_perception_contract_sha256", None),
+            "recurrent_policy_contract": getattr(self, "_recurrent_policy_contract", None),
+            "policy_recurrent_state": {
+                name: value.copy()
+                for name, value in getattr(self, "_policy_recurrent_state", {}).items()
+            },
             "policy_action_scale": float(self.policy_action_scale),
             "policy_action_clip": float(self.policy_action_clip),
             "policy_action_scales": self.policy_action_scales.copy(),
@@ -339,6 +422,14 @@ class BasePolicy:
         self._onnx_metadata = state.get("onnx_metadata")
         self._onnx_artifact_sha256 = state.get("onnx_artifact_sha256")
         self._perception_contract_sha256 = state.get("perception_contract_sha256")
+        recurrent_contract = state.get("recurrent_policy_contract")
+        self._recurrent_policy_contract = (
+            None if recurrent_contract is None else dict(recurrent_contract)
+        )
+        self._policy_recurrent_state = {
+            name: value.copy()
+            for name, value in state.get("policy_recurrent_state", {}).items()
+        }
         self.policy_action_scale = float(state["policy_action_scale"])
         self.policy_action_clip = float(state["policy_action_clip"])
         self.policy_action_scales = state["policy_action_scales"].copy()
@@ -358,6 +449,7 @@ class BasePolicy:
             return
 
         self._restore_policy_state(self._policy_states[index])
+        self._reset_policy_recurrent_state()
         self.last_policy_action.fill(0.0)
         self.scaled_policy_action.fill(0.0)
         self.active_policy_index = index
@@ -688,6 +780,7 @@ class BasePolicy:
         self.onnx_output_names = output_names
 
         self._onnx_metadata = metadata
+        self._configure_policy_recurrent_state(metadata)
 
         validate_onnx_policy_contract(
             metadata=metadata,
@@ -719,12 +812,11 @@ class BasePolicy:
             #     'actor_obs_upper_body': np.array([...]),
             #     'estimator_obs': np.array([...])
             # }
-            input_feed = self._prepare_policy_input_feed(
-                {name: obs_dict[name] for name in self.onnx_input_names}
-            )
+            input_feed = {
+                name: obs_dict[name] for name in self._policy_observation_input_names()
+            }
             action_output = "action" if "action" in self.onnx_output_names else "actions"
-            raw_action = self.onnx_policy_session.run([action_output], input_feed)[0]
-            return self._require_finite_array(raw_action, label=f"ONNX output {action_output!r}")
+            return self._run_policy_onnx(input_feed, [action_output])[action_output]
 
         self.policy = policy_act
 

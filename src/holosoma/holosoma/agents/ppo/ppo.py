@@ -130,6 +130,8 @@ _ROLLING_REFERENCE_DELTA_CONTRACT_KEY = (
 _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY = (
     "rolling_reference_delta_deployment_contract_sha256"
 )
+_RECURRENT_POLICY_CONTRACT_KEY = "recurrent_policy_contract"
+_RECURRENT_POLICY_CONTRACT_SHA256_KEY = "recurrent_policy_contract_sha256"
 
 
 def _precomputed_turn_then_forward_deployment_contract(
@@ -1975,6 +1977,11 @@ class PPO(BaseAlgo):
             getattr(self.actor, "perception_time_gru", None) is not None
             or getattr(self.critic, "perception_time_gru", None) is not None
         )
+        actor_recurrent_kind = getattr(self.actor, "recurrent_kind", None)
+        critic_recurrent_kind = getattr(self.critic, "recurrent_kind", None)
+        self.use_policy_lstm = bool(
+            actor_recurrent_kind == "lstm" or critic_recurrent_kind == "lstm"
+        )
 
         if debug_heartbeat:
             logger.info("Heartbeat: rank {} setup distillation begin", self.gpu_global_rank)
@@ -2266,6 +2273,28 @@ class PPO(BaseAlgo):
                 raise ValueError(
                     "Distillation is not supported in time_gru mode; refusing before rollout instead of "
                     "failing at the first recurrent optimizer update."
+                )
+
+        if getattr(self, "use_policy_lstm", False):
+            if getattr(self.actor, "recurrent_kind", None) != "lstm" or getattr(
+                self.critic,
+                "recurrent_kind",
+                None,
+            ) != "lstm":
+                raise ValueError(
+                    "Full-policy recurrent PPO requires LSTM modules for both actor and critic."
+                )
+            if self.use_time_gru:
+                raise ValueError("Full-policy LSTM and perception time_gru cannot be enabled together.")
+            if self.use_symmetry:
+                raise ValueError(
+                    "Full-policy LSTM with symmetry is unsupported because the mirrored recurrent state "
+                    "contract is undefined."
+                )
+            if self.distill_enabled or (self.distill_mode == "dagger" and self.dagger_enabled):
+                raise ValueError(
+                    "Distillation is not supported for the full-policy LSTM experiment; "
+                    "use pure PPO so sequence state and supervision cannot be misaligned."
                 )
 
         ppo_start_noise_std = getattr(self, "ppo_start_noise_std", None)
@@ -5783,6 +5812,29 @@ class PPO(BaseAlgo):
                 shape=(self.critic.perception_time_gru.hidden_dim,),
                 dtype=torch.float,
             )
+        if getattr(self, "use_policy_lstm", False):
+            actor_lstm = self.actor.actor_module.module
+            critic_lstm = self.critic.critic_module.module
+            self.storage.register(
+                "actor_lstm_hidden",
+                shape=(actor_lstm.num_layers, actor_lstm.hidden_dim),
+                dtype=torch.float,
+            )
+            self.storage.register(
+                "actor_lstm_cell",
+                shape=(actor_lstm.num_layers, actor_lstm.hidden_dim),
+                dtype=torch.float,
+            )
+            self.storage.register(
+                "critic_lstm_hidden",
+                shape=(critic_lstm.num_layers, critic_lstm.hidden_dim),
+                dtype=torch.float,
+            )
+            self.storage.register(
+                "critic_lstm_cell",
+                shape=(critic_lstm.num_layers, critic_lstm.hidden_dim),
+                dtype=torch.float,
+            )
 
     def _add_rollout_storage_transition(self, storage_values: dict[str, torch.Tensor]) -> None:
         """Store exactly the transition fields declared by the active schema.
@@ -6257,6 +6309,9 @@ class PPO(BaseAlgo):
             recurrent_encoder = getattr(model, "perception_time_gru", None)
             if recurrent_encoder is not None:
                 recurrent_encoder.hidden = None
+            reset = getattr(model, "reset", None)
+            if bool(getattr(model, "is_recurrent", False)) and callable(reset):
+                reset(None)
 
     def _reset_rollout_stream_at_canonical_boundary(
         self,
@@ -6738,8 +6793,46 @@ class PPO(BaseAlgo):
             float(contract["zero_yaw_threshold_deg"]),
         )
 
+    def _actor_recurrent_policy_contract(self) -> tuple[dict[str, Any], str] | None:
+        if not getattr(self, "use_policy_lstm", False):
+            return None
+        recurrent_module = self.actor.actor_module.module
+        if getattr(recurrent_module, "recurrent_kind", None) != "lstm":
+            raise RuntimeError("Configured recurrent actor is not an authenticated LSTM module.")
+        contract: dict[str, Any] = {
+            "version": 1,
+            "kind": "lstm",
+            "num_layers": int(recurrent_module.num_layers),
+            "hidden_dim": int(recurrent_module.hidden_dim),
+            "dtype": "float32",
+            "state_input_names": ["hidden_state", "cell_state"],
+            "state_output_names": ["hidden_state_out", "cell_state_out"],
+            "state_shape": [int(recurrent_module.num_layers), "batch", int(recurrent_module.hidden_dim)],
+            "state_batch_axis": 1,
+            "step_semantics": "state_before_observation_to_state_after_observation",
+            "reset_semantics": "zero_after_done_before_next_observation",
+            "deployment_reset_events": [
+                "episode_reset",
+                "policy_start",
+                "policy_stop",
+                "policy_switch",
+            ],
+        }
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return contract, hashlib.sha256(payload).hexdigest()
+
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
         metadata = super()._checkpoint_metadata(iteration=iteration)
+        recurrent_contract = self._actor_recurrent_policy_contract()
+        if recurrent_contract is not None:
+            metadata[_RECURRENT_POLICY_CONTRACT_KEY] = recurrent_contract[0]
+            metadata[_RECURRENT_POLICY_CONTRACT_SHA256_KEY] = recurrent_contract[1]
         if self._actor_sparse_root_command_mode() == "precomputed_turn_then_forward":
             contract, contract_sha256 = (
                 _precomputed_turn_then_forward_deployment_contract(
@@ -6808,6 +6901,15 @@ class PPO(BaseAlgo):
                 "state rather than an explicit ONNX input/output. Export would not preserve reset or "
                 "batch semantics."
             )
+
+        if bool(getattr(self, "use_policy_lstm", False)):
+            contract = self._actor_recurrent_policy_contract()
+            if contract is None:
+                raise RuntimeError("LSTM ONNX export is missing its explicit recurrent state contract.")
+            if self.actor_perception_key:
+                raise ValueError(
+                    "Full-policy LSTM ONNX export does not support a separate perception input."
+                )
 
         actor_impl = getattr(
             getattr(getattr(self, "actor", None), "actor_module", None),
@@ -7179,6 +7281,8 @@ class PPO(BaseAlgo):
                 _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY,
                 _ROLLING_REFERENCE_DELTA_CONTRACT_KEY,
                 _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY,
+                _RECURRENT_POLICY_CONTRACT_KEY,
+                _RECURRENT_POLICY_CONTRACT_SHA256_KEY,
             )
             if (payload := require_same_json_field(field_name)) is not None
         }
@@ -7188,19 +7292,31 @@ class PPO(BaseAlgo):
                 f"onnx={metadata.get('iteration')!r}, pt={completed_iteration}."
             )
         validation = metadata.get("onnx_validation_contract")
+        recurrent_contract_present = _RECURRENT_POLICY_CONTRACT_KEY in metadata
+        expected_validation_version = 2 if recurrent_contract_present else 1
+        expected_graph_semantics = (
+            "raw_actor_observation_plus_explicit_lstm_state"
+            if recurrent_contract_present
+            else "raw_actor_observation_plus_authenticated_external_observation_adapter"
+        )
         if (
             not isinstance(validation, Mapping)
-            or validation.get("version") != 1
+            or validation.get("version") != expected_validation_version
             or validation.get("checker") != "onnx.checker.check_model"
             or validation.get("runtime") != "onnxruntime_cpu"
             or validation.get("pytorch_vs_ort") is not True
             or validation.get("completed_iteration") != completed_iteration
             or validation.get("actor_graph_semantics")
-            != "raw_actor_observation_plus_authenticated_external_observation_adapter"
+            != expected_graph_semantics
             or validation.get("precomputed_command_contract_sha256")
             != metadata.get(_PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY)
             or validation.get("rolling_reference_delta_contract_sha256")
             != metadata.get(_ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY)
+            or (
+                recurrent_contract_present
+                and validation.get("recurrent_policy_contract_sha256")
+                != metadata.get(_RECURRENT_POLICY_CONTRACT_SHA256_KEY)
+            )
         ):
             raise RuntimeError(
                 "ONNX artifact is missing its same-iteration checker/ORT/parity contract."
@@ -7294,6 +7410,10 @@ class PPO(BaseAlgo):
                 "perception_observation_contract",
                 "perception_observation_contract_sha256",
             ),
+            (
+                _RECURRENT_POLICY_CONTRACT_KEY,
+                _RECURRENT_POLICY_CONTRACT_SHA256_KEY,
+            ),
         ):
             contract_present = contract_key in metadata
             digest_present = digest_key in metadata
@@ -7341,6 +7461,7 @@ class PPO(BaseAlgo):
         provenance_payload = bound_metadata_payloads.get("training_provenance")
         transition_digest = metadata.get("motion_transition_contract_sha256")
         perception_digest = metadata.get("perception_observation_contract_sha256")
+        recurrent_policy_digest = metadata.get(_RECURRENT_POLICY_CONTRACT_SHA256_KEY)
         bound_metadata_payload = strict_json_payload(
             {
                 field_name: json.loads(payload)
@@ -7379,6 +7500,7 @@ class PPO(BaseAlgo):
             "rolling_reference_delta_contract_sha256": (
                 pt_rolling_command_digest
             ),
+            "recurrent_policy_contract_sha256": recurrent_policy_digest,
             "pt": {
                 "name": Path(checkpoint_path).name,
                 "sha256": checkpoint_sha256,
@@ -8470,19 +8592,40 @@ class PPO(BaseAlgo):
             )
         return hidden.squeeze(0).detach().clone()
 
+    def _policy_lstm_state_before_step(
+        self,
+        model: nn.Module,
+        policy_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if getattr(model, "recurrent_kind", None) != "lstm":
+            return None
+        state_getter = getattr(model, "recurrent_state_before_step", None)
+        if not callable(state_getter):
+            raise RuntimeError("LSTM policy does not expose recurrent_state_before_step().")
+        return state_getter(policy_obs)
+
     def _evaluate_critic_preserving_recurrent_state(
         self,
         policy_state: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Evaluate bootstrap observations without consuming live rollout state."""
         gru = getattr(self.critic, "perception_time_gru", None)
-        if gru is None:
+        recurrent_snapshot = None
+        if bool(getattr(self.critic, "is_recurrent", False)):
+            snapshot = getattr(self.critic, "snapshot_recurrent_state", None)
+            if not callable(snapshot):
+                raise RuntimeError("Recurrent critic does not expose snapshot_recurrent_state().")
+            recurrent_snapshot = snapshot()
+        if gru is None and recurrent_snapshot is None:
             return self.critic.evaluate(policy_state)
-        saved_hidden = gru.hidden
+        saved_hidden = None if gru is None else gru.hidden
         try:
             return self.critic.evaluate(policy_state)
         finally:
-            gru.hidden = saved_hidden
+            if gru is not None:
+                gru.hidden = saved_hidden
+            if recurrent_snapshot is not None:
+                self.critic.restore_recurrent_state(recurrent_snapshot)
 
     def _assert_rollout_tensors_finite(
         self,
@@ -8587,8 +8730,7 @@ class PPO(BaseAlgo):
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
+        dict[str, torch.Tensor],
         Exception | None,
     ]:
         """Compute rank-local student outputs while preserving the local failure.
@@ -8599,10 +8741,13 @@ class PPO(BaseAlgo):
         """
 
         try:
+            recurrent_state: dict[str, torch.Tensor] = {}
             actor_gru_hidden = self._recurrent_hidden_before_step(
                 self.actor,
                 actor_obs.shape[0],
             )
+            if actor_gru_hidden is not None:
+                recurrent_state["actor_gru_hidden"] = actor_gru_hidden
             critic_objective_enabled = self._critic_optimizer_objective_enabled()
             critic_gru_hidden = (
                 self._recurrent_hidden_before_step(
@@ -8612,6 +8757,22 @@ class PPO(BaseAlgo):
                 if critic_objective_enabled
                 else None
             )
+            if critic_gru_hidden is not None:
+                recurrent_state["critic_gru_hidden"] = critic_gru_hidden
+            actor_lstm_state = self._policy_lstm_state_before_step(self.actor, actor_obs)
+            if actor_lstm_state is not None:
+                recurrent_state["actor_lstm_hidden"], recurrent_state["actor_lstm_cell"] = (
+                    actor_lstm_state
+                )
+            critic_lstm_state = (
+                self._policy_lstm_state_before_step(self.critic, critic_obs)
+                if critic_objective_enabled
+                else None
+            )
+            if critic_lstm_state is not None:
+                recurrent_state["critic_lstm_hidden"], recurrent_state["critic_lstm_cell"] = (
+                    critic_lstm_state
+                )
             actor_policy_state = {"actor_obs": actor_obs}
             if actor_perception_obs is not None:
                 actor_policy_state[self.actor_perception_key] = actor_perception_obs
@@ -8649,8 +8810,8 @@ class PPO(BaseAlgo):
                 # dropout RNG / stateful-module side effects it could cause).
                 values = actor_obs.new_zeros((actor_obs.shape[0], 1))
         except Exception as exc:
-            return None, None, None, None, exc
-        return actions, values, actor_gru_hidden, critic_gru_hidden, None
+            return None, None, {}, exc
+        return actions, values, recurrent_state, None
 
     def _rollout_step(self, obs_dict):
         # Replay must never train on the immutable fixed-BC gate.  Record the
@@ -8727,8 +8888,7 @@ class PPO(BaseAlgo):
                 if missing_perception_keys:
                     actions = None
                     values = None
-                    actor_gru_hidden = None
-                    critic_gru_hidden = None
+                    recurrent_storage_values = {}
                     rollout_compute_error = KeyError(
                         "Missing rollout perception observation(s): "
                         + ", ".join(sorted(set(missing_perception_keys)))
@@ -8737,8 +8897,7 @@ class PPO(BaseAlgo):
                     (
                         actions,
                         values,
-                        actor_gru_hidden,
-                        critic_gru_hidden,
+                        recurrent_storage_values,
                         rollout_compute_error,
                     ) = self._try_compute_student_rollout_outputs(
                         actor_obs=actor_obs,
@@ -9051,8 +9210,7 @@ class PPO(BaseAlgo):
                             "teacher_indices": teacher_indices.view(-1, 1)
                             if teacher_indices is not None
                             else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
-                            "actor_gru_hidden": actor_gru_hidden,
-                            "critic_gru_hidden": critic_gru_hidden,
+                            **recurrent_storage_values,
                         }
                         if teacher_bc_mask_current is not None:
                             storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
@@ -9083,8 +9241,7 @@ class PPO(BaseAlgo):
                         "teacher_indices": teacher_indices.view(-1, 1)
                         if teacher_indices is not None
                         else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
-                        "actor_gru_hidden": actor_gru_hidden,
-                        "critic_gru_hidden": critic_gru_hidden,
+                        **recurrent_storage_values,
                     }
                     if teacher_bc_mask_current is not None:
                         storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
@@ -9510,7 +9667,10 @@ class PPO(BaseAlgo):
             minibatch_keys.add(self.actor_perception_key)
         if self._critic_optimizer_objective_enabled() and self.critic_perception_key:
             minibatch_keys.add(self.critic_perception_key)
-        if self.use_time_gru:
+        recurrent_policy_update = bool(
+            self.use_time_gru or getattr(self, "use_policy_lstm", False)
+        )
+        if recurrent_policy_update:
             minibatch_keys.add("dones")
         if self.use_symmetry:
             minibatch_keys.add("actor_obs_raw")
@@ -9533,7 +9693,7 @@ class PPO(BaseAlgo):
             )
         if timing is not None:
             with timing.record("training/generator_setup"):
-                if self.use_time_gru:
+                if recurrent_policy_update:
                     generator = self.storage.sequence_mini_batch_generator(
                         self.config.num_mini_batches, self.config.num_learning_epochs
                     )
@@ -9542,7 +9702,7 @@ class PPO(BaseAlgo):
                         self.config.num_mini_batches, self.config.num_learning_epochs, keys=minibatch_keys
                     )
         else:
-            if self.use_time_gru:
+            if recurrent_policy_update:
                 generator = self.storage.sequence_mini_batch_generator(
                     self.config.num_mini_batches, self.config.num_learning_epochs
                 )
@@ -10732,6 +10892,8 @@ class PPO(BaseAlgo):
         return numerator / denominator, has_valid_samples, True
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
+        if getattr(self, "use_policy_lstm", False):
+            return self._compute_ppo_loss_lstm(minibatch)
         if self.use_time_gru:
             return self._compute_ppo_loss_sequence(minibatch)
         debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT_VERBOSE", "").lower() not in (
@@ -11479,6 +11641,117 @@ class PPO(BaseAlgo):
             dones_seq=dones_seq,
             initial_hidden=initial_hidden,
         )
+
+    def _compute_ppo_loss_lstm(self, minibatch: Minibatch):
+        """Compute PPO from full-observation LSTM sequences without mutating rollout state."""
+
+        if self.use_symmetry:
+            raise ValueError("Full-policy LSTM does not support symmetry augmentation.")
+        if self.actor_perception_key or self.critic_perception_key:
+            raise ValueError("Full-policy LSTM does not support external perception inputs.")
+        if self.distill_enabled or (self.distill_mode == "dagger" and self.dagger_enabled):
+            raise ValueError("Full-policy LSTM does not support distillation losses.")
+
+        actor_obs = minibatch["actor_obs"]
+        critic_obs = minibatch["critic_obs"]
+        actions = minibatch["actions"]
+        target_values = minibatch["values"]
+        advantages = minibatch["advantages"]
+        returns = minibatch["returns"]
+        old_actions_log_prob = minibatch["actions_log_prob"]
+        old_mu = minibatch["action_mean"]
+        old_sigma = minibatch["action_sigma"]
+        dones = minibatch.get("dones")
+        if dones is None:
+            raise ValueError("Full-policy LSTM minibatches require transition dones.")
+
+        required_state_names = (
+            "actor_lstm_hidden",
+            "actor_lstm_cell",
+            "critic_lstm_hidden",
+            "critic_lstm_cell",
+        )
+        missing = [name for name in required_state_names if minibatch.get(name) is None]
+        if missing:
+            raise ValueError(f"Full-policy LSTM minibatch is missing recurrent state: {missing}.")
+
+        actor_initial_hidden = minibatch["actor_lstm_hidden"][0].permute(1, 0, 2).contiguous()
+        actor_initial_cell = minibatch["actor_lstm_cell"][0].permute(1, 0, 2).contiguous()
+        critic_initial_hidden = minibatch["critic_lstm_hidden"][0].permute(1, 0, 2).contiguous()
+        critic_initial_cell = minibatch["critic_lstm_cell"][0].permute(1, 0, 2).contiguous()
+
+        mean_sequence = self.actor.recurrent_mean_sequence(
+            actor_obs,
+            dones=dones,
+            initial_hidden=actor_initial_hidden,
+            initial_cell=actor_initial_cell,
+        )
+        value_sequence = self.critic.recurrent_value_sequence(
+            critic_obs,
+            dones=dones,
+            initial_hidden=critic_initial_hidden,
+            initial_cell=critic_initial_cell,
+        )
+
+        means = mean_sequence.flatten(0, 1)
+        values = value_sequence.flatten(0, 1)
+        actions = actions.flatten(0, 1)
+        target_values = target_values.flatten(0, 1)
+        advantages = advantages.flatten(0, 1)
+        returns = returns.flatten(0, 1)
+        old_actions_log_prob = old_actions_log_prob.flatten(0, 1)
+        old_mu = old_mu.flatten(0, 1)
+        old_sigma = old_sigma.flatten(0, 1)
+
+        self.actor.update_distribution_from_mean(means)
+        actions_log_prob = self.actor.get_actions_log_prob(actions)
+        entropy = self.actor.entropy
+        kl_mean = self._compute_kl_div(
+            old_mu,
+            old_sigma,
+            self.actor.action_mean,
+            self.actor.action_std,
+            reduce_distributed=False,
+        )
+
+        ratio = torch.exp(actions_log_prob - old_actions_log_prob.squeeze(-1))
+        surrogate = -advantages.squeeze(-1) * ratio
+        surrogate_clipped = -advantages.squeeze(-1) * torch.clamp(
+            ratio,
+            1.0 - self.config.clip_param,
+            1.0 + self.config.clip_param,
+        )
+        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        value_clipped = target_values + (values - target_values).clamp(
+            -self.config.clip_param,
+            self.config.clip_param,
+        )
+        value_losses = (values - returns).pow(2)
+        value_losses_clipped = (value_clipped - returns).pow(2)
+        value_loss = torch.max(value_losses, value_losses_clipped).mean()
+
+        zero = torch.zeros((), device=self.device)
+        entropy_loss = entropy.mean()
+        entropy_coef = self._operational_entropy_coefficient()
+        actor_loss = surrogate_loss - entropy_coef * entropy_loss
+        critic_loss = self.config.value_loss_coef * value_loss
+        return {
+            "actor_loss": actor_loss,
+            "critic_loss": critic_loss,
+            "symmetry_actor_loss": zero,
+            "symmetry_critic_loss": zero,
+            "value_loss": value_loss,
+            "surrogate_loss": surrogate_loss,
+            "entropy_loss": entropy_loss,
+            "entropy_coef": entropy_coef,
+            "distill_loss": zero,
+            "bc_loss": zero,
+            "ppo_coeff": float(self.ppo_coeff),
+            "dagger_weight": 0.0,
+            "kl_mean": kl_mean,
+            "_reduce_kl_before_optimizer": True,
+        }
 
     def _compute_ppo_loss_sequence(self, minibatch: Minibatch):
         # Sequence shapes: [T, B, ...]
@@ -15402,6 +15675,21 @@ class PPO(BaseAlgo):
             # Save a pure policy .onnx for deployment. Motion replay/reference
             # tensors belong in debug/demo tooling, not in the policy artifact.
             example_obs_dict = {"actor_obs": self._get_zero_input()}
+            if getattr(self, "use_policy_lstm", False):
+                recurrent_module = self.actor.actor_module.module
+                recurrent_shape = (
+                    int(recurrent_module.num_layers),
+                    1,
+                    int(recurrent_module.hidden_dim),
+                )
+                example_obs_dict["hidden_state"] = torch.zeros(
+                    recurrent_shape,
+                    device=self.device,
+                    dtype=example_obs_dict["actor_obs"].dtype,
+                )
+                example_obs_dict["cell_state"] = torch.zeros_like(
+                    example_obs_dict["hidden_state"]
+                )
             zero_perception = self._get_zero_perception_input()
             perception_observation_contract = None
             perception_observation_contract_sha256 = None
@@ -15505,12 +15793,15 @@ class PPO(BaseAlgo):
                 onnx_file_path=onnx_file_path,
                 example_obs_dict=example_obs_dict,
                 perception_input_name=self.actor_perception_key or None,
+                rtol=1.0e-4 if getattr(self, "use_policy_lstm", False) else 1.0e-3,
             )
             parity_report.update(
                 {
                     "completed_iteration": completed_iteration,
                     "actor_graph_semantics": (
-                        "raw_actor_observation_plus_authenticated_external_observation_adapter"
+                        "raw_actor_observation_plus_explicit_lstm_state"
+                        if getattr(self, "use_policy_lstm", False)
+                        else "raw_actor_observation_plus_authenticated_external_observation_adapter"
                     ),
                     "precomputed_command_contract_sha256": metadata.get(
                         _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
@@ -15520,6 +15811,10 @@ class PPO(BaseAlgo):
                     ),
                 }
             )
+            if getattr(self, "use_policy_lstm", False):
+                parity_report["recurrent_policy_contract_sha256"] = metadata.get(
+                    _RECURRENT_POLICY_CONTRACT_SHA256_KEY
+                )
             attach_onnx_metadata(
                 onnx_path=onnx_file_path,
                 metadata={"onnx_validation_contract": parity_report},
@@ -15529,6 +15824,7 @@ class PPO(BaseAlgo):
                 onnx_file_path=onnx_file_path,
                 example_obs_dict=example_obs_dict,
                 perception_input_name=self.actor_perception_key or None,
+                rtol=1.0e-4 if getattr(self, "use_policy_lstm", False) else 1.0e-3,
             )
 
             # Upload the .onnx file to wandb
@@ -15694,7 +15990,11 @@ class PPO(BaseAlgo):
         their exact index plan is not available here.
         """
 
-        if self._effective_dagger_loss_weight() <= 0.0 or self.use_time_gru:
+        if self._effective_dagger_loss_weight() <= 0.0 or self.use_time_gru or getattr(
+            self,
+            "use_policy_lstm",
+            False,
+        ):
             return None
         use_contiguous = os.environ.get("HOLOSOMA_CONTIGUOUS_MINIBATCHES", "").lower() not in (
             "",
@@ -16366,6 +16666,50 @@ class PPO(BaseAlgo):
     @property
     def actor_onnx_wrapper(self):
         self._validate_actor_onnx_compatibility()
+
+        if getattr(self, "use_policy_lstm", False):
+            class RecurrentActorWrapper(nn.Module):
+                onnx_input_names = ["actor_obs", "hidden_state", "cell_state"]
+                onnx_output_names = ["action", "hidden_state_out", "cell_state_out"]
+                onnx_dynamic_axes = {
+                    "actor_obs": {0: "batch"},
+                    "hidden_state": {1: "batch"},
+                    "cell_state": {1: "batch"},
+                    "action": {0: "batch"},
+                    "hidden_state_out": {1: "batch"},
+                    "cell_state_out": {1: "batch"},
+                }
+
+                def __init__(self, actor, normalizers, keys, slices):
+                    super().__init__()
+                    self.actor = actor
+                    self.keys = keys
+                    self.slices = slices
+                    self.normalizers = nn.ModuleDict({key: normalizers[key] for key in keys})
+
+                def forward(self, actor_obs, hidden_state, cell_state):
+                    parts = []
+                    for key in self.keys:
+                        part = actor_obs[..., self.slices[key]]
+                        normalizer = self.normalizers[key]
+                        if isinstance(normalizer, EmpiricalNormalization):
+                            part = normalizer(part, update=False)
+                        else:
+                            part = normalizer(part)
+                        parts.append(part)
+                    normalized_obs = torch.cat(parts, dim=-1)
+                    return self.actor.act_inference_recurrent_explicit(
+                        normalized_obs,
+                        hidden_state,
+                        cell_state,
+                    )
+
+            return RecurrentActorWrapper(
+                self.actor,
+                self.actor_obs_normalizers,
+                self.actor_obs_keys,
+                self.actor_obs_slices,
+            )
 
         class ActorWrapper(nn.Module):
             def __init__(self, actor, normalizers, keys, slices, perception_key):

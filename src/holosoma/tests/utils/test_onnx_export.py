@@ -55,6 +55,31 @@ class ValidationCopyTrackingWrapper(nn.Module):
         return self.linear(actor_obs)
 
 
+class ExplicitLSTMWrapper(nn.Module):
+    onnx_input_names = ["actor_obs", "hidden_state", "cell_state"]
+    onnx_output_names = ["action", "hidden_state_out", "cell_state_out"]
+    onnx_dynamic_axes = {
+        "actor_obs": {0: "batch"},
+        "hidden_state": {1: "batch"},
+        "cell_state": {1: "batch"},
+        "action": {0: "batch"},
+        "hidden_state_out": {1: "batch"},
+        "cell_state_out": {1: "batch"},
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(4, 6)
+        self.head = nn.Linear(6, 2)
+
+    def forward(self, actor_obs, hidden_state, cell_state):
+        output, (hidden_out, cell_out) = self.lstm(
+            actor_obs.unsqueeze(0),
+            (hidden_state, cell_state),
+        )
+        return self.head(output.squeeze(0)), hidden_out, cell_out
+
+
 def test_export_policy_as_onnx():
     """Test ONNX export, load, and dimension verification."""
     OBS_DIM, ACT_DIM = 10, 5
@@ -185,6 +210,34 @@ def test_validate_exported_policy_onnx_checks_runtime_and_numerical_parity(tmp_p
     assert report["probe_rows"] == 6
     assert report["rtol"] == 1.0e-3
     assert report["atol"] == 1.0e-5
+
+
+def test_export_and_validate_explicit_lstm_state_contract(tmp_path):
+    wrapper = ExplicitLSTMWrapper().eval()
+    examples = {
+        "actor_obs": torch.zeros(1, 4),
+        "hidden_state": torch.zeros(1, 1, 6),
+        "cell_state": torch.zeros(1, 1, 6),
+    }
+    onnx_path = tmp_path / "explicit_lstm.onnx"
+    export_policy_as_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+    )
+    report = validate_exported_policy_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=examples,
+        rtol=1.0e-4,
+    )
+
+    assert report["version"] == 2
+    assert report["input_names"] == ExplicitLSTMWrapper.onnx_input_names
+    assert report["output_names"] == ExplicitLSTMWrapper.onnx_output_names
+    session = onnxruntime.InferenceSession(str(onnx_path))
+    assert session.get_inputs()[1].shape == [1, "batch", 6]
+    assert session.get_outputs()[1].shape == [1, "batch", 6]
 
 
 def test_validate_exported_policy_onnx_accepts_bounded_float32_backend_drift(tmp_path):
