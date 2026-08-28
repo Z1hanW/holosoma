@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 20 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm)$ || ! $3 =~ ^[0-3]$ ]]; then
+if [[ $# -ne 20 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
   echo "usage: $0 MODE POLICY_ARCH NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA" >&2
   exit 2
 fi
@@ -21,13 +21,22 @@ readonly PYTHON_RUNTIME=${PYTHON_RUNTIME_ROOT}/site-packages
 readonly PYTHON_RUNTIME_SHA256=dd7ca81fa848917c362b3a239893a7a26f4c89d42b4f85cb515d91622f1690bc
 readonly NCCL_ROOT=/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly NCCL_SHA256=e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
-readonly DATASET_ROOT=/data/zzzihanw/holosoma_training_data/prism_world_zhen137_humanscale_w50_smooth5_20260826
-readonly SOURCE_MOTION_DIR=${DATASET_ROOT}/motion_bank
-readonly SOURCE_OBJECT_SPEC_PATH=${SOURCE_MOTION_DIR}/_clip_object_urdf_map.json
-readonly SINGLE_SLOT_SOURCE_DIGEST=1dde9c006356b5c8a6bd3ae86fb854f5c2709a6767e8be73d127417c9f819099
-readonly SINGLE_SLOT_VIEW_DIGEST=3153f199be72be2905dde69f9d920f809c9c77afac37edfa0b611fbfc6ad778b
-readonly MOTION_DIR=/data/holosoma_inputs/prism_world_zhen137_humanscale_w50_smooth5_20260826_single_slot/by-source/${SINGLE_SLOT_VIEW_DIGEST}
-readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
+if [[ ${POLICY_ARCH} == large_mlp ]]; then
+  readonly SINGLE_SLOT_SOURCE_DIGEST=688a4f1cdc170d4183190563a930aacc389fa5c6cf9768e7f95ad9d2e0d6dcc3
+  readonly SINGLE_SLOT_VIEW_DIGEST=${SINGLE_SLOT_SOURCE_DIGEST}
+  readonly MOTION_DIR=/data/holosoma_inputs/ch2ckwzw_model06000_rollout137_20260828/by-source/${SINGLE_SLOT_VIEW_DIGEST}
+  readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
+  readonly SOURCE_MOTION_DIR=${MOTION_DIR}
+  readonly SOURCE_OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}
+else
+  readonly DATASET_ROOT=/data/zzzihanw/holosoma_training_data/prism_world_zhen137_humanscale_w50_smooth5_20260826
+  readonly SOURCE_MOTION_DIR=${DATASET_ROOT}/motion_bank
+  readonly SOURCE_OBJECT_SPEC_PATH=${SOURCE_MOTION_DIR}/_clip_object_urdf_map.json
+  readonly SINGLE_SLOT_SOURCE_DIGEST=1dde9c006356b5c8a6bd3ae86fb854f5c2709a6767e8be73d127417c9f819099
+  readonly SINGLE_SLOT_VIEW_DIGEST=3153f199be72be2905dde69f9d920f809c9c77afac37edfa0b611fbfc6ad778b
+  readonly MOTION_DIR=/data/holosoma_inputs/prism_world_zhen137_humanscale_w50_smooth5_20260826_single_slot/by-source/${SINGLE_SLOT_VIEW_DIGEST}
+  readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
+fi
 readonly SHARD_ROOT=${MOTION_DIR}/_rank_shards/by-source/${SHARD_DIGEST}/ws32
 
 [[ ${COMMIT_SHA} =~ ^[0-9a-f]{40}$ && ${TREE_SHA} =~ ^[0-9a-f]{40}$ ]] || {
@@ -94,18 +103,31 @@ mkdir -p "${RUN_ROOT}" "${LOGGER_BASE_DIR}" "${VERIFY_ROOT}" "${PERSIST_ROOT}/wa
 readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
 readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
-check_sha 4c4f037aee4bf41883bf1c1b65e782ec555308b181f0d0cc188d1048ebefa42d "${DATASET_ROOT}/manifests/dataset_audit.json"
-check_sha 7271c7d7e49d08b8c16d7010969d289d00bf1bbd4c7d70f3460e39248e113c6b "${DATASET_ROOT}/manifests/source_manifest.json"
-check_sha ef3bb3586690cee36e12d6ccd90bc382540993ab6ba0addd0c05a96e1cf3b95a "${SOURCE_OBJECT_SPEC_PATH}"
-check_sha c48b2ecd8fb09b409158fd9696fd3690e17a708406efced7f30db3a4b08c4131 "${SOURCE_MOTION_DIR}/_mesh_physics_manifest.json"
-check_sha 190288351fa3a92b3608c0d0b1647fda3daee51969f526b18468bcbe9016183f "${MOTION_DIR}/manifest.json"
-check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
+if [[ ${POLICY_ARCH} == large_mlp ]]; then
+  check_sha 449d15d287c20dd2d6f335144483aa9a706c0f40907e7d3d493192f261ecb3cb "${MOTION_DIR}/manifest.json"
+  check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
+  [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
+    echo "[ERROR] rollout motion bank must contain exactly 137 regular clips" >&2
+    exit 2
+  }
+  [[ $(find "${MOTION_DIR}/_single_slot_urdfs" -maxdepth 1 -type f ! -type l -name '*.urdf' | wc -l) -eq 137 ]] || {
+    echo "[ERROR] rollout motion bank must contain exactly 137 regular URDFs" >&2
+    exit 2
+  }
+else
+  check_sha 4c4f037aee4bf41883bf1c1b65e782ec555308b181f0d0cc188d1048ebefa42d "${DATASET_ROOT}/manifests/dataset_audit.json"
+  check_sha 7271c7d7e49d08b8c16d7010969d289d00bf1bbd4c7d70f3460e39248e113c6b "${DATASET_ROOT}/manifests/source_manifest.json"
+  check_sha ef3bb3586690cee36e12d6ccd90bc382540993ab6ba0addd0c05a96e1cf3b95a "${SOURCE_OBJECT_SPEC_PATH}"
+  check_sha c48b2ecd8fb09b409158fd9696fd3690e17a708406efced7f30db3a4b08c4131 "${SOURCE_MOTION_DIR}/_mesh_physics_manifest.json"
+  check_sha 190288351fa3a92b3608c0d0b1647fda3daee51969f526b18468bcbe9016183f "${MOTION_DIR}/manifest.json"
+  check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
+  [[ $(find "${SOURCE_MOTION_DIR}" -maxdepth 1 -type l -name '*.npz' | wc -l) -eq 137 ]] || {
+    echo "[ERROR] source motion bank must contain exactly 137 clip links" >&2
+    exit 2
+  }
+fi
 check_sha "${SHARD_MANIFEST_SHA}" "${SHARD_ROOT}/manifest.json"
 check_sha "${NCCL_SHA256}" "${NCCL_ROOT}/libnccl.so.2"
-[[ $(find "${SOURCE_MOTION_DIR}" -maxdepth 1 -type l -name '*.npz' | wc -l) -eq 137 ]] || {
-  echo "[ERROR] source motion bank must contain exactly 137 clip links" >&2
-  exit 2
-}
 [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
   echo "[ERROR] single-slot view must contain exactly 137 regular clips" >&2
   exit 2
@@ -294,10 +316,14 @@ fi
 
 POLICY_ARGS=(
   --algo.config.module-dict.actor.input-dim="['actor_obs']"
-  --algo.config.module-dict.actor.layer-config.hidden-dims='[512,256,128]'
   --algo.config.module-dict.critic.input-dim="['critic_obs']"
   --algo.config.module-dict.critic.layer-config.hidden-dims='[512,256,128]'
 )
+if [[ ${POLICY_ARCH} == large_mlp ]]; then
+  POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[2048,1024,512,256,128]')
+else
+  POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[512,256,128]')
+fi
 if [[ ${POLICY_ARCH} == lstm ]]; then
   POLICY_ARGS+=(
     --algo.config.module-dict.actor.type=LSTM
@@ -447,6 +473,8 @@ provenance.update({
         "legacy_unmapped_gitlinks_inactive_and_empty"
     ],
     "policy_arch": sys.argv[3],
+    "actor_hidden_dims": [2048, 1024, 512, 256, 128] if sys.argv[3] == "large_mlp" else [512, 256, 128],
+    "critic_hidden_dims": [512, 256, 128],
     "lstm_hidden_dim": 256 if sys.argv[3] == "lstm" else None,
     "lstm_num_layers": 1 if sys.argv[3] == "lstm" else None,
 })
