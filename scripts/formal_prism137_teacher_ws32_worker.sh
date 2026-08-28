@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 20 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
-  echo "usage: $0 MODE POLICY_ARCH NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA" >&2
+if [[ $# -ne 20 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
+  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA" >&2
   exit 2
 fi
 
@@ -21,7 +21,14 @@ readonly PYTHON_RUNTIME=${PYTHON_RUNTIME_ROOT}/site-packages
 readonly PYTHON_RUNTIME_SHA256=dd7ca81fa848917c362b3a239893a7a26f4c89d42b4f85cb515d91622f1690bc
 readonly NCCL_ROOT=/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly NCCL_SHA256=e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
-if [[ ${POLICY_ARCH} == large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  readonly SINGLE_SLOT_SOURCE_DIGEST=42903c7e443ccd836af133700058b0772545efcbc5af11d3193b60f0ec72dddd
+  readonly SINGLE_SLOT_VIEW_DIGEST=95e5a54bb1e429874af7a93bfb6bb902b5fc9bd7564eab481d3bce5cd01c0303
+  readonly MOTION_DIR=/data/holosoma_inputs/ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1/by-source/${SINGLE_SLOT_VIEW_DIGEST}
+  readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
+  readonly SOURCE_MOTION_DIR=${MOTION_DIR}
+  readonly SOURCE_OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}
+elif [[ ${POLICY_ARCH} == large_mlp ]]; then
   readonly SINGLE_SLOT_SOURCE_DIGEST=688a4f1cdc170d4183190563a930aacc389fa5c6cf9768e7f95ad9d2e0d6dcc3
   readonly SINGLE_SLOT_VIEW_DIGEST=${SINGLE_SLOT_SOURCE_DIGEST}
   readonly MOTION_DIR=/data/holosoma_inputs/ch2ckwzw_model06000_rollout137_20260828/by-source/${SINGLE_SLOT_VIEW_DIGEST}
@@ -103,7 +110,38 @@ mkdir -p "${RUN_ROOT}" "${LOGGER_BASE_DIR}" "${VERIFY_ROOT}" "${PERSIST_ROOT}/wa
 readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
 readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
-if [[ ${POLICY_ARCH} == large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  check_sha f162e31fa38a63ac679158184d8a9f4864e17ae83dd1f8e7aa001b9e64619487 "${MOTION_DIR}/manifest.json"
+  check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
+  [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
+    echo "[ERROR] command rollout motion bank must contain exactly 137 regular clips" >&2
+    exit 2
+  }
+  "${PYTHON_BIN}" - "${MOTION_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+import numpy as np
+
+root = Path(sys.argv[1])
+phase_counts = np.zeros((3,), dtype=np.int64)
+for path in sorted(root.glob("*.npz")):
+    with np.load(path, allow_pickle=False) as data:
+        if not {"policy_command_xy_yaw", "policy_command_phase"} <= set(data.files):
+            raise SystemExit(f"missing command fields: {path}")
+        command = np.asarray(data["policy_command_xy_yaw"])
+        phase = np.asarray(data["policy_command_phase"])
+        if command.shape != (359, 3) or phase.shape != (359,):
+            raise SystemExit(f"command timeline mismatch: {path}: {command.shape} {phase.shape}")
+        if not np.all(command[:, 1] == 0.0):
+            raise SystemExit(f"nonzero lateral command: {path}")
+        if not np.all((command[:, 0] == 0.0) | (command[:, 2] == 0.0)):
+            raise SystemExit(f"forward/yaw overlap: {path}")
+        phase_counts += np.bincount(phase.astype(np.int64), minlength=3)
+if phase_counts.tolist() != [16941, 27976, 4266]:
+    raise SystemExit(f"command phase-count drift: {phase_counts.tolist()}")
+PY
+elif [[ ${POLICY_ARCH} == large_mlp ]]; then
   check_sha 449d15d287c20dd2d6f335144483aa9a706c0f40907e7d3d493192f261ecb3cb "${MOTION_DIR}/manifest.json"
   check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
   [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
@@ -144,6 +182,7 @@ import sys
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text())
+student = sys.argv[5] == "command_student_large_mlp"
 expected = {
     "accepted": True,
     "world_size": 32,
@@ -154,8 +193,8 @@ expected = {
     "source_snapshot_id": sys.argv[4],
     "policy_arch": sys.argv[5],
     "dataset_clip_count": 137,
-    "actor_observation_dim": 178,
-    "critic_observation_dim": 310,
+    "actor_observation_dim": 94 if student else 178,
+    "critic_observation_dim": 377 if student else 310,
     "pure_ppo": True,
     "distillation_enabled": False,
     "export_onnx": True,
@@ -302,7 +341,12 @@ export HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0
 export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=0 HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=0
 export HOLOSOMA_MOTION_METRICS_INTERVAL=16
 export HOLOSOMA_DISABLE_AUTO_RESET=0 HOLOSOMA_DISABLE_CLIP_END_RESET=0 HOLOSOMA_DISABLE_MOTION_END_RESET=0
-export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=False HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH=1
+if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=True
+else
+  export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=False
+fi
+export HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH=1
 export HOLOSOMA_SKIP_INITIAL_CHECKPOINT=1
 
 if [[ ${MODE} == formal ]]; then
@@ -314,15 +358,48 @@ else
   export HOLOSOMA_REQUIRE_WANDB_RUN=0
 fi
 
-POLICY_ARGS=(
-  --algo.config.module-dict.actor.input-dim="['actor_obs']"
-  --algo.config.module-dict.critic.input-dim="['critic_obs']"
-  --algo.config.module-dict.critic.layer-config.hidden-dims='[512,256,128]'
-)
-if [[ ${POLICY_ARCH} == large_mlp ]]; then
+POLICY_ARGS=(--algo.config.module-dict.critic.layer-config.hidden-dims='[512,256,128]')
+OBSERVATION_ARGS=()
+TRAINING_PROFILE_ARGS=()
+if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  POLICY_ARGS+=(
+    --algo.config.module-dict.actor.input-dim="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
+    --algo.config.module-dict.actor.layer-config.hidden-dims='[2048,1024,512,256,128]'
+  )
+  OBSERVATION_ARGS+=(
+    --observation.groups.actor_obs_root_contact_aware.history-length=1
+    --observation.groups.actor_obs_drop_button.history-length=1
+    --observation.groups.actor_obs_proprio_with_actions_no_linvel.history-length=1
+    --observation.groups.critic_proprio_history.history-length=1
+  )
+  TRAINING_PROFILE_ARGS+=(
+    exp:g1-29dof-wbt-w-object-pure-rl-policy-command-after-lift
+    termination:g1-29dof-wbt-generalist-z-only
+    randomization:g1_29dof_wbt_w_object_pure_rl
+  )
+elif [[ ${POLICY_ARCH} == large_mlp ]]; then
+  POLICY_ARGS+=(
+    --algo.config.module-dict.actor.input-dim="['actor_obs']"
+    --algo.config.module-dict.critic.input-dim="['critic_obs']"
+  )
   POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[2048,1024,512,256,128]')
 else
+  POLICY_ARGS+=(
+    --algo.config.module-dict.actor.input-dim="['actor_obs']"
+    --algo.config.module-dict.critic.input-dim="['critic_obs']"
+  )
   POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[512,256,128]')
+fi
+if [[ ${POLICY_ARCH} != command_student_large_mlp ]]; then
+  OBSERVATION_ARGS+=(
+    --observation.groups.actor_obs.history-length=1
+    --observation.groups.critic_obs.history-length=1
+  )
+  TRAINING_PROFILE_ARGS+=(
+    exp:g1-29dof-wbt-w-object-generalist-teacher-linvel
+    termination:g1-29dof-wbt-generalist
+    randomization:g1-29dof-wbt-w-object-teacher-state-robust-with-camera
+  )
 fi
 if [[ ${POLICY_ARCH} == lstm ]]; then
   POLICY_ARGS+=(
@@ -341,12 +418,10 @@ else
 fi
 
 TRAIN_ARGS=(
-  exp:g1-29dof-wbt-w-object-generalist-teacher-linvel
+  "${TRAINING_PROFILE_ARGS[@]}"
   command:g1-29dof-wbt-w-object-generalist
   reward:g1-29dof-wbt-w-object-generalist-tracking-no-contact
   perception:camera_depth_d435i
-  termination:g1-29dof-wbt-generalist
-  randomization:g1-29dof-wbt-w-object-teacher-state-robust-with-camera
   logger:wandb
   --training.project=carry-any
   --training.name="${RUN_NAME_EFFECTIVE}"
@@ -377,17 +452,14 @@ TRAIN_ARGS=(
   --algo.config.module-dict.actor.min-noise-std=0.01
   --algo.config.normalize-actor-obs=False
   --algo.config.normalize-critic-obs=False
-  --algo.config.init-at-random-ep-len=True
   --algo.config.save-interval="${SAVE_INTERVAL}"
   --algo.config.reset-rollout-at-checkpoint=False
   "${POLICY_ARGS[@]}"
-  --observation.groups.actor_obs.history-length=1
-  --observation.groups.critic_obs.history-length=1
+  "${OBSERVATION_ARGS[@]}"
   --command.setup-terms.motion-command.params.motion-config.motion-file="${MOTION_DIR}"
   --command.setup-terms.motion-command.params.motion-config.pure-rl-policy-command-after-lift-enabled=False
   --command.setup-terms.motion-command.params.motion-config.hybrid-stage2-enabled=False
   --command.setup-terms.motion-command.params.motion-config.hybrid-velocity-enabled=False
-  --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=tracking_error
   --command.setup-terms.motion-command.params.motion-config.zero-root-command-when-drop-active=True
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
   --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion=False
@@ -440,6 +512,23 @@ TRAIN_ARGS=(
   --logger.video.upload-to-wandb=False
   --logger.base-dir="${LOGGER_BASE_DIR}"
 )
+if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  TRAIN_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=precomputed_turn_then_forward
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode=kinematic_lift
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode=peak_height
+    --termination.terms.bad_tracking.params.bad-ref-pos-threshold=1.5
+    --termination.terms.bad_tracking.params.bad-ref-ori-threshold=1.65
+    --termination.terms.bad_tracking.params.bad-motion-body-pos-threshold=0.75
+    --termination.terms.bad_tracking.params.bad-object-pos-threshold=0.75
+    --termination.terms.bad_tracking.params.bad-object-ori-threshold=1.65
+  )
+else
+  TRAIN_ARGS+=(
+    --algo.config.init-at-random-ep-len=True
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=tracking_error
+  )
+fi
 if [[ ${MODE} == formal ]]; then
   TRAIN_ARGS+=(--logger.id="${RUN_ID_EFFECTIVE}" --logger.resume=must)
 fi
@@ -473,7 +562,7 @@ provenance.update({
         "legacy_unmapped_gitlinks_inactive_and_empty"
     ],
     "policy_arch": sys.argv[3],
-    "actor_hidden_dims": [2048, 1024, 512, 256, 128] if sys.argv[3] == "large_mlp" else [512, 256, 128],
+    "actor_hidden_dims": [2048, 1024, 512, 256, 128] if sys.argv[3] in {"large_mlp", "command_student_large_mlp"} else [512, 256, 128],
     "critic_hidden_dims": [512, 256, 128],
     "lstm_hidden_dim": 256 if sys.argv[3] == "lstm" else None,
     "lstm_num_layers": 1 if sys.argv[3] == "lstm" else None,
@@ -492,7 +581,11 @@ if [[ ${MODE} == formal && ${NODE_RANK} == 0 ]]; then
 fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor=178 critic=310 pure_ppo=true tracking_error=true contact=false max_episode_s=10 export_onnx=true"
+  if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=kinematic_lift contact_reward=false max_episode_s=10 export_onnx=true"
+  else
+    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor=178 critic=310 pure_ppo=true tracking_error=true contact=false max_episode_s=10 export_onnx=true"
+  fi
   exit 0
 fi
 if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d') ]]; then

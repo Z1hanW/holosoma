@@ -73,6 +73,37 @@ def test_worker_accepts_large_mlp_profile_before_node_or_asset_checks() -> None:
     assert "node-rank/IP mismatch" in result.stderr
 
 
+def test_worker_accepts_command_student_large_mlp_profile_before_node_checks() -> None:
+    args = [
+        "bash",
+        str(WORKER),
+        "canary",
+        "command_student_large_mlp",
+        "0",
+        "192.0.2.1",
+        "/missing/source",
+        "/missing/persist",
+        "192.0.2.2",
+        "29999",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "0" * 40,
+        "1" * 40,
+        "2" * 64,
+        "3" * 64,
+    ]
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "usage:" not in result.stderr
+    assert "node-rank/IP mismatch" in result.stderr
+
+
 def test_worker_locks_formal_science_and_delivery_contract() -> None:
     text = WORKER.read_text()
 
@@ -102,6 +133,13 @@ def test_worker_locks_formal_science_and_delivery_contract() -> None:
         "--logger.resume=must",
         "wandb_replay_preflight.py\" verify",
         "verify_formal_git_checkout.py",
+        "ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1",
+        "contact-aware-sparse-root-command-mode=precomputed_turn_then_forward",
+        "contact-aware-button-window-mode=kinematic_lift",
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+        "HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=True",
     )
     for fragment in required_fragments:
         assert fragment in text
