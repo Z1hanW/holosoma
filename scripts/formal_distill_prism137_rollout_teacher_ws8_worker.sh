@@ -416,6 +416,7 @@ fi
 EXTRA_ARGS=(
   "reward:${DISTILL_REWARD_CONFIG}"
   randomization:g1_29dof_wbt_w_object_with_action_delay
+  --simulator.config.scene.env-spacing=5.0
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
