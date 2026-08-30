@@ -366,6 +366,9 @@ unset RESUME_TRAINING_CKPT RESUME_CHECKPOINT RESUME_CKPT POLICY_INIT_CKPT POLICY
 export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
 export CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift
 export CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
+export ENABLE_DEFAULT_POSE_PREPEND=True DEFAULT_POSE_PREPEND_DURATION_S=0.2
+export ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0
+export RESET_NOISE_SCALE=1.0 MAX_EPISODE_LENGTH_S=10.0
 export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True CAMERA_PITCH_DEG=0
 export STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
 export STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]' STUDENT_POLICY_TYPE=mlp
@@ -387,6 +390,7 @@ export START_AT_TIMESTEP_ZERO_PROB=0.2 START_AT_TIMESTEP_ZERO_PROB_END=${START_Z
 export START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_ZERO_START_ITER} START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_ZERO_END_ITER}
 export UNIFORM_T1_WINDOW_SAMPLING_ENABLED=True UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=50
 export UNIFORM_T1_WINDOW_DENSITY_BOOST=7.0
+export USE_ADAPTIVE_TIMESTEPS_SAMPLER=False
 unset UNIFORM_T1_WINDOW_TARGET_SAMPLE_FRAC
 export FREEZE_AT_TIMESTEP_ZERO_PROB=0.0 FREEZE_AT_TIMESTEP_ZERO_PROB_END=0.0
 export FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=0 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${CURRICULUM_END_ITER}
@@ -414,14 +418,7 @@ EXTRA_ARGS=(
   randomization:g1_29dof_wbt_w_object_with_action_delay
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
-  --simulator.config.sim.max-episode-length-s=10.0
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
-  --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False
-  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=True
-  --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=0.2
-  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=True
-  --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=2.0
-  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=1.0
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-pos=0.20
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-vel=0.35
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos='[0.08,0.08,0.025]'
@@ -442,7 +439,6 @@ EXTRA_ARGS=(
   --perception.camera-mount-quat='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
   --perception.camera-frame-quat='[-0.5,0.5,-0.5,0.5]'
   --perception.encoder-type="${ENCODER_TYPE}"
-  --reward.terms.offline-contact-guidance.weight=0.0
   --reward.terms.offline-contact-guidance.params.contact-weight=10.0
   --reward.terms.offline-contact-guidance.params.wrist-weight=5.0
   --reward.terms.offline-contact-guidance.params.force-threshold=1.0

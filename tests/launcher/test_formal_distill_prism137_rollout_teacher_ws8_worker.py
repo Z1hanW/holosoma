@@ -65,7 +65,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]'",
         "g1-29dof-wbt-w-object-generalist-tracking-no-contact",
         "ENABLE_OFFLINE_CONTACT_GUIDANCE_VALUE=False",
-        "--reward.terms.offline-contact-guidance.weight=0.0",
+        "USE_ADAPTIVE_TIMESTEPS_SAMPLER=False",
         "HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0",
         "CONTACT_SIDECAR_MODE=full-sidecars",
         "ALLOW_PARTIAL_CONTACT_SIDECARS=1",
@@ -75,9 +75,11 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "precomputed_turn_then_forward",
         "CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift",
         "CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height",
+        "ENABLE_DEFAULT_POSE_PREPEND=True DEFAULT_POSE_PREPEND_DURATION_S=0.2",
+        "ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0",
+        "RESET_NOISE_SCALE=1.0 MAX_EPISODE_LENGTH_S=10.0",
         "CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True",
         "clip-weighting-strategy=uniform_clip",
-        "use-adaptive-timesteps-sampler=False",
         "UNIFORM_T1_WINDOW_SAMPLING_ENABLED=True",
         "UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=50",
         "UNIFORM_T1_WINDOW_DENSITY_BOOST=7.0",
@@ -87,6 +89,10 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
     ]
     for value in required:
         assert value in text
+    assert "--reward.terms.offline-contact-guidance.weight=0.0" not in text
+    assert "--command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False" not in text
+    assert "--command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=True" not in text
+    assert "--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=1.0" not in text
 
 
 def test_generic_distill_launcher_propagates_partial_target_contract() -> None:
