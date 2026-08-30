@@ -364,6 +364,8 @@ export EXPORT_ONNX=True
 export RESUME_FROM_BOX=0 RESUME_FROM_PREVIOUS=0 WANDB_RESUME_SAME_RUN=0
 unset RESUME_TRAINING_CKPT RESUME_CHECKPOINT RESUME_CKPT POLICY_INIT_CKPT POLICY_INIT_CHECKPOINT
 export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
+export CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift
+export CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
 export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True CAMERA_PITCH_DEG=0
 export STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
 export STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]' STUDENT_POLICY_TYPE=mlp
@@ -415,8 +417,6 @@ EXTRA_ARGS=(
   --simulator.config.sim.max-episode-length-s=10.0
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
   --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False
-  --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode=kinematic_lift
-  --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode=peak_height
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=True
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=0.2
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=True
