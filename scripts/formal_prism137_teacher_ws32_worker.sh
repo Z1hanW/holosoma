@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 20 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
-  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA" >&2
+if [[ ( $# -ne 20 && $# -ne 21 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
+  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE]" >&2
   exit 2
 fi
 
@@ -11,6 +11,7 @@ readonly MASTER_ADDR=$7 MASTER_PORT=$8 RUN_ID=$9 RUN_NAME=${10} CONTRACT_PATH=${
 readonly CONTRACT_SHA=${12} RULE90_PATH=${13} RULE90_SHA=${14} CANARY_PATH=${15}
 readonly CANARY_SHA=${16} COMMIT_SHA=${17} TREE_SHA=${18} SHARD_DIGEST=${19}
 readonly SHARD_MANIFEST_SHA=${20}
+readonly SAMPLING_PROFILE=${21:-fixed_startzero_0p2}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly NPROC=8 NNODES=4 WORLD_SIZE=32 ENVIRONMENTS_PER_RANK=2048
@@ -45,6 +46,16 @@ else
   readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
 fi
 readonly SHARD_ROOT=${MOTION_DIR}/_rank_shards/by-source/${SHARD_DIGEST}/ws32
+
+[[ ${SAMPLING_PROFILE} =~ ^(fixed_startzero_0p2|linear_startzero_0to1)$ ]] || {
+  echo "[ERROR] unsupported sampling profile: ${SAMPLING_PROFILE}" >&2
+  exit 2
+}
+if [[ ${SAMPLING_PROFILE} == linear_startzero_0to1 ]]; then
+  readonly START_AT_ZERO_PROB=0.0 START_AT_ZERO_PROB_END=1.0
+else
+  readonly START_AT_ZERO_PROB=0.2 START_AT_ZERO_PROB_END=0.2
+fi
 
 [[ ${COMMIT_SHA} =~ ^[0-9a-f]{40}$ && ${TREE_SHA} =~ ^[0-9a-f]{40}$ ]] || {
   echo "[ERROR] commit and tree must be full lowercase Git SHA-1 values" >&2
@@ -176,7 +187,7 @@ if [[ ${MODE} == formal ]]; then
   check_sha "${RULE90_SHA}" "${RULE90_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
   "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" \
-    "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" <<'PY'
+    "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -203,6 +214,12 @@ expected = {
     "pytorch_ort_parity_passed": True,
     "finite_metrics": True,
 }
+if sys.argv[6] == "linear_startzero_0to1":
+    expected.update({
+        "sampling_profile": "linear_startzero_0to1",
+        "start_at_timestep_zero_probability_start": 0.0,
+        "start_at_timestep_zero_probability_end": 1.0,
+    })
 for key, value in expected.items():
     if payload.get(key) != value:
         raise SystemExit(f"invalid canary {key}: {payload.get(key)!r} != {value!r}")
@@ -464,8 +481,8 @@ TRAIN_ARGS=(
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
   --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion=False
   --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False
-  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob=0.2
-  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end=0.2
+  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob="${START_AT_ZERO_PROB}"
+  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_ZERO_PROB_END}"
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter=0
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${CURRICULUM_END_ITER}"
   --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob=0.0
@@ -542,7 +559,8 @@ HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_t
   --motion-shard-manifest "${HOLOSOMA_MOTION_SHARD_MANIFEST}" \
   --contact-interval-runtime-prepend-compensation false --source-root "${SOURCE_ROOT}")
 HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" - "${HOLOSOMA_TRAINING_PROVENANCE}" \
-  "${VERIFY_ROOT}/node_${NODE_RANK}.json" "${POLICY_ARCH}" <<'PY'
+  "${VERIFY_ROOT}/node_${NODE_RANK}.json" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" \
+  "${START_AT_ZERO_PROB}" "${START_AT_ZERO_PROB_END}" "${CURRICULUM_END_ITER}" <<'PY'
 import json
 import sys
 
@@ -562,6 +580,11 @@ provenance.update({
         "legacy_unmapped_gitlinks_inactive_and_empty"
     ],
     "policy_arch": sys.argv[3],
+    "sampling_profile": sys.argv[4],
+    "start_at_timestep_zero_probability_start": float(sys.argv[5]),
+    "start_at_timestep_zero_probability_end": float(sys.argv[6]),
+    "start_at_timestep_zero_probability_start_iter": 0,
+    "start_at_timestep_zero_probability_end_iter": int(sys.argv[7]),
     "actor_hidden_dims": [2048, 1024, 512, 256, 128] if sys.argv[3] in {"large_mlp", "command_student_large_mlp"} else [512, 256, 128],
     "critic_hidden_dims": [512, 256, 128],
     "lstm_hidden_dim": 256 if sys.argv[3] == "lstm" else None,
@@ -582,7 +605,7 @@ fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
-    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=kinematic_lift contact_reward=false max_episode_s=10 export_onnx=true"
+    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} sampling_profile=${SAMPLING_PROFILE} startzero=${START_AT_ZERO_PROB}->${START_AT_ZERO_PROB_END}@${CURRICULUM_END_ITER} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=kinematic_lift contact_reward=false max_episode_s=10 export_onnx=true"
   else
     echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor=178 critic=310 pure_ppo=true tracking_error=true contact=false max_episode_s=10 export_onnx=true"
   fi
