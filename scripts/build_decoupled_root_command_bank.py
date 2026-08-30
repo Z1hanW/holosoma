@@ -331,7 +331,11 @@ def main() -> None:
 
     source_manifest_sha = ""
     source_payload_digest = ""
-    if args.copy_portable_source_tree:
+    if (
+        args.copy_portable_source_tree
+        or args.expected_source_manifest_sha256
+        or args.expected_source_payload_digest
+    ):
         source_manifest_path = source / "manifest.json"
         source_manifest_bytes = _read_stable(source_manifest_path)
         source_manifest_sha = _sha256_bytes(source_manifest_bytes)
@@ -340,20 +344,28 @@ def main() -> None:
             and source_manifest_sha != args.expected_source_manifest_sha256
         ):
             raise ValueError(
-                "Portable source manifest SHA256 mismatch: "
+                "Source manifest SHA256 mismatch: "
                 f"expected={args.expected_source_manifest_sha256} actual={source_manifest_sha}"
             )
         try:
             source_manifest = json.loads(source_manifest_bytes)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid portable source manifest: {source_manifest_path}") from exc
-        source_payload_digest = str(source_manifest.get("payload_digest", ""))
+            raise ValueError(f"Invalid source manifest: {source_manifest_path}") from exc
+        # Merged training banks call this immutable identity
+        # ``payload_digest``.  Audited policy-rollout banks expose the same
+        # contract as ``source_digest``.  Accept either spelling, while the
+        # caller-provided expected digest is still checked exactly below.
+        source_payload_digest = str(
+            source_manifest.get(
+                "payload_digest", source_manifest.get("source_digest", "")
+            )
+        )
         if (
             args.expected_source_payload_digest
             and source_payload_digest != args.expected_source_payload_digest
         ):
             raise ValueError(
-                "Portable source payload digest mismatch: "
+                "Source payload digest mismatch: "
                 f"expected={args.expected_source_payload_digest} actual={source_payload_digest}"
             )
 

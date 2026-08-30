@@ -4951,8 +4951,45 @@ class MotionCommand(CommandTermBase):
                     func_path = func.replace(":", ".")
                 else:
                     func_path = f"{getattr(func, '__module__', '')}.{getattr(func, '__name__', '')}"
-                if func_path in _CONTACT_WINDOW_OBSERVATION_FUNCTION_PATHS:
-                    return True
+                if func_path not in _CONTACT_WINDOW_OBSERVATION_FUNCTION_PATHS:
+                    continue
+                # These observation functions have mode-specific paths that
+                # no longer consume exported contact windows.  Treating their
+                # names alone as consumers incorrectly forces complete
+                # contact coverage for precomputed commands and kinematic
+                # pickup/drop buttons, even though both are computed entirely
+                # from the motion payload.
+                if func_path.endswith(".sparse_target_root_trajectory_command_contact_aware"):
+                    command_mode = (
+                        str(
+                            getattr(
+                                getattr(self, "motion_cfg", None),
+                                "contact_aware_sparse_root_command_mode",
+                                "tracking_error",
+                            )
+                        )
+                        .strip()
+                        .lower()
+                        .replace("-", "_")
+                    )
+                    if command_mode == "precomputed_turn_then_forward":
+                        continue
+                if func_path.endswith((".drop_button", ".pickup_button")):
+                    button_mode = (
+                        str(
+                            getattr(
+                                getattr(self, "motion_cfg", None),
+                                "contact_aware_button_window_mode",
+                                "contact_interval",
+                            )
+                        )
+                        .strip()
+                        .lower()
+                        .replace("-", "_")
+                    )
+                    if button_mode == "kinematic_lift":
+                        continue
+                return True
         return False
 
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
