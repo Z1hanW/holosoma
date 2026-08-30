@@ -222,6 +222,32 @@ def test_rank_shards_can_require_clip_counts_that_divide_envs_per_rank(
     assert verified == manifest
 
 
+def test_prepare_reuses_sealed_rank_shards_without_writing_parent(tmp_path: Path) -> None:
+    module = _load_prepare_module()
+    motion_dir, object_map = _write_motion_bank(tmp_path, clip_count=2, unique_urdfs=2)
+    output_root = tmp_path / "rank_shards" / "by-source" / "identity" / "ws2"
+    manifest = module.prepare_rank_shards(
+        motion_dir=motion_dir,
+        object_map=object_map,
+        output_root=output_root,
+        world_size=2,
+    )
+
+    output_root.parent.chmod(0o555)
+    try:
+        reused = module.prepare_rank_shards(
+            motion_dir=motion_dir,
+            object_map=object_map,
+            output_root=output_root,
+            world_size=2,
+            expected_source_digest=manifest["source_digest"],
+        )
+    finally:
+        output_root.parent.chmod(0o755)
+
+    assert reused == manifest
+
+
 def test_rank_shard_inverse_cover_weights_restore_global_uniform_clip_mass(tmp_path: Path) -> None:
     module = _load_prepare_module()
     motion_dir, object_map = _write_motion_bank(tmp_path, clip_count=5, unique_urdfs=2)
