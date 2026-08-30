@@ -1314,6 +1314,10 @@ PY
       --runtime-prepend-duration-s "${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}"
     )
   fi
+  CONTACT_PARTIAL_TARGET_ARGS=()
+  if [[ "${ALLOW_PARTIAL_CONTACT_SIDECARS}" == "1" ]]; then
+    CONTACT_PARTIAL_TARGET_ARGS=(--allow-missing-offline-contact-targets)
+  fi
   if [[ "${CONTACT_SIDECAR_MODE}" == "runtime-intervals" ]]; then
     case "$(echo "${ENABLE_OFFLINE_CONTACT_GUIDANCE:-True}" | tr '[:upper:]' '[:lower:]')" in
       0|false|no|off)
@@ -1339,6 +1343,7 @@ PY
       --motion-end-mode "${STUDENT_MOTION_END_MODE}" \
       "${CONTACT_VALIDATOR_EXPECTED_ARGS[@]}" \
       "${CONTACT_RUNTIME_PREPEND_ARGS[@]}" \
+      "${CONTACT_PARTIAL_TARGET_ARGS[@]}" \
       --tracked-body-names "${AS_ROLLOUT_TRACKED_BODY_NAMES}" \
       --ref-body-name "${AS_ROLLOUT_REF_BODY_NAME}" \
       --offline-contact-region-names "${OFFLINE_CONTACT_REGION_NAMES}" \

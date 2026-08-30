@@ -89,6 +89,12 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         assert value in text
 
 
+def test_generic_distill_launcher_propagates_partial_target_contract() -> None:
+    text = (ROOT / "distill_as_perception.sh").read_text()
+    assert "CONTACT_PARTIAL_TARGET_ARGS=(--allow-missing-offline-contact-targets)" in text
+    assert '"${CONTACT_PARTIAL_TARGET_ARGS[@]}"' in text
+
+
 def test_worker_uses_nominal_d435_camera_and_sw_bad_tracking_thresholds() -> None:
     text = WORKER.read_text()
     assert "--perception.sensor-offset='[0.0576235,0.01753,0.42987]'" in text
