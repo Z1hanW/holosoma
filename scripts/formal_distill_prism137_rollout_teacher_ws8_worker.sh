@@ -182,6 +182,7 @@ for path in sorted(root.glob("*.npz")):
 if not np.all(phase_counts > 0):
     raise SystemExit(f"missing command phase: {phase_counts.tolist()}")
 PY
+PYTHONPATH="${SOURCE_ROOT}/src/holosoma:${SOURCE_ROOT}/src/holosoma_inference:${SOURCE_ROOT}/src" \
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_contact_sidecars.py" \
   --motion-dir "${MOTION_DIR}" --contact-root "${CONTACT_ROOT}" \
   --expected-total 137 --motion-end-mode episodic \
