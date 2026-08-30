@@ -410,7 +410,6 @@ fi
 EXTRA_ARGS=(
   "reward:${DISTILL_REWARD_CONFIG}"
   randomization:g1_29dof_wbt_w_object_with_action_delay
-  --training.export-onnx=True
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
   --simulator.config.sim.max-episode-length-s=10.0

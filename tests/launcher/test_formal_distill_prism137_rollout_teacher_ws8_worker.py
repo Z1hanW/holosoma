@@ -83,7 +83,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "UNIFORM_T1_WINDOW_DENSITY_BOOST=7.0",
         "DAGGER_MATCH_STD_VALUE=True",
         "PPO_START=0.1 PPO_TARGET=0.9",
-        "--training.export-onnx=True",
+        "export EXPORT_ONNX=True",
     ]
     for value in required:
         assert value in text
