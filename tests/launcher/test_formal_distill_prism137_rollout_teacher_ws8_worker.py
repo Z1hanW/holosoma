@@ -68,6 +68,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "--reward.terms.offline-contact-guidance.weight=0.0",
         "HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0",
         "CONTACT_SIDECAR_MODE=full-sidecars",
+        "ALLOW_PARTIAL_CONTACT_SIDECARS=1",
         'PYTHONPATH="${SOURCE_ROOT}/src/holosoma:${SOURCE_ROOT}/src/holosoma_inference:${SOURCE_ROOT}/src"',
         "--allow-missing-offline-contact-targets",
         '--expected-valid-runtime-windows "${T1_VALID_WINDOW_CLIPS}"',
