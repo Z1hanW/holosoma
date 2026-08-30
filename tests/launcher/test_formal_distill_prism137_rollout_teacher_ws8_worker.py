@@ -78,6 +78,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "ENABLE_DEFAULT_POSE_PREPEND=True DEFAULT_POSE_PREPEND_DURATION_S=0.2",
         "ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0",
         "RESET_NOISE_SCALE=1.0 MAX_EPISODE_LENGTH_S=10.0",
+        '--logger.mode="$( [[ ${MODE} == formal ]] && echo online || echo offline )"',
         "--simulator.config.scene.env-spacing=5.0",
         "CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True",
         "clip-weighting-strategy=uniform_clip",

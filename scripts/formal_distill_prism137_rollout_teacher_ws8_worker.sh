@@ -416,6 +416,7 @@ fi
 EXTRA_ARGS=(
   "reward:${DISTILL_REWARD_CONFIG}"
   randomization:g1_29dof_wbt_w_object_with_action_delay
+  --logger.mode="$( [[ ${MODE} == formal ]] && echo online || echo offline )"
   --simulator.config.scene.env-spacing=5.0
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
