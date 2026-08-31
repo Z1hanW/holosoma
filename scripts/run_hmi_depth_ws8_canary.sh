@@ -97,8 +97,9 @@ ACTUAL_COMMIT=$(git rev-parse HEAD)
   echo "[ERROR] HEAD=${ACTUAL_COMMIT}, expected=${EXPECTED_COMMIT}" >&2
   exit 2
 }
-git merge-base --is-ancestor "${EXPECTED_COMMIT}" origin/experiment/hmi-depth-interface || {
-  echo "[ERROR] commit is not reachable from origin/experiment/hmi-depth-interface" >&2
+git fetch --quiet origin main
+git merge-base --is-ancestor "${EXPECTED_COMMIT}" origin/main || {
+  echo "[ERROR] commit is not reachable from origin/main" >&2
   exit 2
 }
 git diff --quiet --ignore-submodules --
