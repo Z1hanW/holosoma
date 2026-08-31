@@ -663,6 +663,8 @@ def _m8_to_hmi_command_config_pair(
     actor["layer_config"]["module_input_name"][0] = "actor_obs_hmi_goal_command"
     actor["layer_config"]["perception_pretrained"] = False
     actor["layer_config"]["perception_freeze_backbone"] = False
+    actor["layer_config"]["lstm_hidden_dim"] = 256
+    actor["layer_config"]["lstm_num_layers"] = 1
     current_groups = current["observation"]["groups"]
     root_group = current_groups.pop("actor_obs_root_contact_aware")
     root_group["terms"] = {
@@ -771,6 +773,16 @@ def test_m8_to_hmi_migration_rejects_camera_drift(tmp_path):
     current["perception"]["camera_apply_sensor_noise"] = False
 
     with pytest.raises(ValueError, match="residual actor semantic drift"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_m8_to_hmi_migration_rejects_nondefault_inert_lstm_field(tmp_path):
+    saved, current = _m8_to_hmi_command_config_pair()
+    current["algo"]["config"]["module_dict"]["actor"]["layer_config"][
+        "lstm_hidden_dim"
+    ] = 512
+
+    with pytest.raises(ValueError, match="inert MLP default"):
         validate_policy_init_checkpoint(_save(tmp_path, saved), current)
 
 

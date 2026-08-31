@@ -1005,6 +1005,24 @@ def _apply_precomputed_to_hmi_terminal_goal_migration(
     migrated["actor_module"]["layer_config"]["module_input_name"][0] = target_groups[0]
     migrated["command_observation_semantics"] = None
 
+    # Current main exposes recurrent-only defaults on every LayerConfig.  The
+    # authenticated m8 source predates those serialized fields and uses a
+    # non-recurrent MLPPerceptionEncoder, so the values cannot affect its
+    # function.  Accept only the exact current defaults and only for this MLP
+    # migration; any non-default/recurrent change remains a contract error.
+    if (
+        saved_contract["actor_module"].get("type") == "MLPPerceptionEncoder"
+        and current_contract["actor_module"].get("type") == "MLPPerceptionEncoder"
+    ):
+        for field, default in (("lstm_hidden_dim", 256), ("lstm_num_layers", 1)):
+            if field not in saved_contract["actor_module"]["layer_config"]:
+                if current_contract["actor_module"]["layer_config"].get(field) != default:
+                    raise ValueError(
+                        f"Policy-init migration {profile!r} requires the newly "
+                        f"serialized {field} to equal its inert MLP default {default}."
+                    )
+                migrated["actor_module"]["layer_config"][field] = default
+
     # Preserve every group setting and term field except the two explicitly
     # declared value producers and the renamed command group.
     migrated["observation_groups"][0]["name"] = target_groups[0]
