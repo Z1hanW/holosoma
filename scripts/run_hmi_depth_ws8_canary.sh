@@ -20,6 +20,7 @@ EXTERNAL_EXPECTED_CLIP_COUNT=${HMI_CANARY_EXPECTED_CLIP_COUNT:-}
 POLICY_INIT_MIGRATION=${HMI_CANARY_POLICY_INIT_MIGRATION:-}
 POLICY_INIT_RESET_NOISE_STD=${HMI_CANARY_POLICY_INIT_RESET_NOISE_STD:-}
 M8_LARGE_ACTOR=${HMI_CANARY_M8_LARGE_ACTOR:-0}
+CANARY_ROOT_BASE=${HMI_CANARY_ROOT_BASE:-/data/holosoma_canaries}
 
 if [[ -z ${EXPECTED_COMMIT} || ! ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
@@ -128,7 +129,11 @@ fi
 source "${SOURCE_ROOT}/scripts/source_isaacsim_setup.sh"
 source "${SOURCE_ROOT}/scripts/gpu_launch_defaults.sh"
 
-RUN_ROOT=/data/holosoma_canaries/${RUN_LABEL}_${EXPECTED_COMMIT:0:12}
+[[ ${CANARY_ROOT_BASE} == /* && ! -L ${CANARY_ROOT_BASE} ]] || {
+  echo "[ERROR] HMI_CANARY_ROOT_BASE must be one absolute non-symlink directory" >&2
+  exit 2
+}
+RUN_ROOT=${CANARY_ROOT_BASE}/${RUN_LABEL}_${EXPECTED_COMMIT:0:12}
 mkdir -p "${RUN_ROOT}"
 write_exit_code() {
   local rc=$?
