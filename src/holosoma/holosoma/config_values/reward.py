@@ -11,6 +11,8 @@ from holosoma.config_values.wbt.g1.reward import (
     g1_29dof_wbt_reward_w_object_hybrid_stage2,
     g1_29dof_wbt_reward_w_object_hybrid_velocity,
     g1_29dof_wbt_reward_w_object_hmi,
+    g1_29dof_wbt_reward_w_object_hmi_object_xy,
+    g1_29dof_wbt_reward_w_object_hmi_root_xy,
     g1_29dof_wbt_reward_w_object_r2s_contact_guidance,
     g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance,
     g1_29dof_wbt_reward_w_object_extend,

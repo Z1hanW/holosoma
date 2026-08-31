@@ -112,6 +112,16 @@ _hmi_stage2_object_goal_noise = HMIGoalPoseNoiseConfig(
     rpy_clip=[0.001, 0.001, 0.8],
 )
 
+# XY-only HMI ablations deliberately remove every vertical/orientation goal
+# perturbation.  The actor receives two scalars, and success is evaluated in
+# the same two-dimensional space.
+_hmi_stage2_xy_goal_noise = HMIGoalPoseNoiseConfig(
+    pos_std_xyz=[0.5, 0.5, 0.0],
+    pos_clip_xyz=[1.0, 1.0, 0.0],
+    rpy_std=[0.0, 0.0, 0.0],
+    rpy_clip=[0.0, 0.0, 0.0],
+)
+
 _hmi_stage1_cfg = HMIMotionConfig(
     track_ratio=1.0,
     env_partition_seed=0,
@@ -127,6 +137,20 @@ _hmi_stage2_cfg = replace(
     _hmi_stage1_cfg,
     track_ratio=0.5,
     object_goal_noise=_hmi_stage2_object_goal_noise,
+)
+
+_hmi_stage2_object_xy_cfg = replace(
+    _hmi_stage2_cfg,
+    actor_interface_semantics="actor93_depth5046_action29_terminal_object_xy_v2",
+    goal_target="object_xy",
+    object_goal_noise=_hmi_stage2_xy_goal_noise,
+)
+
+_hmi_stage2_root_xy_cfg = replace(
+    _hmi_stage2_cfg,
+    actor_interface_semantics="actor93_depth5046_action29_terminal_root_xy_v2",
+    goal_target="root_xy",
+    root_goal_noise=_hmi_stage2_xy_goal_noise,
 )
 
 _hmi_initial_pose_noise = replace(
@@ -158,6 +182,16 @@ motion_config_w_object_hmi_depth_stage1 = replace(
 motion_config_w_object_hmi_depth_stage2 = replace(
     motion_config_w_object_hmi_depth_stage1,
     hmi=_hmi_stage2_cfg,
+)
+
+motion_config_w_object_hmi_depth_stage2_object_xy = replace(
+    motion_config_w_object_hmi_depth_stage1,
+    hmi=_hmi_stage2_object_xy_cfg,
+)
+
+motion_config_w_object_hmi_depth_stage2_root_xy = replace(
+    motion_config_w_object_hmi_depth_stage1,
+    hmi=_hmi_stage2_root_xy_cfg,
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(
@@ -286,6 +320,30 @@ g1_29dof_wbt_command_w_object_hmi_depth_stage2 = replace(
     },
 )
 
+g1_29dof_wbt_command_w_object_hmi_depth_stage2_object_xy = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_hmi_depth_stage2_object_xy
+            },
+        )
+    },
+)
+
+g1_29dof_wbt_command_w_object_hmi_depth_stage2_root_xy = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_hmi_depth_stage2_root_xy
+            },
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_motion_tracking",
@@ -297,4 +355,6 @@ __all__ = [
     "g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift",
     "g1_29dof_wbt_command_w_object_hmi_depth_stage1",
     "g1_29dof_wbt_command_w_object_hmi_depth_stage2",
+    "g1_29dof_wbt_command_w_object_hmi_depth_stage2_object_xy",
+    "g1_29dof_wbt_command_w_object_hmi_depth_stage2_root_xy",
 ]

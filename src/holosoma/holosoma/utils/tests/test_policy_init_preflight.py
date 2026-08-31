@@ -15,8 +15,11 @@ from holosoma.utils.policy_init_preflight import (
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
     PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
+    PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION,
+    PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION,
     TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
     canonical_actor_contract,
+    migrate_policy_init_actor_state_dict,
     required_policy_init_terminal_target_from_env,
     validate_policy_init_checkpoint,
     validate_policy_init_terminal_source_payload,
@@ -585,7 +588,14 @@ def _contact_aware_command_config(*, mode: str, drop_exclusive: bool) -> dict:
     return config
 
 
-def _m8_to_hmi_command_config_pair() -> tuple[dict, dict]:
+def _m8_to_hmi_command_config_pair(
+    *,
+    target_term_name: str = "hmi_object_goal_command",
+    target_term_func: str = (
+        "holosoma.managers.observation.terms.wbt:hmi_object_goal_command"
+    ),
+    migration_profile: str = PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
+) -> tuple[dict, dict]:
     saved = _config()
     saved["algo"]["config"]["module_dict"]["actor"]["input_dim"] = [
         "actor_obs_root_contact_aware",
@@ -656,9 +666,7 @@ def _m8_to_hmi_command_config_pair() -> tuple[dict, dict]:
     current_groups = current["observation"]["groups"]
     root_group = current_groups.pop("actor_obs_root_contact_aware")
     root_group["terms"] = {
-        "hmi_object_goal_command": _term(
-            "holosoma.managers.observation.terms.wbt:hmi_object_goal_command"
-        )
+        target_term_name: _term(target_term_func)
     }
     current_groups["actor_obs_hmi_goal_command"] = root_group
     current_groups["actor_obs_drop_button"]["terms"] = {
@@ -669,7 +677,7 @@ def _m8_to_hmi_command_config_pair() -> tuple[dict, dict]:
     current["perception"]["encoder_pretrained"] = False
     current["perception"]["encoder_freeze_backbone"] = False
     current["training"]["policy_init_actor_contract_migration"] = (
-        PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION
+        migration_profile
     )
     return saved, current
 
@@ -696,6 +704,66 @@ def test_policy_init_accepts_explicit_m8_precomputed_to_hmi_goal_migration(tmp_p
     saved, current = _m8_to_hmi_command_config_pair()
 
     validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+@pytest.mark.parametrize(
+    ("term_name", "profile"),
+    (
+        (
+            "hmi_object_xy_goal_command",
+            PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION,
+        ),
+        (
+            "hmi_root_xy_goal_command",
+            PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION,
+        ),
+    ),
+)
+def test_policy_init_accepts_explicit_m8_to_hmi_xy_migration(
+    tmp_path, term_name, profile
+):
+    saved, current = _m8_to_hmi_command_config_pair(
+        target_term_name=term_name,
+        target_term_func=f"holosoma.managers.observation.terms.wbt:{term_name}",
+        migration_profile=profile,
+    )
+
+    validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    (
+        PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION,
+        PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION,
+    ),
+)
+def test_hmi_xy_actor_state_migration_removes_only_yaw_column(profile):
+    source_weight = torch.arange(4 * 7, dtype=torch.float32).reshape(4, 7)
+    source = {
+        "actor_module.module.0.weight": source_weight,
+        "actor_module.module.0.bias": torch.arange(4, dtype=torch.float32),
+        "std": torch.ones(2),
+    }
+    target = {
+        "actor_module.module.0.weight": torch.zeros((4, 6)),
+        "actor_module.module.0.bias": torch.zeros(4),
+        "std": torch.zeros(2),
+    }
+    current = {"training": {"policy_init_actor_contract_migration": profile}}
+
+    migrated = migrate_policy_init_actor_state_dict(
+        source,
+        current_config=current,
+        reference_state=target,
+    )
+
+    assert torch.equal(
+        migrated["actor_module.module.0.weight"],
+        torch.cat((source_weight[:, :2], source_weight[:, 3:]), dim=1),
+    )
+    assert torch.equal(migrated["actor_module.module.0.bias"], source["actor_module.module.0.bias"])
+    assert torch.equal(migrated["std"], source["std"])
 
 
 def test_m8_to_hmi_migration_rejects_camera_drift(tmp_path):

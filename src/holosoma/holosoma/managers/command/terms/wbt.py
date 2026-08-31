@@ -3136,6 +3136,8 @@ class MotionCommand(CommandTermBase):
         self.hmi_exact_goal_object_quat_w: torch.Tensor | None = None
         self.hmi_goal_object_pos_w: torch.Tensor | None = None
         self.hmi_goal_object_quat_w: torch.Tensor | None = None
+        self.hmi_exact_goal_xy_pos_w: torch.Tensor | None = None
+        self.hmi_goal_xy_pos_w: torch.Tensor | None = None
         self.hmi_goal_version: torch.Tensor | None = None
         self.hmi_goal_reached: torch.Tensor | None = None
         self.hmi_goal_noise_scale: torch.Tensor | None = None
@@ -3316,11 +3318,13 @@ class MotionCommand(CommandTermBase):
         if cfg is None:
             return None
         goal_noise = cfg.object_goal_noise
+        root_goal_noise = cfg.root_goal_noise
         return {
-            "version": 1,
+            "version": 2,
             "upstream_repository": str(cfg.upstream_repository),
             "upstream_commit": str(cfg.upstream_commit),
             "interface": str(cfg.actor_interface_semantics),
+            "goal_target": str(cfg.goal_target),
             "track_ratio": float(cfg.track_ratio),
             "env_partition_seed": int(cfg.env_partition_seed),
             "gen_start_at_timestep_zero_prob": (
@@ -3333,6 +3337,12 @@ class MotionCommand(CommandTermBase):
                 "pos_clip_xyz": [float(value) for value in goal_noise.pos_clip_xyz],
                 "rpy_std": [float(value) for value in goal_noise.rpy_std],
                 "rpy_clip": [float(value) for value in goal_noise.rpy_clip],
+            },
+            "root_goal_noise": {
+                "pos_std_xyz": [float(value) for value in root_goal_noise.pos_std_xyz],
+                "pos_clip_xyz": [float(value) for value in root_goal_noise.pos_clip_xyz],
+                "rpy_std": [float(value) for value in root_goal_noise.rpy_std],
+                "rpy_clip": [float(value) for value in root_goal_noise.rpy_clip],
             },
             "gen_step_zero_root_pos_std_xyz": [
                 float(value) for value in cfg.gen_step_zero_root_pos_std_xyz
@@ -4401,6 +4411,31 @@ class MotionCommand(CommandTermBase):
         gen_env_ids = torch.where(self.get_hmi_gen_env_mask())[0]
         if gen_env_ids.numel() == 0:
             return
+        assert self.hmi_cfg is not None
+        if self.hmi_cfg.goal_target in {"object_xy", "root_xy"}:
+            if (
+                self.hmi_exact_goal_xy_pos_w is None
+                or self.hmi_goal_xy_pos_w is None
+                or self.hmi_goal_version is None
+            ):
+                raise RuntimeError("HMI XY goal buffers are not initialized.")
+            noise_cfg = (
+                self.hmi_cfg.object_goal_noise
+                if self.hmi_cfg.goal_target == "object_xy"
+                else self.hmi_cfg.root_goal_noise
+            )
+            pos_noise, _ = self._sample_hmi_goal_noise(
+                int(gen_env_ids.numel()), noise_cfg
+            )
+            if torch.any(pos_noise[:, 2] != 0.0):
+                raise RuntimeError("HMI XY goal noise produced a non-zero Z component.")
+            self.hmi_goal_xy_pos_w[gen_env_ids] = (
+                self.hmi_exact_goal_xy_pos_w[gen_env_ids] + pos_noise
+            )
+            self.hmi_goal_version[gen_env_ids] += 1
+            if self.hmi_goal_reached is not None:
+                self.hmi_goal_reached[gen_env_ids] = False
+            return
         if (
             self.hmi_exact_goal_object_pos_w is None
             or self.hmi_exact_goal_object_quat_w is None
@@ -4409,7 +4444,6 @@ class MotionCommand(CommandTermBase):
             or self.hmi_goal_version is None
         ):
             raise RuntimeError("HMI goal buffers are not initialized.")
-        assert self.hmi_cfg is not None
         pos_noise, quat_noise = self._sample_hmi_goal_noise(
             int(gen_env_ids.numel()), self.hmi_cfg.object_goal_noise
         )
@@ -4531,6 +4565,10 @@ class MotionCommand(CommandTermBase):
 
         if not self.hmi_enabled():
             return
+        assert self.hmi_cfg is not None
+        if self.hmi_cfg.goal_target in {"object_xy", "root_xy"}:
+            self._refresh_hmi_terminal_xy_goals(env_ids)
+            return
         if (
             self.hmi_exact_goal_object_pos_w is None
             or self.hmi_exact_goal_object_quat_w is None
@@ -4539,7 +4577,6 @@ class MotionCommand(CommandTermBase):
             or self.hmi_goal_version is None
         ):
             raise RuntimeError("HMI goal buffers are not initialized.")
-        assert self.hmi_cfg is not None
         clip_ids = self.clip_ids[env_ids]
         final_indices = (
             self.motion.clip_offsets[clip_ids]
@@ -4576,6 +4613,48 @@ class MotionCommand(CommandTermBase):
             )
         self.hmi_goal_version[env_ids] += 1
 
+    def _refresh_hmi_terminal_xy_goals(self, env_ids: torch.Tensor) -> None:
+        """Bind XY-only object/root goals to the active clip's terminal frame."""
+
+        if (
+            self.hmi_cfg is None
+            or self.hmi_cfg.goal_target not in {"object_xy", "root_xy"}
+            or self.hmi_exact_goal_xy_pos_w is None
+            or self.hmi_goal_xy_pos_w is None
+            or self.hmi_goal_version is None
+        ):
+            raise RuntimeError("HMI terminal XY goal buffers/config are not initialized.")
+        clip_ids = self.clip_ids[env_ids]
+        final_indices = (
+            self.motion.clip_offsets[clip_ids]
+            + self.motion.clip_lengths[clip_ids]
+            - 1
+        )
+        if self.hmi_cfg.goal_target == "object_xy":
+            exact_pos = self.motion.object_pos_w[final_indices]
+            noise_cfg = self.hmi_cfg.object_goal_noise
+        else:
+            exact_pos = self.motion.body_pos_w[final_indices, self.ref_body_index]
+            noise_cfg = self.hmi_cfg.root_goal_noise
+        if self.motion_cfg.align_motion_to_init_yaw:
+            exact_pos = self._apply_motion_alignment_pos(exact_pos, env_ids)
+        else:
+            exact_pos = exact_pos + self._get_env_offsets(env_ids)
+
+        self.hmi_exact_goal_xy_pos_w[env_ids] = exact_pos
+        self.hmi_goal_xy_pos_w[env_ids] = exact_pos
+        gen_env_ids = env_ids[self.get_hmi_gen_env_mask()[env_ids]]
+        if gen_env_ids.numel() > 0:
+            pos_noise, _ = self._sample_hmi_goal_noise(
+                int(gen_env_ids.numel()), noise_cfg
+            )
+            if torch.any(pos_noise[:, 2] != 0.0):
+                raise RuntimeError("HMI XY goal noise produced a non-zero Z component.")
+            self.hmi_goal_xy_pos_w[gen_env_ids] = (
+                self.hmi_exact_goal_xy_pos_w[gen_env_ids] + pos_noise
+            )
+        self.hmi_goal_version[env_ids] += 1
+
     def get_hmi_object_goal_command(self) -> torch.Tensor:
         """Return terminal object ``[x, y, yaw]`` in the current robot heading frame."""
 
@@ -4604,6 +4683,40 @@ class MotionCommand(CommandTermBase):
             - calc_heading(self.robot_ref_quat_w)
         )
         return torch.cat((goal_delta_heading[:, :2], goal_yaw.unsqueeze(-1)), dim=-1)
+
+    def get_hmi_xy_goal_command(self, *, expected_target: str) -> torch.Tensor:
+        """Return an XY-only terminal goal in the current robot-heading frame."""
+
+        if (
+            not self.hmi_enabled()
+            or self.hmi_cfg is None
+            or self.hmi_goal_xy_pos_w is None
+        ):
+            raise RuntimeError("HMI XY goal command requested before initialization.")
+        if expected_target not in {"object_xy", "root_xy"}:
+            raise ValueError(f"Unsupported HMI XY expected_target={expected_target!r}.")
+        if self.hmi_cfg.goal_target != expected_target:
+            raise RuntimeError(
+                "HMI XY observation/command mismatch: "
+                f"expected={expected_target!r}, configured={self.hmi_cfg.goal_target!r}."
+            )
+        if getattr(self, "manual_control_enabled", False):
+            actual_semantics = getattr(
+                self,
+                "_manual_forward_after_lift_command_semantics",
+                "legacy_constant_robot_heading_frame",
+            )
+            if actual_semantics != "legacy_constant_robot_heading_frame":
+                raise RuntimeError(
+                    "Manual HMI evaluation command semantics mismatch: "
+                    f"actual={actual_semantics!r}."
+                )
+            if self.manual_xy_rel is None:
+                raise RuntimeError("Manual HMI XY command tensor is not initialized.")
+            return self.manual_xy_rel
+        heading_inv = calc_heading_quat_inv(self.robot_ref_quat_w, w_last=True)
+        goal_delta_w = self.hmi_goal_xy_pos_w - self.robot_ref_pos_w
+        return quat_apply(heading_inv, goal_delta_w, w_last=True)[:, :2]
 
     def _apply_hmi_step_zero_root_noise(
         self,
@@ -8470,6 +8583,12 @@ class MotionCommand(CommandTermBase):
         self._align_quat[:, 3] = 1.0
         self._align_pos = torch.zeros(self.num_envs, 3, device=self.device)
         if self.hmi_enabled():
+            self.hmi_exact_goal_xy_pos_w = torch.zeros(
+                (self.num_envs, 3), device=self.device, dtype=torch.float32
+            )
+            self.hmi_goal_xy_pos_w = torch.zeros_like(
+                self.hmi_exact_goal_xy_pos_w
+            )
             self.hmi_exact_goal_object_pos_w = torch.zeros(
                 (self.num_envs, 3), device=self.device, dtype=torch.float32
             )
@@ -8505,6 +8624,8 @@ class MotionCommand(CommandTermBase):
             )
             self.hmi_last_curriculum_update_iteration = 0
         else:
+            self.hmi_exact_goal_xy_pos_w = None
+            self.hmi_goal_xy_pos_w = None
             self.hmi_exact_goal_object_pos_w = None
             self.hmi_exact_goal_object_quat_w = None
             self.hmi_goal_object_pos_w = None
@@ -9241,7 +9362,24 @@ class MotionCommand(CommandTermBase):
             gen_mask = self.get_hmi_gen_env_mask()
             self.metrics["hmi/track_env"] = track_mask.to(dtype=torch.float32)
             self.metrics["hmi/gen_env"] = gen_mask.to(dtype=torch.float32)
-            if self.hmi_goal_object_pos_w is not None:
+            if (
+                self.hmi_cfg is not None
+                and self.hmi_cfg.goal_target in {"object_xy", "root_xy"}
+                and self.hmi_goal_xy_pos_w is not None
+            ):
+                current_goal_source = (
+                    self.simulator_object_pos_w
+                    if self.hmi_cfg.goal_target == "object_xy"
+                    else self.robot_ref_pos_w
+                )
+                goal_xy_error = torch.linalg.vector_norm(
+                    self.hmi_goal_xy_pos_w[:, :2] - current_goal_source[:, :2],
+                    dim=-1,
+                )
+                self.metrics[f"hmi/{self.hmi_cfg.goal_target}_goal_error"] = (
+                    goal_xy_error
+                )
+            elif self.hmi_goal_object_pos_w is not None:
                 goal_pos_error = torch.linalg.vector_norm(
                     self.hmi_goal_object_pos_w - self.simulator_object_pos_w,
                     dim=-1,

@@ -1216,6 +1216,20 @@ def hmi_object_goal_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     return motion_command.get_hmi_object_goal_command()
 
 
+def hmi_object_xy_goal_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Terminal object XY displacement in the current robot-heading frame."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_hmi_xy_goal_command(expected_target="object_xy")
+
+
+def hmi_root_xy_goal_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Terminal reference-body XY displacement in the robot-heading frame."""
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_hmi_xy_goal_command(expected_target="root_xy")
+
+
 def hmi_zero_drop_button(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Preserve the one-dimensional drop slot without leaking reference phase."""
 

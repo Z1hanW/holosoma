@@ -15,6 +15,8 @@ from holosoma.config_types.reward import RewardTermCfg
 from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_w_object_hmi_depth_stage1,
     g1_29dof_wbt_w_object_hmi_depth_stage2,
+    g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy,
+    g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy,
 )
 from holosoma.managers.command.terms.wbt import (
     MotionCommand,
@@ -22,7 +24,10 @@ from holosoma.managers.command.terms.wbt import (
     build_fixed_hmi_track_mask,
 )
 from holosoma.managers.observation.terms.wbt import _mask_hmi_generation_reference_rows
-from holosoma.managers.reward.terms.wbt import HMIObjectGoalReachedOnce
+from holosoma.managers.reward.terms.wbt import (
+    HMIObjectGoalReachedOnce,
+    HMIXYGoalReachedOnce,
+)
 from holosoma.managers.termination.terms.wbt import BodyGroupProximity
 from holosoma.perception.config_utils import apply_perception_overrides
 from holosoma.utils.inference_helpers import (
@@ -137,6 +142,54 @@ def test_hmi_depth_presets_keep_the_production_actor_interface():
         assert bad_tracking["bad_object_ori_threshold"] == 0.8
 
     assert not inspect.isabstract(BodyGroupProximity)
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "goal_target", "term_name", "interface"),
+    (
+        (
+            g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy,
+            "object_xy",
+            "hmi_object_xy_goal_command",
+            "actor93_depth5046_action29_terminal_object_xy_v2",
+        ),
+        (
+            g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy,
+            "root_xy",
+            "hmi_root_xy_goal_command",
+            "actor93_depth5046_action29_terminal_root_xy_v2",
+        ),
+    ),
+)
+def test_hmi_xy_presets_remove_yaw_from_goal_observation_and_reward(
+    raw_config, goal_target, term_name, interface
+):
+    config = apply_perception_overrides(raw_config)
+    motion_config = config.command.setup_terms["motion_command"].params[
+        "motion_config"
+    ]
+    hmi = motion_config.hmi
+    group = config.observation.groups["actor_obs_hmi_goal_command"]
+
+    assert hmi.goal_target == goal_target
+    assert hmi.actor_interface_semantics == interface
+    assert list(group.terms) == [term_name]
+    noise = hmi.object_goal_noise if goal_target == "object_xy" else hmi.root_goal_noise
+    assert noise.pos_std_xyz == [0.5, 0.5, 0.0]
+    assert noise.pos_clip_xyz == [1.0, 1.0, 0.0]
+    assert noise.rpy_std == [0.0, 0.0, 0.0]
+    assert noise.rpy_clip == [0.0, 0.0, 0.0]
+    sparse_terms = [
+        term
+        for name, term in config.reward.terms.items()
+        if name.startswith(f"hmi_{goal_target}_goal_reached_once")
+    ]
+    assert len(sparse_terms) == 1
+    assert sparse_terms[0].params == {
+        "goal_target": goal_target,
+        "pos_threshold": 0.2,
+        "bonus": 3.0,
+    }
 
 
 def test_hmi_default_motion_bank_has_complete_object_metadata():
@@ -330,6 +383,42 @@ def test_hmi_goal_command_uses_manual_eval_override_without_changing_native_mode
         command.get_hmi_object_goal_command()
 
 
+@pytest.mark.parametrize("goal_target", ("object_xy", "root_xy"))
+def test_hmi_xy_goal_command_has_exactly_two_heading_frame_components(goal_target):
+    command = _minimal_hmi_command(torch.ones(2, dtype=torch.bool))
+    interface = (
+        "actor93_depth5046_action29_terminal_object_xy_v2"
+        if goal_target == "object_xy"
+        else "actor93_depth5046_action29_terminal_root_xy_v2"
+    )
+    command.hmi_cfg = HMIMotionConfig(
+        actor_interface_semantics=interface,
+        goal_target=goal_target,
+    )
+    command.hmi_goal_xy_pos_w = torch.tensor(
+        [[1.0, 2.0, 9.0], [-3.0, 4.0, -9.0]], dtype=torch.float32
+    )
+    command.ref_body_index = 0
+    command._env = SimpleNamespace(
+        simulator=SimpleNamespace(
+            _rigid_body_pos=torch.zeros((2, 1, 3), dtype=torch.float32),
+            _rigid_body_rot=torch.tensor(
+                [[[0.0, 0.0, 0.0, 1.0]], [[0.0, 0.0, 0.0, 1.0]]],
+                dtype=torch.float32,
+            ),
+        )
+    )
+    command.manual_control_enabled = False
+
+    value = command.get_hmi_xy_goal_command(expected_target=goal_target)
+
+    assert value.shape == (2, 2)
+    assert torch.equal(value, torch.tensor([[1.0, 2.0], [-3.0, 4.0]]))
+    wrong_target = "root_xy" if goal_target == "object_xy" else "object_xy"
+    with pytest.raises(RuntimeError, match="observation/command mismatch"):
+        command.get_hmi_xy_goal_command(expected_target=wrong_target)
+
+
 def test_hmi_sparse_goal_bonus_is_gen_only_and_once_per_goal_version():
     track_mask = torch.tensor([True, False, False, True])
     command = _minimal_hmi_command(track_mask)
@@ -366,6 +455,56 @@ def test_hmi_sparse_goal_bonus_is_gen_only_and_once_per_goal_version():
     assert torch.equal(first, torch.tensor([0.0, 150.0, 0.0, 0.0]))
     assert torch.count_nonzero(second) == 0
     assert torch.equal(third, torch.tensor([0.0, 150.0, 0.0, 0.0]))
+
+
+@pytest.mark.parametrize("goal_target", ("object_xy", "root_xy"))
+def test_hmi_xy_sparse_goal_ignores_z_and_orientation(goal_target):
+    track_mask = torch.tensor([True, False, False, True])
+    command = _minimal_hmi_command(track_mask)
+    interface = (
+        "actor93_depth5046_action29_terminal_object_xy_v2"
+        if goal_target == "object_xy"
+        else "actor93_depth5046_action29_terminal_root_xy_v2"
+    )
+    command.hmi_cfg = HMIMotionConfig(
+        actor_interface_semantics=interface,
+        goal_target=goal_target,
+    )
+    command.hmi_goal_xy_pos_w = torch.tensor(
+        [[0.0, 0.0, 50.0], [0.0, 0.0, 50.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    command.hmi_goal_version = torch.ones(4, dtype=torch.long)
+    command.motion = SimpleNamespace(has_object=True)
+    command._simulator_object_state_snapshot = torch.zeros((4, 13), dtype=torch.float32)
+    command._simulator_object_state_snapshot[:, 6] = 1.0
+    command._simulator_object_state_snapshot_ready = True
+    command.ref_body_index = 0
+    command._env = SimpleNamespace(
+        simulator=SimpleNamespace(
+            _rigid_body_pos=torch.zeros((4, 1, 3), dtype=torch.float32),
+            _rigid_body_rot=torch.tensor(
+                [[[0.0, 0.0, 0.0, 1.0]]] * 4, dtype=torch.float32
+            ),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=4,
+        device=torch.device("cpu"),
+        dt=0.02,
+        command_manager=_CommandManager(command),
+    )
+    term = HMIXYGoalReachedOnce(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:HMIXYGoalReachedOnce",
+            params={"goal_target": goal_target, "pos_threshold": 0.2, "bonus": 3.0},
+        ),
+        env,
+    )
+
+    reward = term(env)
+
+    assert torch.equal(reward, torch.tensor([0.0, 150.0, 0.0, 0.0]))
 
 
 def test_hmi_depth_actor_real_onnx_checker_and_ort_parity(tmp_path):
@@ -409,3 +548,47 @@ def test_hmi_depth_actor_real_onnx_checker_and_ort_parity(tmp_path):
     assert report["pytorch_vs_ort"] is True
     assert report["input_names"] == ["actor_obs", "perception_obs"]
     assert report["output_names"] == ["action"]
+
+
+@pytest.mark.parametrize(
+    "raw_config",
+    (
+        g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy,
+        g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy,
+    ),
+)
+def test_hmi_xy_actor_is_93d_and_has_real_onnx_parity(tmp_path, raw_config):
+    config = apply_perception_overrides(raw_config)
+    obs_dims = {
+        "actor_obs_hmi_goal_command": 2,
+        "actor_obs_drop_button": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 90,
+        "perception_obs": 58 * 87,
+    }
+    actor = PPOActorEncoder(
+        obs_dim_dict=obs_dims,
+        module_config_dict=config.algo.config.module_dict.actor,
+        num_actions=29,
+        init_noise_std=1.0,
+        history_length={name: 1 for name in obs_dims},
+    )
+    wrapper = _HMIActorONNXWrapper(actor).eval()
+    assert actor.actor_module.module[0].in_features == 93 + 32
+    example = {
+        "actor_obs": torch.zeros((1, 93), dtype=torch.float32),
+        "perception_obs": torch.zeros((1, 58 * 87), dtype=torch.float32),
+    }
+    onnx_path = tmp_path / f"{config.training.name}.onnx"
+    export_policy_as_onnx(
+        wrapper,
+        str(onnx_path),
+        example,
+        perception_input_name="perception_obs",
+    )
+    report = validate_exported_policy_onnx(
+        wrapper=wrapper,
+        onnx_file_path=str(onnx_path),
+        example_obs_dict=example,
+        perception_input_name="perception_obs",
+    )
+    assert report["pytorch_vs_ort"] is True

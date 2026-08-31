@@ -149,8 +149,13 @@ class HMIMotionConfig:
         "c353731999b3578c41ad5a00f896415b45e6a9f5"
     ] = "c353731999b3578c41ad5a00f896415b45e6a9f5"
     actor_interface_semantics: Literal[
-        "actor94_depth5046_action29_terminal_object_xy_yaw_v1"
+        "actor94_depth5046_action29_terminal_object_xy_yaw_v1",
+        "actor93_depth5046_action29_terminal_object_xy_v2",
+        "actor93_depth5046_action29_terminal_root_xy_v2",
     ] = "actor94_depth5046_action29_terminal_object_xy_yaw_v1"
+    goal_target: Literal["object_xy_yaw", "object_xy", "root_xy"] = (
+        "object_xy_yaw"
+    )
     track_ratio: Annotated[
         float,
         Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
@@ -161,6 +166,7 @@ class HMIMotionConfig:
         Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False),
     ] | None = 0.1
     object_goal_noise: HMIGoalPoseNoiseConfig = field(default_factory=HMIGoalPoseNoiseConfig)
+    root_goal_noise: HMIGoalPoseNoiseConfig = field(default_factory=HMIGoalPoseNoiseConfig)
     gen_step_zero_root_pos_std_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     gen_step_zero_root_pos_clip_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     gen_step_zero_root_rpy_std: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -196,6 +202,33 @@ class HMIMotionConfig:
     ] = 0.5
 
     def __post_init__(self) -> None:
+        expected_interface = {
+            "object_xy_yaw": "actor94_depth5046_action29_terminal_object_xy_yaw_v1",
+            "object_xy": "actor93_depth5046_action29_terminal_object_xy_v2",
+            "root_xy": "actor93_depth5046_action29_terminal_root_xy_v2",
+        }[self.goal_target]
+        if self.actor_interface_semantics != expected_interface:
+            raise ValueError(
+                "HMIMotionConfig goal_target/interface mismatch: "
+                f"goal_target={self.goal_target!r}, "
+                f"actor_interface_semantics={self.actor_interface_semantics!r}, "
+                f"expected={expected_interface!r}."
+            )
+        if self.goal_target in {"object_xy", "root_xy"}:
+            xy_noise = (
+                self.object_goal_noise
+                if self.goal_target == "object_xy"
+                else self.root_goal_noise
+            )
+            if (
+                float(xy_noise.pos_std_xyz[2]) != 0.0
+                or float(xy_noise.pos_clip_xyz[2]) != 0.0
+                or any(float(value) != 0.0 for value in xy_noise.rpy_std)
+                or any(float(value) != 0.0 for value in xy_noise.rpy_clip)
+            ):
+                raise ValueError(
+                    "HMI XY-only goal interfaces require zero Z and RPY goal noise."
+                )
         for name in (
             "gen_step_zero_root_pos_std_xyz",
             "gen_step_zero_root_pos_clip_xyz",

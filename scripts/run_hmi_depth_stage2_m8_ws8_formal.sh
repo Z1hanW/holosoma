@@ -4,8 +4,8 @@ set -euo pipefail
 # Formal single-node HMI Stage 2 initialized from one authenticated m8 actor.
 # The node must execute this file from a clean exact-commit clone fetched from
 # origin. Scientific assets are separately SHA-bound and contain no source.
-if [[ $# -ne 17 ]]; then
-  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <rule90-manifest> <rule90-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256> <policy-init-pt> <policy-init-sha256> <policy-pair-json> <policy-pair-sha256>" >&2
+if [[ $# -ne 18 ]]; then
+  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <rule90-manifest> <rule90-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256> <policy-init-pt> <policy-init-sha256> <policy-pair-json> <policy-pair-sha256> <object_xy|root_xy>" >&2
   exit 2
 fi
 
@@ -27,9 +27,10 @@ POLICY_INIT_CHECKPOINT=${14}
 POLICY_INIT_SHA256=${15}
 POLICY_PAIR_JSON=${16}
 POLICY_PAIR_SHA256=${17}
+GOAL_TARGET=${18}
 
 readonly ORIGIN_URL=https://github.com/Z1hanW/holosoma
-readonly REMOTE_REF=origin/experiment/hmi-depth-interface
+readonly REMOTE_REF=origin/main
 readonly ENTITY=zihanw22
 readonly PROJECT=carry-any
 readonly WORLD_SIZE=8
@@ -39,7 +40,6 @@ readonly TARGET_ITERATIONS=20000
 readonly MASTER_PORT=31527
 readonly POLICY_INIT_COMPLETED_ITERATION=38999
 readonly POLICY_INIT_NEXT_ITERATION=39000
-readonly POLICY_INIT_MIGRATION=precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1
 readonly POLICY_INIT_RESET_NOISE_STD=0.45
 readonly DEFM_SUBMODULE_SHA=63ec5e1c1a9b280dcde9910b845f57e9224ebab5
 readonly POINT_TRANSFORMER_SUBMODULE_SHA=3229e9b7de1770c8ad17c316f8e349982de509f8
@@ -58,6 +58,23 @@ readonly CANONICAL_CLIP_ID=box_10
 readonly CANONICAL_NPZ_SHA256=48e9f7a95facda057193a6507bb11a8360dae52a04a1ec165a3da2bae23aee01
 readonly CANONICAL_URDF_SHA256=bb67d9630cbf35b16f6f55831d746c16aa60f76e0721b88996b1adc7b4818821
 
+case "${GOAL_TARGET}" in
+  object_xy)
+    readonly EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2-object-xy
+    readonly POLICY_INIT_MIGRATION=precomputed_turn_then_forward_to_hmi_terminal_object_xy_unfreeze_native_depth_v2
+    readonly ACTOR_INTERFACE=actor93_depth5046_action29_terminal_object_xy_v2
+    ;;
+  root_xy)
+    readonly EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2-root-xy
+    readonly POLICY_INIT_MIGRATION=precomputed_turn_then_forward_to_hmi_terminal_root_xy_unfreeze_native_depth_v2
+    readonly ACTOR_INTERFACE=actor93_depth5046_action29_terminal_root_xy_v2
+    ;;
+  *)
+    echo "[ERROR] goal target must be object_xy or root_xy, got ${GOAL_TARGET@Q}" >&2
+    exit 2
+    ;;
+esac
+
 die() { echo "[ERROR] $*" >&2; exit 2; }
 check_sha() {
   local expected=$1 path=$2 actual
@@ -75,12 +92,12 @@ done
 [[ ${SOURCE_ID} =~ ^src-[0-9a-f]{64}$ ]] || die "invalid immutable source id"
 [[ ${WANDB_RUN_ID} =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid W&B run id"
 [[ ${RUN_NAME} =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid formal run name"
-[[ ${RUN_ROOT} == /mnt/holosoma_training/* && ! -L ${RUN_ROOT} ]] || die "run root must be a non-symlink child of /mnt/holosoma_training"
+[[ ${RUN_ROOT} == /data/holosoma_training/* && ! -L ${RUN_ROOT} ]] || die "run root must be a non-symlink child of /data/holosoma_training"
 
 [[ $(git -C "${SOURCE_ROOT}" rev-parse HEAD) == "${EXPECTED_COMMIT}" ]] || die "Git HEAD mismatch"
 [[ $(git -C "${SOURCE_ROOT}" rev-parse HEAD^{tree}) == "${EXPECTED_TREE}" ]] || die "Git tree mismatch"
 [[ $(git -C "${SOURCE_ROOT}" remote get-url origin) == "${ORIGIN_URL}" ]] || die "Git origin URL mismatch"
-git -C "${SOURCE_ROOT}" fetch --quiet origin experiment/hmi-depth-interface
+git -C "${SOURCE_ROOT}" fetch --quiet origin main
 git -C "${SOURCE_ROOT}" merge-base --is-ancestor "${EXPECTED_COMMIT}" "${REMOTE_REF}" || die "commit is not reachable from required remote ref"
 git -C "${SOURCE_ROOT}" diff --quiet --ignore-submodules -- || die "tracked worktree is dirty"
 git -C "${SOURCE_ROOT}" diff --cached --quiet --ignore-submodules -- || die "Git index is dirty"
@@ -128,10 +145,11 @@ export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 "${PYTHON_BIN}" - \
   "${MOTION_VIEW}/manifest.json" "${SHARD_MANIFEST}" "${RUN_CONTRACT}" \
   "${ONNX_RECEIPT}" "${POLICY_PAIR_JSON}" "${EXPECTED_COMMIT}" "${EXPECTED_TREE}" \
-  "${WANDB_RUN_ID}" "${RUN_NAME}" "${SOURCE_ID}" "${POLICY_INIT_SHA256}" <<'PY'
+  "${WANDB_RUN_ID}" "${RUN_NAME}" "${SOURCE_ID}" "${POLICY_INIT_SHA256}" \
+  "${GOAL_TARGET}" "${POLICY_INIT_MIGRATION}" "${ACTOR_INTERFACE}" <<'PY'
 import json, sys
 (view_path, shard_path, contract_path, receipt_path, pair_path, commit, tree,
- run_id, run_name, source_id, policy_sha) = sys.argv[1:]
+ run_id, run_name, source_id, policy_sha, goal_target, migration, actor_interface) = sys.argv[1:]
 view=json.load(open(view_path, encoding="utf-8"))
 shards=json.load(open(shard_path, encoding="utf-8"))
 contract=json.load(open(contract_path, encoding="utf-8"))
@@ -150,7 +168,7 @@ assert pair["completed_iteration"] == 38999 and pair["next_iteration"] == 39000
 assert pair["pt"]["sha256"] == policy_sha
 assert pair["onnx"]["checker"] == "onnx.checker.check_model"
 assert pair["onnx"]["pytorch_vs_ort"] is True
-assert contract["semantics"] == "formal_hmi_depth_stage2_m8_policy_init"
+assert contract["semantics"] == "formal_hmi_depth_stage2_m8_policy_init_xy_only_v2"
 assert contract["git"]["commit"] == commit and contract["git"]["tree"] == tree
 assert contract["git"]["source_id"] == source_id
 assert contract["wandb"]["run_id"] == run_id and contract["wandb"]["name"] == run_name
@@ -160,11 +178,15 @@ assert training["total_environments"] == 16384 and training["target_iterations"]
 assert training["fresh"] is True and training["resume_checkpoint"] is None
 assert training["policy_init_checkpoint_sha256"] == policy_sha
 assert training["policy_init_next_iteration"] == 39000
-assert training["policy_init_actor_contract_migration"] == "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
+assert training["policy_init_actor_contract_migration"] == migration
 assert training["policy_init_reset_noise_std"] == 0.45
 assert training["export_onnx"] is True and training["contact_reward"] is False
 assert contract["hmi"]["stage"] == 2 and contract["hmi"]["track_ratio"] == 0.5
 assert contract["hmi"]["upstream_commit"] == "c353731999b3578c41ad5a00f896415b45e6a9f5"
+assert contract["hmi"]["goal_target"] == goal_target
+assert contract["hmi"]["actor_interface"] == actor_interface
+assert contract["hmi"]["goal_dimensions"] == 2
+assert contract["hmi"]["yaw_goal_enabled"] is False
 assert receipt["accepted"] is True and receipt["source_commit"] == commit
 assert receipt["world_size"] == 8 and receipt["environments_per_rank"] == 2048
 assert receipt["policy_init_sha256"] == policy_sha
@@ -296,7 +318,7 @@ HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_t
 export HOLOSOMA_TRAINING_PROVENANCE
 
 TRAIN_ARGS=(
-  exp:g1-29dof-wbt-w-object-hmi-depth-stage2 logger:wandb
+  "${EXPERIMENT_PRESET}" logger:wandb
   --training.project="${PROJECT}" --training.name="${RUN_NAME}"
   --training.num-envs="${TOTAL_ENVS}" --training.seed=42 --training.multigpu=True
   --training.export-onnx=True --training.policy-init-checkpoint="${POLICY_INIT_CHECKPOINT}"
@@ -333,7 +355,7 @@ TRAIN_ARGS=(
   --logger.base-dir="${RUN_ROOT}/training_logs"
 )
 
-echo "[INFO] formal_hmi_stage2_m8 commit=${EXPECTED_COMMIT} run=${WANDB_RUN_ID} policy_init=${POLICY_INIT_SHA256} world=8 e2048 total=16384 target=20000 track_gen=0.5/0.5 contact_reward=false export_onnx=true"
+echo "[INFO] formal_hmi_stage2_m8_xy commit=${EXPECTED_COMMIT} run=${WANDB_RUN_ID} goal=${GOAL_TARGET} actor_interface=${ACTOR_INTERFACE} policy_init=${POLICY_INIT_SHA256} world=8 e2048 total=16384 target=20000 track_gen=0.5/0.5 contact_reward=false export_onnx=true"
 "${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${WORLD_SIZE}" --master_port="${MASTER_PORT}" \
   "${SOURCE_ROOT}/src/holosoma/holosoma/train_agent_rank_visible.py" "${TRAIN_ARGS[@]}" \
   2>&1 | tee "${RUN_ROOT}/logs/formal_console.log"

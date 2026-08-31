@@ -46,6 +46,17 @@ TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION = (
 PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION = (
     "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
 )
+PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION = (
+    "precomputed_turn_then_forward_to_hmi_terminal_object_xy_unfreeze_native_depth_v2"
+)
+PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION = (
+    "precomputed_turn_then_forward_to_hmi_terminal_root_xy_unfreeze_native_depth_v2"
+)
+_PRECOMPUTED_TO_HMI_MIGRATIONS = {
+    PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
+    PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION,
+    PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION,
+}
 
 
 def allow_legacy_unverified_policy_load() -> bool:
@@ -786,7 +797,7 @@ def _actor_contract_migration_profile(
         )
     if profile not in {
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
-        PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
+        *_PRECOMPUTED_TO_HMI_MIGRATIONS,
     }:
         raise ValueError(
             f"Unsupported training.{field_name} profile: "
@@ -810,7 +821,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
     drop becomes exclusive.  Any additional drift remains fail-closed.
     """
 
-    if profile == PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION:
+    if profile in _PRECOMPUTED_TO_HMI_MIGRATIONS:
         _apply_precomputed_to_hmi_terminal_goal_migration(
             saved_contract,
             current_contract,
@@ -879,17 +890,19 @@ def _apply_precomputed_to_hmi_terminal_goal_migration(
     *,
     profile: str,
 ) -> None:
-    """Audit the equal-width m8 command-slot to HMI goal-slot migration.
+    """Audit the m8 command-slot to HMI terminal-goal migration.
 
     The source actor consumes the three-scalar precomputed root command and a
     reference drop button.  HMI Stage 2 deliberately reuses those four tensor
     slots for a terminal object goal and a constant-zero drop value.  The
     native far-tracking CNN is also unfrozen under the current implementation;
-    its authenticated source weights are still loaded strictly.  No camera,
-    proprioception, robot-control, action, or tensor-topology drift is allowed.
+    its authenticated source weights are still loaded strictly.  XY-only v2
+    targets remove only the third command (yaw) input column in a separately
+    validated state migration.  No camera, proprioception, robot-control,
+    action, or other tensor-topology drift is allowed.
     """
 
-    if profile != PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION:
+    if profile not in _PRECOMPUTED_TO_HMI_MIGRATIONS:
         raise AssertionError(f"Unhandled HMI migration profile: {profile!r}")
 
     expected_source_command = {
@@ -952,11 +965,22 @@ def _apply_precomputed_to_hmi_terminal_goal_migration(
             "holosoma.managers.observation.terms.wbt:drop_button",
         ),
     )
-    expected_target_terms = (
-        (
+    target_command_term = {
+        PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION: (
             "hmi_object_goal_command",
             "holosoma.managers.observation.terms.wbt:hmi_object_goal_command",
         ),
+        PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION: (
+            "hmi_object_xy_goal_command",
+            "holosoma.managers.observation.terms.wbt:hmi_object_xy_goal_command",
+        ),
+        PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION: (
+            "hmi_root_xy_goal_command",
+            "holosoma.managers.observation.terms.wbt:hmi_root_xy_goal_command",
+        ),
+    }[profile]
+    expected_target_terms = (
+        target_command_term,
         (
             "hmi_zero_drop_button",
             "holosoma.managers.observation.terms.wbt:hmi_zero_drop_button",
@@ -1036,7 +1060,7 @@ def _apply_precomputed_to_hmi_terminal_goal_migration(
     print(
         "[INFO] policy_init_actor_contract_migration_verified "
         f"profile={profile} source=precomputed_turn_then_forward "
-        "target=hmi_terminal_object_goal native_depth=true_to_trainable",
+        f"target={target_command_term[0]} native_depth=true_to_trainable",
         flush=True,
     )
 
@@ -1297,6 +1321,83 @@ def validate_policy_init_payload_identity(
     else:
         _validate_fast_sac_normalizer_payload(checkpoint, saved_contract)
     return saved_contract
+
+
+def migrate_policy_init_actor_state_dict(
+    actor_state: Mapping[str, Any],
+    *,
+    current_config: dict[str, Any],
+    reference_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the one authenticated 3D-command -> 2D-command weight surgery.
+
+    The semantic validator proves that the source actor starts with
+    ``[dx, dy, dyaw]`` and the target starts with ``[goal_dx, goal_dy]``.
+    This function then removes exactly the source yaw column from the first
+    fused MLP layer.  Every other parameter key and shape must match exactly.
+    """
+
+    profile = _actor_contract_migration_profile(current_config)
+    if profile not in {
+        PRECOMPUTED_TO_HMI_TERMINAL_OBJECT_XY_MIGRATION,
+        PRECOMPUTED_TO_HMI_TERMINAL_ROOT_XY_MIGRATION,
+    }:
+        return dict(actor_state)
+
+    first_weight_key = "actor_module.module.0.weight"
+    source_keys = set(actor_state)
+    target_keys = set(reference_state)
+    if source_keys != target_keys:
+        raise ValueError(
+            "HMI XY policy-init migration requires identical actor state keys; "
+            f"missing={sorted(target_keys - source_keys)}, "
+            f"unexpected={sorted(source_keys - target_keys)}."
+        )
+    source_weight = actor_state.get(first_weight_key)
+    target_weight = reference_state.get(first_weight_key)
+    if not isinstance(source_weight, torch.Tensor) or not isinstance(
+        target_weight, torch.Tensor
+    ):
+        raise ValueError(
+            f"HMI XY policy-init migration requires tensor {first_weight_key!r}."
+        )
+    if source_weight.ndim != 2 or target_weight.ndim != 2:
+        raise ValueError("HMI XY policy-init first-layer weights must be matrices.")
+    if (
+        source_weight.shape[0] != target_weight.shape[0]
+        or source_weight.shape[1] != target_weight.shape[1] + 1
+        or source_weight.shape[1] < 4
+    ):
+        raise ValueError(
+            "HMI XY policy-init requires the source first layer to be exactly one "
+            "input column wider than the target: "
+            f"source={tuple(source_weight.shape)}, target={tuple(target_weight.shape)}."
+        )
+
+    migrated = dict(actor_state)
+    migrated[first_weight_key] = torch.cat(
+        (source_weight[:, :2], source_weight[:, 3:]), dim=1
+    ).clone()
+    if migrated[first_weight_key].shape != target_weight.shape:
+        raise RuntimeError("HMI XY policy-init yaw-column removal produced a bad shape.")
+    for key in sorted(source_keys - {first_weight_key}):
+        source_value = actor_state[key]
+        target_value = reference_state[key]
+        source_shape = getattr(source_value, "shape", None)
+        target_shape = getattr(target_value, "shape", None)
+        if source_shape != target_shape:
+            raise ValueError(
+                "HMI XY policy-init permits no shape drift outside the first actor "
+                f"weight: key={key!r}, source={source_shape}, target={target_shape}."
+            )
+    print(
+        "[INFO] policy_init_actor_state_migration_verified "
+        f"profile={profile} key={first_weight_key} removed_input_column=2 "
+        f"source_shape={tuple(source_weight.shape)} "
+        f"target_shape={tuple(target_weight.shape)}",
+        flush=True,
+    )
+    return migrated
 
 
 def validate_stage4_init_payload_identity(

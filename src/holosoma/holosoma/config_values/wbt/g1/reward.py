@@ -629,6 +629,28 @@ g1_29dof_wbt_reward_w_object_hmi = RewardManagerCfg(
     }
 )
 
+
+def _hmi_xy_reward(goal_target: str) -> RewardManagerCfg:
+    if goal_target not in {"object_xy", "root_xy"}:
+        raise ValueError(f"Unsupported HMI XY goal target {goal_target!r}.")
+    terms = dict(g1_29dof_wbt_reward_w_object_hmi.terms)
+    terms.pop("hmi_object_goal_reached_once")
+    terms[f"hmi_{goal_target}_goal_reached_once"] = RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:HMIXYGoalReachedOnce",
+        params={
+            "goal_target": goal_target,
+            "pos_threshold": 0.20,
+            "bonus": 3.0,
+        },
+        weight=1.0,
+        tags=["hmi_generation", "sparse_goal", "xy_only"],
+    )
+    return RewardManagerCfg(terms=terms)
+
+
+g1_29dof_wbt_reward_w_object_hmi_object_xy = _hmi_xy_reward("object_xy")
+g1_29dof_wbt_reward_w_object_hmi_root_xy = _hmi_xy_reward("root_xy")
+
 g1_29dof_wbt_reward_w_object_hybrid_velocity = RewardManagerCfg(
     terms={
         **{
@@ -842,6 +864,8 @@ __all__ = [
     "g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance",
     "g1_29dof_wbt_reward_w_object_generalist_tracking_no_contact",
     "g1_29dof_wbt_reward_w_object_hmi",
+    "g1_29dof_wbt_reward_w_object_hmi_object_xy",
+    "g1_29dof_wbt_reward_w_object_hmi_root_xy",
     "g1_29dof_wbt_reward_w_object_hybrid_stage2",
     "g1_29dof_wbt_reward_w_object_hybrid_velocity",
     "g1_29dof_wbt_reward_w_object_r2s_contact_guidance",

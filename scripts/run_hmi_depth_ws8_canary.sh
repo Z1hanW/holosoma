@@ -23,7 +23,7 @@ M8_LARGE_ACTOR=${HMI_CANARY_M8_LARGE_ACTOR:-0}
 CANARY_ROOT_BASE=${HMI_CANARY_ROOT_BASE:-/data/holosoma_canaries}
 
 if [[ -z ${EXPECTED_COMMIT} || ! ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]]; then
-  echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
+  echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2|stage2_object_xy|stage2_root_xy] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
   exit 2
 fi
 if [[ ! ${TOTAL_ENVS} =~ ^[1-9][0-9]*$ ]] || (( TOTAL_ENVS % 8 != 0 )); then
@@ -65,8 +65,12 @@ case "${HMI_STAGE}" in
       exit 2
     fi
     ;;
-  stage2)
-    EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2
+  stage2|stage2_object_xy|stage2_root_xy)
+    case "${HMI_STAGE}" in
+      stage2) EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2 ;;
+      stage2_object_xy) EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2-object-xy ;;
+      stage2_root_xy) EXPERIMENT_PRESET=exp:g1-29dof-wbt-w-object-hmi-depth-stage2-root-xy ;;
+    esac
     if [[ -z ${POLICY_INIT_CHECKPOINT} || ! -f ${POLICY_INIT_CHECKPOINT} || -L ${POLICY_INIT_CHECKPOINT} ]]; then
       echo "[ERROR] Stage 2 requires a non-symlink regular policy-init checkpoint" >&2
       exit 2
@@ -82,7 +86,7 @@ case "${HMI_STAGE}" in
     fi
     ;;
   *)
-    echo "[ERROR] HMI stage must be stage1 or stage2, got '${HMI_STAGE}'" >&2
+    echo "[ERROR] unsupported HMI stage '${HMI_STAGE}'" >&2
     exit 2
     ;;
 esac
@@ -291,7 +295,7 @@ PY
     --robot.object.object-urdf-path="${EXTERNAL_OBJECT_MAP}"
   )
 fi
-if [[ ${HMI_STAGE} == stage2 ]]; then
+if [[ ${HMI_STAGE} == stage2* ]]; then
   TRAINING_ARGS+=(--training.policy-init-checkpoint="${POLICY_INIT_CHECKPOINT}")
   if [[ -n ${POLICY_INIT_MIGRATION} ]]; then
     [[ -n ${POLICY_INIT_RESET_NOISE_STD} ]] || {
@@ -318,7 +322,7 @@ if [[ ${HMI_STAGE} == stage2 ]]; then
   fi
 fi
 if [[ ${M8_LARGE_ACTOR} == 1 ]]; then
-  [[ ${HMI_STAGE} == stage2 && -n ${POLICY_INIT_MIGRATION} ]] || {
+  [[ ${HMI_STAGE} == stage2* && -n ${POLICY_INIT_MIGRATION} ]] || {
     echo "[ERROR] HMI_CANARY_M8_LARGE_ACTOR=1 requires authenticated Stage 2 migration" >&2
     exit 2
   }
@@ -340,7 +344,8 @@ fi
 
 echo "[INFO] validating the exact deployment graph with ONNX checker and ORT parity"
 "${PYTHON_BIN}" -m pytest -q \
-  src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_depth_actor_real_onnx_checker_and_ort_parity
+  src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_depth_actor_real_onnx_checker_and_ort_parity \
+  src/holosoma/holosoma/managers/command/tests/test_hmi_depth_contract.py::test_hmi_xy_actor_is_93d_and_has_real_onnx_parity
 
 echo "[INFO] nonformal_hmi_canary commit=${EXPECTED_COMMIT} stage=${HMI_STAGE} world_size=8 total_envs=${TOTAL_ENVS} envs_per_rank=${ENVS_PER_RANK} iterations=2 steps_per_env=24 mini_batches=4 collider=convex_decomposition contact_sensors=0 export_onnx=true external_clip_count=${EXTERNAL_EXPECTED_CLIP_COUNT:-default}"
 "${PYTHON_BIN}" -m torch.distributed.run \

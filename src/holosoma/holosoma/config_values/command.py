@@ -12,6 +12,8 @@ from holosoma.config_values.wbt.g1.command import (
     g1_29dof_wbt_command_w_object_hybrid_world_velocity,
     g1_29dof_wbt_command_w_object_hmi_depth_stage1,
     g1_29dof_wbt_command_w_object_hmi_depth_stage2,
+    g1_29dof_wbt_command_w_object_hmi_depth_stage2_object_xy,
+    g1_29dof_wbt_command_w_object_hmi_depth_stage2_root_xy,
     g1_29dof_wbt_command_w_object_pure_rl_policy_command_after_lift,
 )
 

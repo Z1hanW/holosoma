@@ -72,6 +72,7 @@ from holosoma.utils.normalization import EmpiricalNormalization
 from holosoma.utils.policy_init_preflight import (
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     allow_legacy_unverified_policy_load,
+    migrate_policy_init_actor_state_dict,
     required_policy_init_terminal_target_from_env,
     validate_policy_init_payload_identity,
     validate_policy_init_terminal_source_payload,
@@ -14951,6 +14952,12 @@ class PPO(BaseAlgo):
         if not isinstance(actor_state, dict):
             raise KeyError(f"Checkpoint does not contain actor_model_state_dict: {ckpt_path}")
         validate_finite_tree(actor_state, path="actor_model_state_dict")
+        if isinstance(current_config, dict):
+            actor_state = migrate_policy_init_actor_state_dict(
+                actor_state,
+                current_config=current_config,
+                reference_state=self.actor.state_dict(),
+            )
         validate_module_state_compatibility(
             actor_state,
             reference_state=self.actor.state_dict(),

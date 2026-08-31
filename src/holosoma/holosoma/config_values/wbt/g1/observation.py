@@ -882,6 +882,22 @@ hmi_goal_command_terms = {
     ),
 }
 
+hmi_object_xy_goal_command_terms = {
+    "hmi_object_xy_goal_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:hmi_object_xy_goal_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+hmi_root_xy_goal_command_terms = {
+    "hmi_root_xy_goal_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:hmi_root_xy_goal_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 hmi_zero_drop_button_terms = {
     "hmi_zero_drop_button": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:hmi_zero_drop_button",
@@ -933,6 +949,32 @@ g1_29dof_wbt_observation_w_object_hmi_depth = replace(
                 "critic_obs"
             ],
             terms=hmi_critic_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_hmi_depth_object_xy = replace(
+    g1_29dof_wbt_observation_w_object_hmi_depth,
+    groups={
+        **g1_29dof_wbt_observation_w_object_hmi_depth.groups,
+        "actor_obs_hmi_goal_command": replace(
+            g1_29dof_wbt_observation_w_object_hmi_depth.groups[
+                "actor_obs_hmi_goal_command"
+            ],
+            terms=hmi_object_xy_goal_command_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_hmi_depth_root_xy = replace(
+    g1_29dof_wbt_observation_w_object_hmi_depth,
+    groups={
+        **g1_29dof_wbt_observation_w_object_hmi_depth.groups,
+        "actor_obs_hmi_goal_command": replace(
+            g1_29dof_wbt_observation_w_object_hmi_depth.groups[
+                "actor_obs_hmi_goal_command"
+            ],
+            terms=hmi_root_xy_goal_command_terms,
         ),
     },
 )
@@ -1328,6 +1370,8 @@ __all__ = [
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_critic317",
     "g1_29dof_wbt_observation_w_object_hmi_depth",
+    "g1_29dof_wbt_observation_w_object_hmi_depth_object_xy",
+    "g1_29dof_wbt_observation_w_object_hmi_depth_root_xy",
     "g1_29dof_wbt_observation_w_object_hybrid_stage2",
     "g1_29dof_wbt_observation_w_object_hybrid_velocity",
     "g1_29dof_wbt_observation_w_object_hybrid_world_velocity",

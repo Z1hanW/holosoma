@@ -740,6 +740,30 @@ g1_29dof_wbt_w_object_hmi_depth_stage2 = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy = replace(
+    g1_29dof_wbt_w_object_hmi_depth_stage2,
+    training=replace(
+        g1_29dof_wbt_w_object_hmi_depth_stage2.training,
+        name="g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy",
+        export_onnx=True,
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hmi_depth_stage2_object_xy,
+    observation=observation.g1_29dof_wbt_observation_w_object_hmi_depth_object_xy,
+    reward=reward.g1_29dof_wbt_reward_w_object_hmi_object_xy,
+)
+
+g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy = replace(
+    g1_29dof_wbt_w_object_hmi_depth_stage2,
+    training=replace(
+        g1_29dof_wbt_w_object_hmi_depth_stage2.training,
+        name="g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy",
+        export_onnx=True,
+    ),
+    command=command.g1_29dof_wbt_command_w_object_hmi_depth_stage2_root_xy,
+    observation=observation.g1_29dof_wbt_observation_w_object_hmi_depth_root_xy,
+    reward=reward.g1_29dof_wbt_reward_w_object_hmi_root_xy,
+)
+
 g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel = replace(
     g1_29dof_wbt_w_object_distill_sparse_root_cmd,
     training=replace(
@@ -898,6 +922,8 @@ __all__ = [
     "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317",
     "g1_29dof_wbt_w_object_hmi_depth_stage1",
     "g1_29dof_wbt_w_object_hmi_depth_stage2",
+    "g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy",
+    "g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",

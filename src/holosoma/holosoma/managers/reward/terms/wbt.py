@@ -211,6 +211,72 @@ class HMIObjectGoalReachedOnce(RewardTermBase):
         )
 
 
+class HMIXYGoalReachedOnce(RewardTermBase):
+    """One-time sparse XY-only object/root-goal bonus for generation rows."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.goal_target = str(cfg.params.get("goal_target", ""))
+        self.pos_threshold = float(cfg.params.get("pos_threshold", 0.20))
+        self.bonus = float(cfg.params.get("bonus", 3.0))
+        if self.goal_target not in {"object_xy", "root_xy"}:
+            raise ValueError(
+                "HMI XY sparse reward goal_target must be object_xy or root_xy."
+            )
+        if self.pos_threshold <= 0.0 or self.bonus <= 0.0:
+            raise ValueError("HMI XY sparse-goal threshold and bonus must be positive.")
+        self._awarded_goal_version = torch.full(
+            (env.num_envs,), -1, device=env.device, dtype=torch.long
+        )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._awarded_goal_version.fill_(-1)
+            return
+        ids = torch.as_tensor(env_ids, device=self.env.device, dtype=torch.long).flatten()
+        self._awarded_goal_version[ids] = -1
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        del kwargs
+        motion_command = _get_motion_command_and_assert_type(env)
+        if (
+            not motion_command.hmi_enabled()
+            or motion_command.hmi_cfg is None
+            or motion_command.hmi_goal_xy_pos_w is None
+            or motion_command.hmi_goal_version is None
+        ):
+            raise RuntimeError("HMI XY sparse reward requires initialized XY goals.")
+        if motion_command.hmi_cfg.goal_target != self.goal_target:
+            raise RuntimeError(
+                "HMI XY reward/command target mismatch: "
+                f"reward={self.goal_target!r}, "
+                f"command={motion_command.hmi_cfg.goal_target!r}."
+            )
+        current_pos = (
+            motion_command.simulator_object_pos_w
+            if self.goal_target == "object_xy"
+            else motion_command.robot_ref_pos_w
+        )
+        pos_error = torch.linalg.vector_norm(
+            motion_command.hmi_goal_xy_pos_w[:, :2] - current_pos[:, :2],
+            dim=-1,
+        )
+        reached = (
+            (pos_error <= self.pos_threshold)
+            & motion_command.get_hmi_gen_env_mask()
+        )
+        newly_reached = reached & (
+            self._awarded_goal_version != motion_command.hmi_goal_version
+        )
+        self._awarded_goal_version[newly_reached] = motion_command.hmi_goal_version[
+            newly_reached
+        ]
+        motion_command.mark_hmi_goal_reached(torch.where(newly_reached)[0])
+        return newly_reached.to(dtype=torch.float32) * (
+            self.bonus / max(float(env.dt), 1.0e-6)
+        )
+
+
 def _forward_after_lift_task_state(
     env: WholeBodyTrackingManager,
     *,
