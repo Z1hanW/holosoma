@@ -194,7 +194,16 @@ ss -lnt | awk '{print $4}' | grep -Eq "(^|:)${MASTER_PORT}$" && die "master port
 
 mkdir -p "${RUN_ROOT}/logs" "${RUN_ROOT}/wandb" "${RUN_ROOT}/training_logs" "${RUN_ROOT}/provenance-cache"
 export TMPDIR="${RUN_ROOT}/tmp" TMP="${RUN_ROOT}/tmp" TEMP="${RUN_ROOT}/tmp"
-mkdir -p "${TMPDIR}"
+export XDG_CACHE_HOME="${RUN_ROOT}/xdg-cache"
+export HOLOSOMA_OBJECT_USD_CACHE_DIR="${RUN_ROOT}/object-usd-cache"
+export HOLOSOMA_PERCEPTION_MESH_CACHE_DIR="${RUN_ROOT}/perception-mesh-cache"
+export HOLOSOMA_DERIVED_DATA_CACHE_DIR="${RUN_ROOT}/derived-data-cache"
+mkdir -p \
+  "${TMPDIR}" \
+  "${XDG_CACHE_HOME}" \
+  "${HOLOSOMA_OBJECT_USD_CACHE_DIR}" \
+  "${HOLOSOMA_PERCEPTION_MESH_CACHE_DIR}" \
+  "${HOLOSOMA_DERIVED_DATA_CACHE_DIR}"
 EXIT_FILE=${RUN_ROOT}/formal.exit
 [[ ! -e ${EXIT_FILE} ]] || die "formal exit file already exists"
 trap 'rc=$?; printf "%s\t%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" > "${EXIT_FILE}"' EXIT

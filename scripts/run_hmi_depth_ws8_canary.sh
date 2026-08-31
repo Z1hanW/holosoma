@@ -137,7 +137,17 @@ RUN_ROOT=${CANARY_ROOT_BASE}/${RUN_LABEL}_${EXPECTED_COMMIT:0:12}
 mkdir -p "${RUN_ROOT}"
 export HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT="${RUN_ROOT}/provenance-cache"
 export TMPDIR="${RUN_ROOT}/tmp" TMP="${RUN_ROOT}/tmp" TEMP="${RUN_ROOT}/tmp"
-mkdir -p "${HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT}" "${TMPDIR}"
+export XDG_CACHE_HOME="${RUN_ROOT}/xdg-cache"
+export HOLOSOMA_OBJECT_USD_CACHE_DIR="${RUN_ROOT}/object-usd-cache"
+export HOLOSOMA_PERCEPTION_MESH_CACHE_DIR="${RUN_ROOT}/perception-mesh-cache"
+export HOLOSOMA_DERIVED_DATA_CACHE_DIR="${RUN_ROOT}/derived-data-cache"
+mkdir -p \
+  "${HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT}" \
+  "${TMPDIR}" \
+  "${XDG_CACHE_HOME}" \
+  "${HOLOSOMA_OBJECT_USD_CACHE_DIR}" \
+  "${HOLOSOMA_PERCEPTION_MESH_CACHE_DIR}" \
+  "${HOLOSOMA_DERIVED_DATA_CACHE_DIR}"
 write_exit_code() {
   local rc=$?
   printf '%s\n' "${rc}" > "${RUN_ROOT}/exit_code.txt"
