@@ -193,6 +193,8 @@ fi
 ss -lnt | awk '{print $4}' | grep -Eq "(^|:)${MASTER_PORT}$" && die "master port is occupied"
 
 mkdir -p "${RUN_ROOT}/logs" "${RUN_ROOT}/wandb" "${RUN_ROOT}/training_logs" "${RUN_ROOT}/provenance-cache"
+export TMPDIR="${RUN_ROOT}/tmp" TMP="${RUN_ROOT}/tmp" TEMP="${RUN_ROOT}/tmp"
+mkdir -p "${TMPDIR}"
 EXIT_FILE=${RUN_ROOT}/formal.exit
 [[ ! -e ${EXIT_FILE} ]] || die "formal exit file already exists"
 trap 'rc=$?; printf "%s\t%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" > "${EXIT_FILE}"' EXIT

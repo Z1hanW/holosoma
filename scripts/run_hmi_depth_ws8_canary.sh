@@ -136,7 +136,8 @@ source "${SOURCE_ROOT}/scripts/gpu_launch_defaults.sh"
 RUN_ROOT=${CANARY_ROOT_BASE}/${RUN_LABEL}_${EXPECTED_COMMIT:0:12}
 mkdir -p "${RUN_ROOT}"
 export HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT="${RUN_ROOT}/provenance-cache"
-mkdir -p "${HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT}"
+export TMPDIR="${RUN_ROOT}/tmp" TMP="${RUN_ROOT}/tmp" TEMP="${RUN_ROOT}/tmp"
+mkdir -p "${HOLOSOMA_DATA_PROVENANCE_CACHE_ROOT}" "${TMPDIR}"
 write_exit_code() {
   local rc=$?
   printf '%s\n' "${rc}" > "${RUN_ROOT}/exit_code.txt"
