@@ -235,8 +235,14 @@ if len(shards.get("shards", [])) != 8:
 if set(shards.get("clip_cover_counts", {}).values()) != {1}:
     raise SystemExit("rank shards do not cover every clip exactly once")
 for role, value in (
-    ("single-slot source digest", view.get("source_digest")),
-    ("single-slot view digest", view.get("view_digest")),
+    (
+        "single-slot source digest",
+        view.get("source_digest", view.get("source_view_digest")),
+    ),
+    (
+        "single-slot view digest",
+        view.get("view_digest", view.get("derived_payload_digest")),
+    ),
     ("rank-shard source digest", shards.get("source_digest")),
 ):
     if not isinstance(value, str) or len(value) != 64:
