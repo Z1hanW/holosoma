@@ -214,8 +214,16 @@ FORMAL_GIT_VERIFICATION=${RUN_ROOT}/formal_git_verification.json
 import datetime, json, os, sys, tempfile
 path, remote_url, remote_ref, commit, tree, source_root = sys.argv[1:]
 submodules={
-    "submodules/defm": "63ec5e1c1a9b280dcde9910b845f57e9224ebab5",
-    "submodules/PointTransformerV3": "3229e9b7de1770c8ad17c316f8e349982de509f8",
+    "submodules/defm": {
+        "sha": "63ec5e1c1a9b280dcde9910b845f57e9224ebab5",
+        "status": "clean",
+        "remote_url": "https://github.com/leggedrobotics/defm.git",
+    },
+    "submodules/PointTransformerV3": {
+        "sha": "3229e9b7de1770c8ad17c316f8e349982de509f8",
+        "status": "clean",
+        "remote_url": "https://github.com/Pointcept/PointTransformerV3.git",
+    },
 }
 payload={
     "version": 1,
