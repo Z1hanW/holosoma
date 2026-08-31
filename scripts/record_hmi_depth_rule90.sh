@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-  echo "usage: $0 <expected-commit> <motion-view> <object-map> <output-root> <canonical-clip-id>" >&2
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+  echo "usage: $0 <expected-commit> <motion-view> <object-map> <output-root> <canonical-clip-id> [expected-clip-count]" >&2
   exit 2
 fi
 
@@ -12,6 +12,7 @@ MOTION_VIEW=$2
 OBJECT_MAP=$3
 OUTPUT_ROOT=$4
 CANONICAL_CLIP_ID=$5
+EXPECTED_CLIP_COUNT=${6:-79}
 
 [[ ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]] || { echo "[ERROR] invalid commit" >&2; exit 2; }
 [[ $(git -C "${SOURCE_ROOT}" rev-parse HEAD) == "${EXPECTED_COMMIT}" ]] || {
@@ -22,6 +23,7 @@ git -C "${SOURCE_ROOT}" diff --quiet --ignore-submodules --
 git -C "${SOURCE_ROOT}" diff --cached --quiet --ignore-submodules --
 [[ -d ${MOTION_VIEW} && ! -L ${MOTION_VIEW} ]] || { echo "[ERROR] invalid motion view" >&2; exit 2; }
 [[ -f ${OBJECT_MAP} && ! -L ${OBJECT_MAP} ]] || { echo "[ERROR] invalid object map" >&2; exit 2; }
+[[ ${EXPECTED_CLIP_COUNT} =~ ^[1-9][0-9]*$ ]] || { echo "[ERROR] invalid expected clip count" >&2; exit 2; }
 
 # shellcheck disable=SC1091
 source "${SOURCE_ROOT}/scripts/source_isaacsim_setup.sh"
@@ -42,7 +44,7 @@ mkdir -p "${PAIR_ROOT}" "${VIDEO_ROOT}" "${LOG_ROOT}"
   --work-root "${PAIR_ROOT}" \
   --video-root "${VIDEO_ROOT}" \
   --manifest "${PAIR_MANIFEST}" \
-  --expected-total 79 \
+  --expected-total "${EXPECTED_CLIP_COUNT}" \
   --start-index 0 \
   --limit 1 \
   --single-slot \

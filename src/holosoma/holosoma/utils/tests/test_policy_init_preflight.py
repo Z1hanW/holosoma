@@ -14,6 +14,7 @@ import torch
 from holosoma.utils.policy_init_preflight import (
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
+    PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
     TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
     canonical_actor_contract,
     required_policy_init_terminal_target_from_env,
@@ -584,6 +585,95 @@ def _contact_aware_command_config(*, mode: str, drop_exclusive: bool) -> dict:
     return config
 
 
+def _m8_to_hmi_command_config_pair() -> tuple[dict, dict]:
+    saved = _config()
+    saved["algo"]["config"]["module_dict"]["actor"]["input_dim"] = [
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]
+    saved["algo"]["config"]["module_dict"]["actor"]["layer_config"][
+        "module_input_name"
+    ] = [
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]
+    saved["algo"]["config"]["module_dict"]["actor"]["layer_config"].update(
+        {
+            "perception_encoder_type": "far_tracking_cnn_small",
+            "perception_pretrained": True,
+            "perception_freeze_backbone": True,
+        }
+    )
+    groups = saved["observation"]["groups"]
+    groups["actor_obs_root_contact_aware"] = _group(
+        (
+            "sparse_target_root_trajectory_command_contact_aware",
+            "holosoma.managers.observation.terms.wbt:"
+            "sparse_target_root_trajectory_command_contact_aware",
+        )
+    )
+    groups["actor_obs_drop_button"] = _group(
+        ("drop_button", "holosoma.managers.observation.terms.wbt:drop_button")
+    )
+    groups["actor_obs_proprio_with_actions_no_linvel"] = groups.pop("proprio")
+    groups.pop("root")
+    saved["command"] = {
+        "setup_terms": {
+            "motion_command": {
+                "params": {
+                    "motion_config": {
+                        "contact_aware_carry_window_mode": "peak_height",
+                        "contact_aware_button_window_mode": "contact_interval",
+                        "contact_aware_peak_height_alpha": 0.91,
+                        "contact_aware_peak_height_smoothing_steps": 5,
+                        "contact_aware_sparse_root_command_mode": (
+                            "precomputed_turn_then_forward"
+                        ),
+                        "zero_root_command_when_drop_active": True,
+                    }
+                }
+            }
+        }
+    }
+    saved["perception"].update(
+        {
+            "encoder_type": "far_tracking_cnn_small",
+            "encoder_pretrained": True,
+            "encoder_freeze_backbone": True,
+            "camera_apply_sensor_noise": True,
+            "object_geometry_mode": "mesh",
+        }
+    )
+
+    current = copy.deepcopy(saved)
+    actor = current["algo"]["config"]["module_dict"]["actor"]
+    actor["input_dim"][0] = "actor_obs_hmi_goal_command"
+    actor["layer_config"]["module_input_name"][0] = "actor_obs_hmi_goal_command"
+    actor["layer_config"]["perception_pretrained"] = False
+    actor["layer_config"]["perception_freeze_backbone"] = False
+    current_groups = current["observation"]["groups"]
+    root_group = current_groups.pop("actor_obs_root_contact_aware")
+    root_group["terms"] = {
+        "hmi_object_goal_command": _term(
+            "holosoma.managers.observation.terms.wbt:hmi_object_goal_command"
+        )
+    }
+    current_groups["actor_obs_hmi_goal_command"] = root_group
+    current_groups["actor_obs_drop_button"]["terms"] = {
+        "hmi_zero_drop_button": _term(
+            "holosoma.managers.observation.terms.wbt:hmi_zero_drop_button"
+        )
+    }
+    current["perception"]["encoder_pretrained"] = False
+    current["perception"]["encoder_freeze_backbone"] = False
+    current["training"]["policy_init_actor_contract_migration"] = (
+        PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION
+    )
+    return saved, current
+
+
 def test_policy_init_accepts_explicit_tracking_to_precomputed_drop_exclusive_migration(
     tmp_path,
 ):
@@ -600,6 +690,20 @@ def test_policy_init_accepts_explicit_tracking_to_precomputed_drop_exclusive_mig
     )
 
     validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_policy_init_accepts_explicit_m8_precomputed_to_hmi_goal_migration(tmp_path):
+    saved, current = _m8_to_hmi_command_config_pair()
+
+    validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def test_m8_to_hmi_migration_rejects_camera_drift(tmp_path):
+    saved, current = _m8_to_hmi_command_config_pair()
+    current["perception"]["camera_apply_sensor_noise"] = False
+
+    with pytest.raises(ValueError, match="residual actor semantic drift"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
 
 
 def test_policy_init_migration_profile_requires_drop_exclusive_target(tmp_path):

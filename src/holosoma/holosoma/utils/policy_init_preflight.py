@@ -43,6 +43,9 @@ POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV = (
 TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION = (
     "tracking_error_to_precomputed_turn_then_forward_drop_exclusive_v1"
 )
+PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION = (
+    "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
+)
 
 
 def allow_legacy_unverified_policy_load() -> bool:
@@ -781,7 +784,10 @@ def _actor_contract_migration_profile(
             f"training.{field_name} must be null or one "
             f"non-empty stripped string, got {profile!r}."
         )
-    if profile != TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION:
+    if profile not in {
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
+        PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
+    }:
         raise ValueError(
             f"Unsupported training.{field_name} profile: "
             f"{profile!r}."
@@ -804,6 +810,13 @@ def _apply_explicit_policy_init_actor_contract_migration(
     drop becomes exclusive.  Any additional drift remains fail-closed.
     """
 
+    if profile == PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION:
+        _apply_precomputed_to_hmi_terminal_goal_migration(
+            saved_contract,
+            current_contract,
+            profile=profile,
+        )
+        return
     if profile != TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION:
         raise AssertionError(f"Unhandled actor-contract migration profile: {profile!r}")
     saved_command = saved_contract.get("command_observation_semantics")
@@ -856,6 +869,174 @@ def _apply_explicit_policy_init_actor_contract_migration(
         f"profile={profile} "
         "source_mode=tracking_error target_mode=precomputed_turn_then_forward "
         "source_drop_exclusive=false target_drop_exclusive=true",
+        flush=True,
+    )
+
+
+def _apply_precomputed_to_hmi_terminal_goal_migration(
+    saved_contract: dict[str, Any],
+    current_contract: dict[str, Any],
+    *,
+    profile: str,
+) -> None:
+    """Audit the equal-width m8 command-slot to HMI goal-slot migration.
+
+    The source actor consumes the three-scalar precomputed root command and a
+    reference drop button.  HMI Stage 2 deliberately reuses those four tensor
+    slots for a terminal object goal and a constant-zero drop value.  The
+    native far-tracking CNN is also unfrozen under the current implementation;
+    its authenticated source weights are still loaded strictly.  No camera,
+    proprioception, robot-control, action, or tensor-topology drift is allowed.
+    """
+
+    if profile != PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION:
+        raise AssertionError(f"Unhandled HMI migration profile: {profile!r}")
+
+    expected_source_command = {
+        "contact_aware_carry_window_mode": "peak_height",
+        "contact_aware_button_window_mode": "contact_interval",
+        "contact_aware_peak_height_alpha": 0.91,
+        "contact_aware_peak_height_smoothing_steps": 5,
+        "contact_aware_sparse_root_command_mode": "precomputed_turn_then_forward",
+        "zero_root_command_when_drop_active": True,
+    }
+    if saved_contract.get("command_observation_semantics") != expected_source_command:
+        raise ValueError(
+            f"Policy-init migration {profile!r} requires the exact m8 precomputed-command "
+            "source semantics."
+        )
+    if current_contract.get("command_observation_semantics") is not None:
+        raise ValueError(
+            f"Policy-init migration {profile!r} requires an HMI target without "
+            "reference contact-window command semantics."
+        )
+
+    source_groups = [
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]
+    target_groups = [
+        "actor_obs_hmi_goal_command",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]
+    if saved_contract.get("actor_input_groups") != source_groups:
+        raise ValueError(
+            f"Policy-init migration {profile!r} source actor groups must be "
+            f"{source_groups!r}."
+        )
+    if current_contract.get("actor_input_groups") != target_groups:
+        raise ValueError(
+            f"Policy-init migration {profile!r} target actor groups must be "
+            f"{target_groups!r}."
+        )
+
+    source_observation_groups = saved_contract.get("observation_groups")
+    target_observation_groups = current_contract.get("observation_groups")
+    if not isinstance(source_observation_groups, list) or not isinstance(
+        target_observation_groups, list
+    ):
+        raise ValueError(f"Policy-init migration {profile!r} requires ordered observation groups.")
+    if len(source_observation_groups) != len(target_observation_groups) or len(source_observation_groups) < 3:
+        raise ValueError(f"Policy-init migration {profile!r} observation group counts differ.")
+
+    expected_source_terms = (
+        (
+            "sparse_target_root_trajectory_command_contact_aware",
+            "holosoma.managers.observation.terms.wbt:"
+            "sparse_target_root_trajectory_command_contact_aware",
+        ),
+        (
+            "drop_button",
+            "holosoma.managers.observation.terms.wbt:drop_button",
+        ),
+    )
+    expected_target_terms = (
+        (
+            "hmi_object_goal_command",
+            "holosoma.managers.observation.terms.wbt:hmi_object_goal_command",
+        ),
+        (
+            "hmi_zero_drop_button",
+            "holosoma.managers.observation.terms.wbt:hmi_zero_drop_button",
+        ),
+    )
+    for index, (expected_name, expected_func) in enumerate(expected_source_terms):
+        terms = source_observation_groups[index].get("terms")
+        if not isinstance(terms, list) or len(terms) != 1:
+            raise ValueError(f"Policy-init migration {profile!r} source group {index} must have one term.")
+        if (terms[0].get("name"), terms[0].get("func")) != (expected_name, expected_func):
+            raise ValueError(f"Policy-init migration {profile!r} source group {index} has unexpected semantics.")
+    for index, (expected_name, expected_func) in enumerate(expected_target_terms):
+        terms = target_observation_groups[index].get("terms")
+        if not isinstance(terms, list) or len(terms) != 1:
+            raise ValueError(f"Policy-init migration {profile!r} target group {index} must have one term.")
+        if (terms[0].get("name"), terms[0].get("func")) != (expected_name, expected_func):
+            raise ValueError(f"Policy-init migration {profile!r} target group {index} has unexpected semantics.")
+
+    migrated = copy.deepcopy(saved_contract)
+    migrated["actor_input_groups"] = copy.deepcopy(target_groups)
+    migrated["actor_module"]["input_dim"][0] = target_groups[0]
+    migrated["actor_module"]["layer_config"]["module_input_name"][0] = target_groups[0]
+    migrated["command_observation_semantics"] = None
+
+    # Preserve every group setting and term field except the two explicitly
+    # declared value producers and the renamed command group.
+    migrated["observation_groups"][0]["name"] = target_groups[0]
+    for index, (target_name, target_func) in enumerate(expected_target_terms):
+        migrated["observation_groups"][index]["terms"][0]["name"] = target_name
+        migrated["observation_groups"][index]["terms"][0]["func"] = target_func
+
+    saved_layer = saved_contract["actor_module"]["layer_config"]
+    current_layer = current_contract["actor_module"]["layer_config"]
+    if saved_layer.get("perception_encoder_type") != "far_tracking_cnn_small" or current_layer.get(
+        "perception_encoder_type"
+    ) != "far_tracking_cnn_small":
+        raise ValueError(f"Policy-init migration {profile!r} requires the native far-tracking CNN.")
+    expected_native_flag_transition = (True, False)
+    for field in ("perception_pretrained", "perception_freeze_backbone"):
+        if (saved_layer.get(field), current_layer.get(field)) != expected_native_flag_transition:
+            raise ValueError(
+                f"Policy-init migration {profile!r} requires native encoder {field} "
+                "to transition exactly true->false."
+            )
+        migrated["actor_module"]["layer_config"][field] = False
+
+    saved_perception = saved_contract.get("perception")
+    current_perception = current_contract.get("perception")
+    if not isinstance(saved_perception, dict) or not isinstance(current_perception, dict):
+        raise ValueError(f"Policy-init migration {profile!r} requires a perception contract.")
+    if saved_perception.get("encoder_type") != "far_tracking_cnn_small" or current_perception.get(
+        "encoder_type"
+    ) != "far_tracking_cnn_small":
+        raise ValueError(f"Policy-init migration {profile!r} perception encoder is not far_tracking_cnn_small.")
+    for field in ("encoder_pretrained", "encoder_freeze_backbone"):
+        if (saved_perception.get(field), current_perception.get(field)) != expected_native_flag_transition:
+            raise ValueError(
+                f"Policy-init migration {profile!r} requires perception {field} "
+                "to transition exactly true->false."
+            )
+        migrated["perception"][field] = False
+
+    residual_differences = _diff(migrated, current_contract)
+    if residual_differences:
+        preview = "\n  - ".join(residual_differences[:30])
+        suffix = (
+            ""
+            if len(residual_differences) <= 30
+            else f"\n  ... and {len(residual_differences) - 30} more difference(s)"
+        )
+        raise ValueError(
+            f"Policy-init migration {profile!r} permits only the declared command/drop "
+            "producers and native-depth unfreeze; residual actor semantic drift:\n  - "
+            + preview
+            + suffix
+        )
+    print(
+        "[INFO] policy_init_actor_contract_migration_verified "
+        f"profile={profile} source=precomputed_turn_then_forward "
+        "target=hmi_terminal_object_goal native_depth=true_to_trainable",
         flush=True,
     )
 

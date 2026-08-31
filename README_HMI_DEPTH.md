@@ -102,3 +102,18 @@ immutable run contract, and remotely verified Rule-90 manifest before checking
 GPU idleness or starting workers. It launches fresh Stage 1 only: 8 ranks,
 4096 environments per rank, 15,000 iterations, 1,000-iteration atomic PT+ONNX
 checkpoints, and no resume or policy initialization.
+
+The m8 large-actor Stage-2 entrypoint is
+`scripts/run_hmi_depth_stage2_m8_ws8_formal.sh`. It is a fresh formal identity
+with actor-only initialization, never an exact resume. The authenticated
+profile
+`precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1`
+allows only the equal-width command/drop producer migration required by HMI
+and the current native-CNN true-to-trainable transition. Camera noise, mesh
+depth, proprioception, robot control, action semantics, and all actor tensor
+shapes must remain identical. The launcher uses the exact 109-clip m8 bank,
+8 ranks x 2048 environments, the m8 `[2048,1024,512,256,128]` actor, a fixed
+50/50 track/generation partition, 20,000 iterations, no contact reward, and
+the upstream Stage-2 exploration reset `std=0.45`. It requires a real
+policy-init canary/ONNX receipt, immutable m8 PT/pair digests, and a remotely
+verified Rule-90 replay before taking formal GPUs.

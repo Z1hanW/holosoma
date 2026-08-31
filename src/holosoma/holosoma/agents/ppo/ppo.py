@@ -15073,6 +15073,37 @@ class PPO(BaseAlgo):
         commit_error: Exception | None = None
         try:
             self.actor.load_state_dict(actor_state, strict=True)
+            policy_init_reset_noise_std = None
+            if not restore_evaluation_metadata:
+                runtime_config = getattr(self, "_policy_load_runtime_config", None)
+                runtime_training = getattr(runtime_config, "training", None)
+                policy_init_reset_noise_std = getattr(
+                    runtime_training,
+                    "policy_init_reset_noise_std",
+                    None,
+                )
+            if policy_init_reset_noise_std is not None:
+                if (
+                    isinstance(policy_init_reset_noise_std, bool)
+                    or not isinstance(policy_init_reset_noise_std, (int, float))
+                    or not math.isfinite(float(policy_init_reset_noise_std))
+                    or float(policy_init_reset_noise_std) <= 0.0
+                ):
+                    raise ValueError(
+                        "training.policy_init_reset_noise_std must be a finite positive "
+                        f"number, got {policy_init_reset_noise_std!r}."
+                    )
+                configured_std = torch.full_like(
+                    self.actor.std.data,
+                    float(policy_init_reset_noise_std),
+                )
+                projected_std = self._project_actor_std_constraints(configured_std)
+                if not torch.equal(projected_std, configured_std):
+                    raise ValueError(
+                        "training.policy_init_reset_noise_std violates actor noise "
+                        "constraints; refusing a silent projection."
+                    )
+                self.actor.std.data.copy_(configured_std)
             self._sanitize_actor_std()
             if actor_normalization_enabled:
                 self._restore_checkpoint_normalizers(
@@ -15139,10 +15170,19 @@ class PPO(BaseAlgo):
             logger.info(
                 "Loaded actor policy parameters from {}; ignored checkpoint iteration={}, critic, optimizers, "
                 "critic normalizers, and env_state; actor normalizers restored={}. "
-                "Training will start from iteration {}.",
+                "policy_init_reset_noise_std={}; training will start from iteration {}.",
                 ckpt_path,
                 checkpoint_iter,
                 actor_normalization_enabled,
+                getattr(
+                    getattr(
+                        getattr(self, "_policy_load_runtime_config", None),
+                        "training",
+                        None,
+                    ),
+                    "policy_init_reset_noise_std",
+                    None,
+                ),
                 self.current_learning_iteration,
             )
         return loaded_dict.get("infos")

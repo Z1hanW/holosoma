@@ -79,6 +79,9 @@ class TrainingConfig:
     policy_init_actor_contract_migration: str | None = None
     """Explicit audited actor-input semantic migration allowed for policy initialization."""
 
+    policy_init_reset_noise_std: float | None = None
+    """Optional fresh-lineage exploration std applied after an authenticated actor-only policy init."""
+
     stage4_init_checkpoint: str | None = None
     """Checkpoint used to initialize actor, critic, and their normalizers for a fresh Stage-4 lineage."""
 

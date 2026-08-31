@@ -17,6 +17,9 @@ EXTERNAL_OBJECT_MAP=${HMI_CANARY_OBJECT_MAP:-}
 EXTERNAL_SHARD_ROOT=${HMI_CANARY_SHARD_ROOT:-}
 EXTERNAL_SHARD_MANIFEST_SHA256=${HMI_CANARY_SHARD_MANIFEST_SHA256:-}
 EXTERNAL_EXPECTED_CLIP_COUNT=${HMI_CANARY_EXPECTED_CLIP_COUNT:-}
+POLICY_INIT_MIGRATION=${HMI_CANARY_POLICY_INIT_MIGRATION:-}
+POLICY_INIT_RESET_NOISE_STD=${HMI_CANARY_POLICY_INIT_RESET_NOISE_STD:-}
+M8_LARGE_ACTOR=${HMI_CANARY_M8_LARGE_ACTOR:-0}
 
 if [[ -z ${EXPECTED_COMMIT} || ! ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: $0 <full-commit-sha> [run-label] [stage1|stage2] [policy-init-pt] [policy-init-sha256] [total-envs]" >&2
@@ -265,11 +268,50 @@ PY
   )
 fi
 if [[ ${HMI_STAGE} == stage2 ]]; then
-  # This is an explicitly nonformal canary with a locally SHA-pinned Stage-1
-  # artifact, not a scientific lineage. Formal Stage 2 must attach finalized
-  # training provenance instead of using the legacy policy-load hatch.
-  export HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD=1
   TRAINING_ARGS+=(--training.policy-init-checkpoint="${POLICY_INIT_CHECKPOINT}")
+  if [[ -n ${POLICY_INIT_MIGRATION} ]]; then
+    [[ -n ${POLICY_INIT_RESET_NOISE_STD} ]] || {
+      echo "[ERROR] authenticated Stage 2 migration requires HMI_CANARY_POLICY_INIT_RESET_NOISE_STD" >&2
+      exit 2
+    }
+    TRAINING_ARGS+=(
+      --training.policy-init-actor-contract-migration="${POLICY_INIT_MIGRATION}"
+      --training.policy-init-reset-noise-std="${POLICY_INIT_RESET_NOISE_STD}"
+    )
+    HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_training_provenance.py" \
+      --training-regime pure_rl \
+      --motion-dir "${EXTERNAL_MOTION_DIR}" \
+      --object-map "${EXTERNAL_OBJECT_MAP}" \
+      --motion-shard-manifest "${SHARD_MANIFEST}" \
+      --source-root "${SOURCE_ROOT}" \
+      --policy-init-checkpoint "${POLICY_INIT_CHECKPOINT}")
+    export HOLOSOMA_TRAINING_PROVENANCE
+    unset HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD
+  else
+    # Backward-compatible, explicitly nonformal smoke for a local artifact.
+    # Formal Stage 2 and m8 migration canaries must use the authenticated path.
+    export HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD=1
+  fi
+fi
+if [[ ${M8_LARGE_ACTOR} == 1 ]]; then
+  [[ ${HMI_STAGE} == stage2 && -n ${POLICY_INIT_MIGRATION} ]] || {
+    echo "[ERROR] HMI_CANARY_M8_LARGE_ACTOR=1 requires authenticated Stage 2 migration" >&2
+    exit 2
+  }
+  TRAINING_ARGS+=(
+    --algo.config.init-noise-std=0.45
+    --algo.config.module-dict.actor.min-noise-std=0.01
+    --algo.config.module-dict.actor.layer-config.hidden-dims="[2048,1024,512,256,128]"
+    --perception.camera-apply-sensor-noise=True
+    --perception.camera-warp-edge-noise=True
+    --perception.camera-warp-enable-holes=True
+    --perception.camera-warp-hole-prob=0.2
+    --perception.camera-warp-additive-noise-std=0.03
+    --perception.camera-warp-depth-offset-std=0.03
+    --perception.object-geometry-mode=mesh
+    --perception.encoder-pretrained=False
+    --perception.encoder-freeze-backbone=False
+  )
 fi
 
 echo "[INFO] validating the exact deployment graph with ONNX checker and ORT parity"
