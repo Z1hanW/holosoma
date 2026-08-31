@@ -41,6 +41,8 @@ readonly POLICY_INIT_COMPLETED_ITERATION=38999
 readonly POLICY_INIT_NEXT_ITERATION=39000
 readonly POLICY_INIT_MIGRATION=precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1
 readonly POLICY_INIT_RESET_NOISE_STD=0.45
+readonly DEFM_SUBMODULE_SHA=63ec5e1c1a9b280dcde9910b845f57e9224ebab5
+readonly POINT_TRANSFORMER_SUBMODULE_SHA=3229e9b7de1770c8ad17c316f8e349982de509f8
 
 readonly MOTION_VIEW=/data/holosoma_inputs/corl79_plus_debug30_decoupled_turn_forward_v1/by-source/307e9662d498bd507b9d17ca9abf74a3654f7bf66ac6ab989c6f19c3889bddef
 readonly OBJECT_MAP=${MOTION_VIEW}/_clip_object_urdf_map.json
@@ -86,12 +88,25 @@ if [[ -n $(git -C "${SOURCE_ROOT}" status --porcelain --untracked-files=all -- \
   '*.py' '*.sh' '*.yaml' '*.yml' '*.toml' '*.json' '*.urdf' '*.xml') ]]; then
   die "formal clone contains untracked executable/config source"
 fi
-while IFS= read -r submodule_row; do
-  [[ -z ${submodule_row} || ${submodule_row:0:1} == " " ]] || die "submodule is not at the recorded clean gitlink: ${submodule_row}"
-done < <(git -C "${SOURCE_ROOT}" submodule status --recursive 2>/dev/null || true)
-git -C "${SOURCE_ROOT}" submodule foreach --quiet --recursive \
-  'git diff --quiet --ignore-submodules -- && git diff --cached --quiet --ignore-submodules --' \
-  || die "dirty submodule worktree"
+for submodule_spec in \
+  "submodules/defm:${DEFM_SUBMODULE_SHA}" \
+  "submodules/PointTransformerV3:${POINT_TRANSFORMER_SUBMODULE_SHA}"; do
+  submodule_path=${submodule_spec%%:*}
+  submodule_sha=${submodule_spec##*:}
+  [[ $(git -C "${SOURCE_ROOT}/${submodule_path}" rev-parse HEAD) == "${submodule_sha}" ]] \
+    || die "declared submodule SHA mismatch: ${submodule_path}"
+  git -C "${SOURCE_ROOT}/${submodule_path}" diff --quiet || die "dirty declared submodule: ${submodule_path}"
+  git -C "${SOURCE_ROOT}/${submodule_path}" diff --cached --quiet || die "dirty declared submodule index: ${submodule_path}"
+  [[ -z $(git -C "${SOURCE_ROOT}/${submodule_path}" status --porcelain --untracked-files=all) ]] \
+    || die "declared submodule contains untracked files: ${submodule_path}"
+done
+while read -r _mode _sha _stage legacy_path; do
+  case "${legacy_path}" in
+    submodules/defm|submodules/PointTransformerV3) continue ;;
+  esac
+  [[ -d ${SOURCE_ROOT}/${legacy_path} && -z $(find "${SOURCE_ROOT}/${legacy_path}" -mindepth 1 -print -quit 2>/dev/null) ]] \
+    || die "legacy unmapped gitlink must remain inactive and empty: ${legacy_path}"
+done < <(git -C "${SOURCE_ROOT}" ls-files --stage | awk '$1 == 160000')
 
 check_sha "${VIEW_MANIFEST_SHA256}" "${MOTION_VIEW}/manifest.json"
 check_sha "${OBJECT_MAP_SHA256}" "${OBJECT_MAP}"
@@ -185,17 +200,12 @@ trap 'rc=$?; printf "%s\t%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" > "${EXIT_
 FORMAL_GIT_VERIFICATION=${RUN_ROOT}/formal_git_verification.json
 "${PYTHON_BIN}" - "${FORMAL_GIT_VERIFICATION}" "${ORIGIN_URL}" "${REMOTE_REF}" \
   "${EXPECTED_COMMIT}" "${EXPECTED_TREE}" "${SOURCE_ROOT}" <<'PY'
-import datetime, json, os, subprocess, sys, tempfile
+import datetime, json, os, sys, tempfile
 path, remote_url, remote_ref, commit, tree, source_root = sys.argv[1:]
-submodules={}
-output=subprocess.run(
-    ["git", "-C", source_root, "submodule", "status", "--recursive"],
-    check=True, text=True, capture_output=True,
-).stdout
-for line in output.splitlines():
-    if line:
-        fields=line[1:].split()
-        submodules[fields[1]]=fields[0]
+submodules={
+    "submodules/defm": "63ec5e1c1a9b280dcde9910b845f57e9224ebab5",
+    "submodules/PointTransformerV3": "3229e9b7de1770c8ad17c316f8e349982de509f8",
+}
 payload={
     "version": 1,
     "verified_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -208,6 +218,7 @@ payload={
     "tracked_diff_clean": True,
     "untracked_clean": True,
     "declared_submodules": submodules,
+    "legacy_unmapped_gitlinks_inactive_and_empty": True,
 }
 fd,tmp=tempfile.mkstemp(prefix=".git-verification-",suffix=".json",dir=os.path.dirname(path))
 try:
