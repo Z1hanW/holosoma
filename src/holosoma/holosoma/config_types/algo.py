@@ -41,6 +41,12 @@ class LayerConfig:
     activation: str = "ELU"
     """Activation function name."""
 
+    lstm_hidden_dim: Annotated[int, Field(strict=True, ge=1, le=4096)] = 256
+    """Hidden-state width for full-policy LSTM modules."""
+
+    lstm_num_layers: Annotated[int, Field(strict=True, ge=1, le=8)] = 1
+    """Number of stacked recurrent layers for full-policy LSTM modules."""
+
     dropout_prob: float = 0.0
     """Dropout probability."""
 

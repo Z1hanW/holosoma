@@ -74,6 +74,8 @@ def _validate(
     motion_end_mode="continuing",
     runtime_prepend_compensation=False,
     offline_contact_region_names=None,
+    require_offline_contact_targets=True,
+    expected_valid_runtime_windows=None,
 ):
     return validate_contact_root(
         motion_dir,
@@ -85,6 +87,8 @@ def _validate(
         runtime_prepend_compensation=runtime_prepend_compensation,
         runtime_prepend_duration_s=0.2,
         offline_contact_region_names=offline_contact_region_names,
+        require_offline_contact_targets=require_offline_contact_targets,
+        expected_valid_runtime_windows=expected_valid_runtime_windows,
     )
 
 
@@ -122,6 +126,45 @@ def test_offline_contact_preflight_accepts_secondary_pitch_targets_when_wrists_a
             motion_dir,
             contact_root,
             offline_contact_region_names=["left_wrist", "right_wrist"],
+        )
+
+
+def test_no_positive_contact_reward_profile_allows_empty_contact_targets(tmp_path, capsys):
+    motion_dir, contact_root, clip_dir = _make_bank(tmp_path)
+    for side in ("left_wrist", "right_wrist"):
+        np.save(clip_dir / f"{side}_contact_points.npy", np.zeros((0, 3), dtype=np.float32))
+        np.save(clip_dir / f"{side}_contact_point_counts.npy", np.zeros((0,), dtype=np.int32))
+        np.save(clip_dir / f"{side}_contact_interval_steps.npy", np.asarray([-1, -1], dtype=np.int32))
+    np.savez(clip_dir / "teacher_rollout_reference.npz", **_rollout_payload())
+
+    assert _validate(
+        motion_dir,
+        contact_root,
+        require_offline_contact_targets=False,
+        expected_valid_runtime_windows=0,
+    ) == (contact_root / "clips").resolve()
+    stderr = capsys.readouterr().err
+    assert "required=False" in stderr
+    assert "contact_clip_coverage=0/1" in stderr
+
+    with pytest.raises(ValueError, match="no non-empty offline contact target"):
+        _validate(motion_dir, contact_root)
+
+
+def test_runtime_window_coverage_can_be_bound_exactly(tmp_path):
+    motion_dir, contact_root, clip_dir = _make_bank(tmp_path)
+    np.savez(clip_dir / "teacher_rollout_reference.npz", **_rollout_payload())
+
+    assert _validate(
+        motion_dir,
+        contact_root,
+        expected_valid_runtime_windows=1,
+    ) == (contact_root / "clips").resolve()
+    with pytest.raises(ValueError, match=r"expected 0/1, found 1/1"):
+        _validate(
+            motion_dir,
+            contact_root,
+            expected_valid_runtime_windows=0,
         )
 
 

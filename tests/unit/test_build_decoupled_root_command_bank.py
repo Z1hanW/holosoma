@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "build_decoupled_root_command_bank.py"
@@ -16,7 +17,10 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_portable_bank_preserves_assets_contacts_and_source_arrays(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_digest_field", ["payload_digest", "source_digest"])
+def test_portable_bank_preserves_assets_contacts_and_source_arrays(
+    tmp_path: Path, source_digest_field: str
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "_mesh_assets").mkdir()
@@ -69,7 +73,7 @@ def test_portable_bank_preserves_assets_contacts_and_source_arrays(tmp_path: Pat
     np.savez_compressed(source / "box_turn.npz", **arrays)
     source_manifest = {
         "clip_count": 1,
-        "payload_digest": "fixture-payload-digest",
+        source_digest_field: "fixture-payload-digest",
     }
     source_manifest_path = source / "manifest.json"
     source_manifest_path.write_text(

@@ -311,8 +311,7 @@ def _published_manifest_is_valid(
             or canonical_urdf_root.stat().st_mode & 0o222
             or rank_shards_root.is_symlink()
             or not rank_shards_root.is_dir()
-            or (rank_shards_mode & 0o200) == 0
-            or (rank_shards_mode & 0o002) != 0
+            or (rank_shards_mode & 0o022) != 0
         ):
             return False, manifest
         for expected in [*npz_records, *generated_records]:
@@ -425,6 +424,22 @@ def prepare_immutable_single_slot_bank(
         source_lineage_manifest=source_lineage_manifest,
     )
     output_root = output_base / "by-source" / view_digest
+
+    # Published content-addressed views are intentionally read-only.  Reusing
+    # one must therefore be a read-only operation: creating the sibling lock
+    # file is needed only when a generation still has to be published.
+    current, manifest = _published_manifest_is_valid(
+        output_root,
+        source_motion_dir=source_motion_dir,
+        source_object_map=source_object_map,
+        source_digest=source_digest,
+        view_digest=view_digest,
+        motion_generator_teacher=motion_generator_teacher,
+        source_lineage_manifest=source_lineage_manifest,
+    )
+    if current:
+        assert manifest is not None
+        return manifest
 
     with _output_lock(output_root):
         current, manifest = _published_manifest_is_valid(

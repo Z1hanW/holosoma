@@ -102,6 +102,30 @@ def test_single_slot_bank_is_content_addressed_reusable_and_active_only(tmp_path
     assert Path(second["output_root"]) == output_root
 
 
+def test_single_slot_bank_reuse_does_not_write_to_published_namespace(tmp_path: Path) -> None:
+    motion_dir, object_map = _write_source_bank(tmp_path)
+    output_base = tmp_path / "generated" / "single-slot"
+    first = prepare_immutable_single_slot_bank(
+        source_motion_dir=motion_dir,
+        source_object_map=object_map,
+        output_base=output_base,
+    )
+
+    by_source = output_base / "by-source"
+    (Path(first["output_root"]) / "_rank_shards").chmod(0o555)
+    by_source.chmod(0o555)
+    try:
+        second = prepare_immutable_single_slot_bank(
+            source_motion_dir=motion_dir,
+            source_object_map=object_map,
+            output_base=output_base,
+        )
+    finally:
+        by_source.chmod(0o755)
+
+    assert second == first
+
+
 def test_transition_source_change_publishes_a_new_single_slot_generation(tmp_path: Path) -> None:
     motion_dir, object_map = _write_source_bank(tmp_path)
     output_base = tmp_path / "generated"
@@ -235,7 +259,7 @@ def test_corrupt_published_generation_is_never_replaced_in_place(tmp_path: Path)
     assert (output_root / "manifest.json").read_text(encoding="utf-8") == "{}\n"
 
 
-@pytest.mark.parametrize("invalid_mode", [0o555, 0o757])
+@pytest.mark.parametrize("invalid_mode", [0o757])
 def test_reuse_rejects_invalid_rank_shards_permissions(
     tmp_path: Path,
     invalid_mode: int,

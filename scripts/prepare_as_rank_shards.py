@@ -1784,6 +1784,21 @@ def prepare_rank_shards(
     # parent or open its lock file.  The context manager repeats it after mkdir
     # and after lock acquisition to close both state-transition windows.
     _validate_output_path_components(output_root)
+    if output_root.exists():
+        try:
+            return validate_published_rank_shards(
+                motion_dir=motion_dir,
+                object_map=object_map,
+                output_root=output_root,
+                world_size=world_size,
+                environments_per_rank=environments_per_rank,
+                expected_source_digest=expected_source_digest,
+            )
+        except ValueError:
+            # Preserve the existing repair/reject behavior for a non-current
+            # publication.  A current sealed tree has already returned without
+            # creating a lock beside its read-only namespace.
+            pass
     with _output_lock(output_root):
         source_guard = _SourceScanGuard()
         metadata, specs = _active_clip_specs(

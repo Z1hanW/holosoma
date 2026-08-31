@@ -40,6 +40,8 @@ _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY = (
     "rolling_reference_delta_deployment_contract_sha256"
 )
 _ONNX_VALIDATION_CONTRACT_KEY = "onnx_validation_contract"
+_RECURRENT_POLICY_CONTRACT_KEY = "recurrent_policy_contract"
+_RECURRENT_POLICY_CONTRACT_SHA256_KEY = "recurrent_policy_contract_sha256"
 
 
 def _validate_contact_aware_carry_window_metadata(motion_config: Mapping[str, Any]) -> None:
@@ -113,6 +115,96 @@ def _require_exact_mapping_keys(
             f"missing={missing}, unexpected={unexpected}."
         )
     return value
+
+
+def recurrent_policy_contract_from_metadata(
+    metadata: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return a fully authenticated explicit recurrent-state contract."""
+
+    contract_present = _RECURRENT_POLICY_CONTRACT_KEY in metadata
+    digest_present = _RECURRENT_POLICY_CONTRACT_SHA256_KEY in metadata
+    if contract_present != digest_present:
+        raise PolicyContractError(
+            "Policy metadata must provide recurrent_policy_contract and its SHA-256 together."
+        )
+    if not contract_present:
+        return None
+
+    expected_keys = {
+        "version",
+        "kind",
+        "num_layers",
+        "hidden_dim",
+        "dtype",
+        "state_input_names",
+        "state_output_names",
+        "state_shape",
+        "state_batch_axis",
+        "step_semantics",
+        "reset_semantics",
+        "deployment_reset_events",
+    }
+    contract = _require_exact_mapping_keys(
+        metadata[_RECURRENT_POLICY_CONTRACT_KEY],
+        expected=expected_keys,
+        path="Policy metadata recurrent_policy_contract",
+    )
+    num_layers = contract["num_layers"]
+    hidden_dim = contract["hidden_dim"]
+    if (
+        isinstance(num_layers, bool)
+        or not isinstance(num_layers, Integral)
+        or not 1 <= int(num_layers) <= 8
+    ):
+        raise PolicyContractError("Recurrent policy num_layers must be an integer in [1, 8].")
+    if (
+        isinstance(hidden_dim, bool)
+        or not isinstance(hidden_dim, Integral)
+        or not 1 <= int(hidden_dim) <= 4096
+    ):
+        raise PolicyContractError("Recurrent policy hidden_dim must be an integer in [1, 4096].")
+    expected_values = {
+        "version": 1,
+        "kind": "lstm",
+        "dtype": "float32",
+        "state_input_names": ["hidden_state", "cell_state"],
+        "state_output_names": ["hidden_state_out", "cell_state_out"],
+        "state_shape": [int(num_layers), "batch", int(hidden_dim)],
+        "state_batch_axis": 1,
+        "step_semantics": "state_before_observation_to_state_after_observation",
+        "reset_semantics": "zero_after_done_before_next_observation",
+        "deployment_reset_events": [
+            "episode_reset",
+            "policy_start",
+            "policy_stop",
+            "policy_switch",
+        ],
+    }
+    for name, expected in expected_values.items():
+        if contract[name] != expected:
+            raise PolicyContractError(
+                f"Recurrent policy contract field {name!r} must be {expected!r}, "
+                f"got {contract[name]!r}."
+            )
+    try:
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PolicyContractError("Recurrent policy contract must be strict finite JSON.") from exc
+    expected_digest = hashlib.sha256(payload).hexdigest()
+    if metadata[_RECURRENT_POLICY_CONTRACT_SHA256_KEY] != expected_digest:
+        raise PolicyContractError(
+            "Recurrent policy contract SHA-256 mismatch: "
+            f"declared={metadata[_RECURRENT_POLICY_CONTRACT_SHA256_KEY]!r}, "
+            f"computed={expected_digest}."
+        )
+    return contract
 
 
 def _expected_precomputed_turn_then_forward_contract(
@@ -373,25 +465,29 @@ def _validate_precomputed_onnx_validation_contract(
 ) -> None:
     """Require the exporter-authenticated graph/runtime parity attestation."""
 
+    recurrent_contract = recurrent_policy_contract_from_metadata(metadata)
+    expected_keys = {
+        "version",
+        "checker",
+        "runtime",
+        "pytorch_vs_ort",
+        "input_names",
+        "output_names",
+        "probe_rows",
+        "rtol",
+        "atol",
+        "max_abs_error",
+        "max_rel_error",
+        "completed_iteration",
+        "actor_graph_semantics",
+        "precomputed_command_contract_sha256",
+        "rolling_reference_delta_contract_sha256",
+    }
+    if recurrent_contract is not None:
+        expected_keys.add("recurrent_policy_contract_sha256")
     validation = _require_exact_mapping_keys(
         metadata.get(_ONNX_VALIDATION_CONTRACT_KEY),
-        expected={
-            "version",
-            "checker",
-            "runtime",
-            "pytorch_vs_ort",
-            "input_names",
-            "output_names",
-            "probe_rows",
-            "rtol",
-            "atol",
-            "max_abs_error",
-            "max_rel_error",
-            "completed_iteration",
-            "actor_graph_semantics",
-            "precomputed_command_contract_sha256",
-            "rolling_reference_delta_contract_sha256",
-        },
+        expected=expected_keys,
         path=f"Policy metadata {_ONNX_VALIDATION_CONTRACT_KEY}",
     )
     completed_iteration = validation["completed_iteration"]
@@ -408,12 +504,14 @@ def _validate_precomputed_onnx_validation_contract(
             "ONNX validation completed_iteration must equal the policy metadata iteration."
         )
     exact_fields = {
-        "version": 1,
+        "version": 2 if recurrent_contract is not None else 1,
         "checker": "onnx.checker.check_model",
         "runtime": "onnxruntime_cpu",
         "pytorch_vs_ort": True,
         "actor_graph_semantics": (
-            "raw_actor_observation_plus_authenticated_external_observation_adapter"
+            "raw_actor_observation_plus_explicit_lstm_state"
+            if recurrent_contract is not None
+            else "raw_actor_observation_plus_authenticated_external_observation_adapter"
         ),
         "precomputed_command_contract_sha256": metadata.get(
             _PRECOMPUTED_COMMAND_CONTRACT_SHA256_KEY
@@ -422,6 +520,10 @@ def _validate_precomputed_onnx_validation_contract(
             _ROLLING_REFERENCE_DELTA_CONTRACT_SHA256_KEY
         ),
     }
+    if recurrent_contract is not None:
+        exact_fields["recurrent_policy_contract_sha256"] = metadata.get(
+            _RECURRENT_POLICY_CONTRACT_SHA256_KEY
+        )
     for field_name, expected in exact_fields.items():
         if validation[field_name] != expected:
             raise PolicyContractError(
@@ -1179,6 +1281,72 @@ def _feature_dim(shapes: Mapping[str, Sequence[Any]], name: str) -> int:
     return int(value)
 
 
+def _validate_recurrent_policy_graph(
+    contract: Mapping[str, Any] | None,
+    *,
+    input_shapes: Mapping[str, Sequence[Any]],
+    output_shapes: Mapping[str, Sequence[Any]],
+) -> None:
+    state_inputs = {"hidden_state", "cell_state"}
+    state_outputs = {"hidden_state_out", "cell_state_out"}
+    if contract is None:
+        unexpected = sorted(
+            state_inputs.intersection(input_shapes) | state_outputs.intersection(output_shapes)
+        )
+        if unexpected:
+            raise PolicyContractError(
+                "ONNX exposes recurrent state tensors without an authenticated recurrent policy "
+                f"contract: {unexpected}."
+            )
+        return
+
+    missing_inputs = sorted(state_inputs.difference(input_shapes))
+    missing_outputs = sorted(state_outputs.difference(output_shapes))
+    if missing_inputs or missing_outputs:
+        raise PolicyContractError(
+            "Authenticated recurrent ONNX graph is missing state tensors: "
+            f"inputs={missing_inputs}, outputs={missing_outputs}."
+        )
+    expected_layers = int(contract["num_layers"])
+    expected_hidden = int(contract["hidden_dim"])
+    state_tensors = [
+        (name, input_shapes) for name in sorted(state_inputs)
+    ] + [
+        (name, output_shapes) for name in sorted(state_outputs)
+    ]
+    for name, shapes in state_tensors:
+        shape = shapes[name]
+        if isinstance(shape, (str, bytes)) or len(shape) != 3:
+            raise PolicyContractError(
+                f"ONNX recurrent state {name!r} must have rank 3 [layers, batch, hidden], "
+                f"got {shape!r}."
+            )
+        layers, batch, hidden = shape
+        if (
+            isinstance(layers, bool)
+            or not isinstance(layers, Integral)
+            or int(layers) != expected_layers
+            or isinstance(hidden, bool)
+            or not isinstance(hidden, Integral)
+            or int(hidden) != expected_hidden
+        ):
+            raise PolicyContractError(
+                f"ONNX recurrent state {name!r} must have static shape "
+                f"[{expected_layers}, batch, {expected_hidden}], got {shape!r}."
+            )
+        if isinstance(batch, Integral) and not isinstance(batch, bool):
+            if int(batch) != 1:
+                raise PolicyContractError(
+                    f"ONNX recurrent state {name!r} fixed batch must be 1, got {batch}."
+                )
+        elif batch is None or (isinstance(batch, str) and batch):
+            pass
+        else:
+            raise PolicyContractError(
+                f"ONNX recurrent state {name!r} has invalid batch dimension {batch!r}."
+            )
+
+
 def _validate_float32_tensor_types(
     *,
     input_shapes: Mapping[str, Sequence[Any]],
@@ -1204,6 +1372,8 @@ def _validate_float32_tensor_types(
             "joint_vel",
             "ref_pos_xyz",
             "ref_quat_xyzw",
+            "hidden_state_out",
+            "cell_state_out",
         }
         for name in supported_outputs.intersection(output_shapes):
             tensor_type = output_types.get(name)
@@ -1412,6 +1582,12 @@ def validate_onnx_policy_contract(
         input_types=input_types,
         output_types=output_types,
     )
+    recurrent_contract = recurrent_policy_contract_from_metadata(metadata)
+    _validate_recurrent_policy_graph(
+        recurrent_contract,
+        input_shapes=input_shapes,
+        output_shapes=output_shapes,
+    )
     motion_transition_contract_from_metadata(metadata)
 
     configured_groups = _configured_actor_groups(observation)
@@ -1511,6 +1687,28 @@ def validate_onnx_policy_contract(
             )
         return False
     expected_groups, saved_groups, actor = extracted
+
+    actor_type = actor.get("type")
+    actor_declares_lstm = actor_type == "LSTM"
+    if actor_declares_lstm != (recurrent_contract is not None):
+        raise PolicyContractError(
+            "Serialized actor type and recurrent ONNX contract disagree: "
+            f"actor.type={actor_type!r}, recurrent_contract={recurrent_contract is not None}."
+        )
+    if recurrent_contract is not None:
+        recurrent_layer_config = actor.get("layer_config")
+        if not isinstance(recurrent_layer_config, Mapping):
+            raise PolicyContractError("LSTM actor metadata is missing layer_config.")
+        expected_recurrent_fields = {
+            "lstm_hidden_dim": int(recurrent_contract["hidden_dim"]),
+            "lstm_num_layers": int(recurrent_contract["num_layers"]),
+        }
+        for name, expected in expected_recurrent_fields.items():
+            if recurrent_layer_config.get(name) != expected:
+                raise PolicyContractError(
+                    f"LSTM actor metadata {name} must match its recurrent contract: "
+                    f"expected={expected}, got={recurrent_layer_config.get(name)!r}."
+                )
 
     experiment = metadata.get("experiment_config")
     if isinstance(experiment, Mapping):
@@ -2019,6 +2217,8 @@ def validate_onnx_policy_contract(
         )
 
     allowed_inputs = {obs_input_name}
+    if recurrent_contract is not None:
+        allowed_inputs.update(recurrent_contract["state_input_names"])
     if perception_name:
         allowed_inputs.add(perception_name)
     if "time_step" in input_shapes:

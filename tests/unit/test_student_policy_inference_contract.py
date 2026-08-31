@@ -1680,6 +1680,101 @@ def test_full_exported_object_training_contract_validates_at_inference(
     )
 
 
+def _recurrent_lstm_contract(hidden_dim: int = 256, num_layers: int = 1) -> tuple[dict, str]:
+    contract = {
+        "version": 1,
+        "kind": "lstm",
+        "num_layers": num_layers,
+        "hidden_dim": hidden_dim,
+        "dtype": "float32",
+        "state_input_names": ["hidden_state", "cell_state"],
+        "state_output_names": ["hidden_state_out", "cell_state_out"],
+        "state_shape": [num_layers, "batch", hidden_dim],
+        "state_batch_axis": 1,
+        "step_semantics": "state_before_observation_to_state_after_observation",
+        "reset_semantics": "zero_after_done_before_next_observation",
+        "deployment_reset_events": [
+            "episode_reset",
+            "policy_start",
+            "policy_stop",
+            "policy_switch",
+        ],
+    }
+    payload = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return contract, hashlib.sha256(payload).hexdigest()
+
+
+def test_full_policy_lstm_contract_validates_explicit_state_graph() -> None:
+    base = g1_29dof_wbt_w_object_generalist
+    actor = base.algo.config.module_dict.actor
+    lstm_actor = replace(
+        actor,
+        type="LSTM",
+        layer_config=replace(
+            actor.layer_config,
+            lstm_hidden_dim=256,
+            lstm_num_layers=1,
+        ),
+    )
+    training_config = replace(
+        base,
+        algo=replace(
+            base.algo,
+            config=replace(
+                base.algo.config,
+                module_dict=replace(base.algo.config.module_dict, actor=lstm_actor),
+            ),
+        ),
+    )
+    metadata = _export_metadata_from_training_config(training_config)
+    contract, digest = _recurrent_lstm_contract()
+    metadata["recurrent_policy_contract"] = contract
+    metadata["recurrent_policy_contract_sha256"] = digest
+
+    assert validate_onnx_policy_contract(
+        metadata=metadata,
+        input_shapes={
+            "actor_obs": ["batch", 875],
+            "hidden_state": [1, "batch", 256],
+            "cell_state": [1, "batch", 256],
+        },
+        output_shapes={
+            "action": ["batch", 29],
+            "hidden_state_out": [1, "batch", 256],
+            "cell_state_out": [1, "batch", 256],
+        },
+        observation=g1_29dof_wbt_object_generalist.observation,
+        runtime_dof_names=g1_29dof_wbt_object_generalist.robot.dof_names,
+        runtime_default_dof_angles=g1_29dof_wbt_object_generalist.robot.default_dof_angles,
+        runtime_motor_effort_limits=g1_29dof_wbt_object_generalist.robot.motor_effort_limit,
+        runtime_joint2motor=g1_29dof_wbt_object_generalist.robot.joint2motor,
+    )
+
+    with pytest.raises(PolicyContractError, match="static shape"):
+        validate_onnx_policy_contract(
+            metadata=metadata,
+            input_shapes={
+                "actor_obs": ["batch", 875],
+                "hidden_state": [1, "batch", 128],
+                "cell_state": [1, "batch", 256],
+            },
+            output_shapes={
+                "action": ["batch", 29],
+                "hidden_state_out": [1, "batch", 256],
+                "cell_state_out": [1, "batch", 256],
+            },
+            observation=g1_29dof_wbt_object_generalist.observation,
+            runtime_dof_names=g1_29dof_wbt_object_generalist.robot.dof_names,
+            runtime_default_dof_angles=g1_29dof_wbt_object_generalist.robot.default_dof_angles,
+        )
+
+
 @pytest.mark.parametrize(
     ("training_config", "wrong_runtime"),
     [

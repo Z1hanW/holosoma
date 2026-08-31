@@ -1670,5 +1670,56 @@ def test_critic_heightmap_encoder_accepts_separate_critic_perception_obs():
     assert values.shape == (batch_size, 1)
 
 
+def test_full_policy_lstm_step_sequence_and_done_reset_are_equivalent():
+    config = ModuleConfig(
+        type="LSTM",
+        input_dim=["actor_obs"],
+        output_dim=[3],
+        layer_config=LayerConfig(
+            hidden_dims=[16, 8],
+            activation="ELU",
+            lstm_hidden_dim=12,
+            lstm_num_layers=2,
+        ),
+    )
+    actor = PPOActor(
+        obs_dim_dict={"actor_obs": 5},
+        module_config_dict=config,
+        num_actions=3,
+        init_noise_std=0.5,
+        history_length={"actor_obs": 1},
+    )
+    torch.manual_seed(7)
+    observations = torch.randn(6, 4, 5)
+    dones = torch.zeros(6, 4, 1, dtype=torch.bool)
+    dones[1, 0] = True
+    dones[2, 2] = True
+    dones[4, 1] = True
+
+    initial_hidden = torch.zeros(2, 4, 12)
+    initial_cell = torch.zeros_like(initial_hidden)
+    sequence_means, sequence_hidden, sequence_cell = (
+        actor.actor_module.forward_recurrent_sequence(
+            observations,
+            dones=dones,
+            initial_hidden=initial_hidden,
+            initial_cell=initial_cell,
+        )
+    )
+
+    actor.reset(None)
+    step_means = []
+    for step in range(observations.shape[0]):
+        step_means.append(actor.act_inference({"actor_obs": observations[step]}))
+        actor.reset(dones[step])
+
+    assert torch.allclose(torch.stack(step_means), sequence_means, atol=1.0e-7, rtol=1.0e-6)
+    assert torch.allclose(actor.actor_module.module.hidden_state, sequence_hidden, atol=1.0e-7, rtol=1.0e-6)
+    assert torch.allclose(actor.actor_module.module.cell_state, sequence_cell, atol=1.0e-7, rtol=1.0e-6)
+    stored_hidden, stored_cell = actor.recurrent_state_before_step(observations[-1])
+    assert stored_hidden.shape == (4, 2, 12)
+    assert stored_cell.shape == (4, 2, 12)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

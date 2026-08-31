@@ -1291,6 +1291,210 @@ class PerceptionTimeGRU(nn.Module):
         return torch.stack(outputs, dim=0)
 
 
+class FullPolicyLSTM(nn.Module):
+    """Stateful rollout LSTM with explicit state APIs for PPO and deployment."""
+
+    is_recurrent = True
+    recurrent_kind = "lstm"
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        layer_config: LayerConfig,
+    ):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.hidden_dim = int(layer_config.lstm_hidden_dim)
+        self.num_layers = int(layer_config.lstm_num_layers)
+        if self.input_dim <= 0 or self.output_dim <= 0:
+            raise ValueError(
+                "FullPolicyLSTM input/output dimensions must be positive, "
+                f"got input={self.input_dim}, output={self.output_dim}."
+            )
+
+        self.lstm = nn.LSTM(
+            input_size=self.input_dim,
+            hidden_size=self.hidden_dim,
+            num_layers=self.num_layers,
+        )
+        self.head = build_mlp_layer(
+            self.hidden_dim,
+            layer_config.hidden_dims,
+            self.output_dim,
+            layer_config,
+        )
+        self.hidden_state: torch.Tensor | None = None
+        self.cell_state: torch.Tensor | None = None
+
+    def _zero_state(
+        self,
+        policy_input: torch.Tensor,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        shape = (self.num_layers, batch_size, self.hidden_dim)
+        return policy_input.new_zeros(shape), policy_input.new_zeros(shape)
+
+    def _validate_policy_input(self, policy_input: torch.Tensor, *, sequence: bool) -> None:
+        expected_rank = 3 if sequence else 2
+        if policy_input.ndim != expected_rank or policy_input.shape[-1] != self.input_dim:
+            layout = "[T, B, D]" if sequence else "[B, D]"
+            raise ValueError(
+                f"FullPolicyLSTM expects {layout} with D={self.input_dim}, "
+                f"got {tuple(policy_input.shape)}."
+            )
+
+    def _validated_state(
+        self,
+        policy_input: torch.Tensor,
+        hidden_state: torch.Tensor | None,
+        cell_state: torch.Tensor | None,
+        *,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if hidden_state is None and cell_state is None:
+            return self._zero_state(policy_input, batch_size)
+        if hidden_state is None or cell_state is None:
+            raise ValueError("FullPolicyLSTM hidden and cell state must be provided together.")
+        expected_shape = (self.num_layers, batch_size, self.hidden_dim)
+        if tuple(hidden_state.shape) != expected_shape or tuple(cell_state.shape) != expected_shape:
+            raise ValueError(
+                "FullPolicyLSTM state shape mismatch: "
+                f"expected={expected_shape}, hidden={tuple(hidden_state.shape)}, "
+                f"cell={tuple(cell_state.shape)}."
+            )
+        if hidden_state.device != policy_input.device or cell_state.device != policy_input.device:
+            raise ValueError("FullPolicyLSTM state and policy input must be on the same device.")
+        if hidden_state.dtype != policy_input.dtype or cell_state.dtype != policy_input.dtype:
+            raise ValueError("FullPolicyLSTM state and policy input must have the same dtype.")
+        return hidden_state, cell_state
+
+    def state_before_step(self, policy_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return detached per-environment state as ``[B, L, H]`` for storage."""
+
+        self._validate_policy_input(policy_input, sequence=False)
+        hidden, cell = self._validated_state(
+            policy_input,
+            self.hidden_state,
+            self.cell_state,
+            batch_size=policy_input.shape[0],
+        )
+        return (
+            hidden.permute(1, 0, 2).detach().clone(),
+            cell.permute(1, 0, 2).detach().clone(),
+        )
+
+    def forward_explicit(
+        self,
+        policy_input: torch.Tensor,
+        hidden_state: torch.Tensor,
+        cell_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One stateless step used by ONNX and parity validation."""
+
+        self._validate_policy_input(policy_input, sequence=False)
+        hidden_state, cell_state = self._validated_state(
+            policy_input,
+            hidden_state,
+            cell_state,
+            batch_size=policy_input.shape[0],
+        )
+        recurrent_output, (hidden_out, cell_out) = self.lstm(
+            policy_input.unsqueeze(0),
+            (hidden_state, cell_state),
+        )
+        return self.head(recurrent_output.squeeze(0)), hidden_out, cell_out
+
+    def forward_sequence(
+        self,
+        policy_input: torch.Tensor,
+        *,
+        dones: torch.Tensor | None,
+        initial_hidden: torch.Tensor,
+        initial_cell: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate a rollout sequence with reset-after-transition semantics."""
+
+        self._validate_policy_input(policy_input, sequence=True)
+        time_steps, batch_size = policy_input.shape[:2]
+        hidden, cell = self._validated_state(
+            policy_input,
+            initial_hidden,
+            initial_cell,
+            batch_size=batch_size,
+        )
+        if dones is not None and tuple(dones.shape[:2]) != (time_steps, batch_size):
+            raise ValueError(
+                "FullPolicyLSTM dones must begin with [T, B], "
+                f"expected={(time_steps, batch_size)}, got={tuple(dones.shape)}."
+            )
+
+        recurrent_outputs: list[torch.Tensor] = []
+        for step in range(time_steps):
+            output, (hidden, cell) = self.lstm(
+                policy_input[step : step + 1],
+                (hidden, cell),
+            )
+            recurrent_outputs.append(output.squeeze(0))
+            if dones is not None:
+                keep = (~dones[step].reshape(batch_size).bool()).to(dtype=hidden.dtype)
+                keep = keep.view(1, batch_size, 1)
+                hidden = hidden * keep
+                cell = cell * keep
+
+        recurrent_sequence = torch.stack(recurrent_outputs, dim=0)
+        output_sequence = self.head(recurrent_sequence.flatten(0, 1)).view(
+            time_steps,
+            batch_size,
+            self.output_dim,
+        )
+        return output_sequence, hidden, cell
+
+    def reset(self, dones: torch.Tensor | None = None) -> None:
+        if dones is None:
+            self.hidden_state = None
+            self.cell_state = None
+            return
+        if self.hidden_state is None and self.cell_state is None:
+            return
+        if self.hidden_state is None or self.cell_state is None:
+            raise RuntimeError("FullPolicyLSTM live hidden/cell state became inconsistent.")
+        batch_size = self.hidden_state.shape[1]
+        if dones.numel() != batch_size:
+            raise ValueError(
+                f"FullPolicyLSTM reset expected {batch_size} done values, got {dones.numel()}."
+            )
+        keep = (~dones.reshape(batch_size).bool()).to(
+            device=self.hidden_state.device,
+            dtype=self.hidden_state.dtype,
+        ).view(1, batch_size, 1)
+        self.hidden_state = self.hidden_state * keep
+        self.cell_state = self.cell_state * keep
+
+    def snapshot_live_state(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        return self.hidden_state, self.cell_state
+
+    def restore_live_state(
+        self,
+        state: tuple[torch.Tensor | None, torch.Tensor | None],
+    ) -> None:
+        self.hidden_state, self.cell_state = state
+
+    def forward(self, policy_input: torch.Tensor) -> torch.Tensor:
+        self._validate_policy_input(policy_input, sequence=False)
+        hidden, cell = self._validated_state(
+            policy_input,
+            self.hidden_state,
+            self.cell_state,
+            batch_size=policy_input.shape[0],
+        )
+        output, hidden_out, cell_out = self.forward_explicit(policy_input, hidden, cell)
+        self.hidden_state = hidden_out.detach()
+        self.cell_state = cell_out.detach()
+        return output
+
+
 def build_cnn_layer(
     input_channels: int,
     input_height: int,
@@ -1577,6 +1781,17 @@ class BaseModule(nn.Module):
                 self.output_dim,
                 layer_config,
             )
+        elif layer_type == "LSTM":
+            if layer_config.perception_input_name:
+                raise ValueError(
+                    "Full-policy LSTM modules consume their complete serialized observation; "
+                    "external perception inputs are not supported."
+                )
+            self.module = FullPolicyLSTM(
+                self.input_dim,
+                self.output_dim,
+                layer_config,
+            )
         elif layer_type == "FlowMLP":
             if layer_config.perception_input_name:
                 raise ValueError("perception_input_name is not supported for FlowMLP modules.")
@@ -1782,6 +1997,68 @@ class BaseModule(nn.Module):
                 raise ValueError("Extra input provided but module is not configured for extra_input_to_hidden.")
             return self.module(policy_input, extra_input=extra_input)
         return self.module(policy_input)
+
+    @property
+    def is_recurrent(self) -> bool:
+        return bool(getattr(self.module, "is_recurrent", False))
+
+    @property
+    def recurrent_kind(self) -> str | None:
+        value = getattr(self.module, "recurrent_kind", None)
+        return None if value is None else str(value)
+
+    def recurrent_state_before_step(
+        self,
+        policy_input: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.is_recurrent or not hasattr(self.module, "state_before_step"):
+            raise ValueError("recurrent_state_before_step requested for a non-recurrent module.")
+        return self.module.state_before_step(policy_input)
+
+    def forward_recurrent_explicit(
+        self,
+        policy_input: torch.Tensor,
+        hidden_state: torch.Tensor,
+        cell_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.is_recurrent or not hasattr(self.module, "forward_explicit"):
+            raise ValueError("Explicit recurrent inference requested for a non-recurrent module.")
+        return self.module.forward_explicit(policy_input, hidden_state, cell_state)
+
+    def forward_recurrent_sequence(
+        self,
+        policy_input: torch.Tensor,
+        *,
+        dones: torch.Tensor | None,
+        initial_hidden: torch.Tensor,
+        initial_cell: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.is_recurrent or not hasattr(self.module, "forward_sequence"):
+            raise ValueError("Recurrent sequence evaluation requested for a non-recurrent module.")
+        return self.module.forward_sequence(
+            policy_input,
+            dones=dones,
+            initial_hidden=initial_hidden,
+            initial_cell=initial_cell,
+        )
+
+    def reset_recurrent_state(self, dones: torch.Tensor | None = None) -> None:
+        if self.is_recurrent:
+            self.module.reset(dones)
+
+    def snapshot_recurrent_state(self) -> tuple[torch.Tensor | None, torch.Tensor | None] | None:
+        if not self.is_recurrent:
+            return None
+        return self.module.snapshot_live_state()
+
+    def restore_recurrent_state(
+        self,
+        state: tuple[torch.Tensor | None, torch.Tensor | None] | None,
+    ) -> None:
+        if self.is_recurrent:
+            if state is None:
+                raise ValueError("A recurrent module requires a hidden/cell state snapshot.")
+            self.module.restore_live_state(state)
 
     @property
     def supports_flow_matching(self) -> bool:

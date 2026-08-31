@@ -5686,6 +5686,13 @@ grep -F 'export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1' distill_as_percept
   fail 'the real AS distill path must require complete runtime contact-window coverage'
 grep -F 'export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=1' distill_as_perception.sh >/dev/null ||
   fail 'the real AS distill path must require complete runtime contact-target coverage'
+grep -F 'ALLOW_PARTIAL_CONTACT_SIDECARS requires ENABLE_OFFLINE_CONTACT_GUIDANCE=False.' \
+  distill_as_perception.sh >/dev/null ||
+  fail 'partial rollout sidecars must be forbidden while positive offline contact guidance is enabled'
+grep -F 'export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=0' distill_as_perception.sh >/dev/null ||
+  fail 'an explicit no-contact rollout profile must be able to retain honest partial interval coverage'
+grep -F 'export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=0' distill_as_perception.sh >/dev/null ||
+  fail 'an explicit no-contact rollout profile must be able to retain honest partial target coverage'
 grep -F 'AS_CONTACT_AWARE_DEPLOYMENT_HISTORY_LENGTH=5' distill_as_perception.sh >/dev/null ||
   fail 'AS contact-aware-history must pin its deployable actor history to five frames'
 grep -F 'STUDENT_PROPRIO_HISTORY_LENGTH CRITIC_PROPRIO_HISTORY_LENGTH' \

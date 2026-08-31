@@ -408,6 +408,8 @@ def validate_contact_root(
     offline_contact_region_names: list[str] | None = None,
     offline_wrist_region_names: list[str] | None = None,
     require_stable_contact: bool = True,
+    require_offline_contact_targets: bool = True,
+    expected_valid_runtime_windows: int | None = None,
 ) -> Path:
     motion_dir = motion_dir.expanduser().resolve()
     contact_root = contact_root.expanduser().resolve()
@@ -417,6 +419,11 @@ def validate_contact_root(
         )
     if motion_end_mode not in {"episodic", "continuing"}:
         raise ValueError(f"motion_end_mode must be episodic or continuing, got {motion_end_mode!r}")
+    if expected_valid_runtime_windows is not None and expected_valid_runtime_windows < 0:
+        raise ValueError(
+            "expected_valid_runtime_windows must be non-negative, got "
+            f"{expected_valid_runtime_windows}"
+        )
     contact_region_names = list(
         DEFAULT_OFFLINE_CONTACT_REGION_NAMES
         if offline_contact_region_names is None
@@ -455,6 +462,7 @@ def validate_contact_root(
     errors: list[str] = []
     runtime_window_count = 0
     contact_region_clip_counts = {region_name: 0 for region_name in contact_region_names}
+    contact_target_clip_count = 0
     wrist_target_clip_count = 0
     for clip_id in motion_ids:
         candidates = dirs_by_id.get(clip_id, [])
@@ -480,13 +488,14 @@ def validate_contact_root(
                 contact_region_names,
                 require_stable_contact=require_stable_contact,
             )
-            if not active_contact_regions:
+            if require_offline_contact_targets and not active_contact_regions:
                 raise ValueError(
                     "no non-empty offline contact target among configured regions "
                     f"{contact_region_names!r}"
                 )
             for region_name in active_contact_regions:
                 contact_region_clip_counts[region_name] += 1
+            contact_target_clip_count += int(bool(active_contact_regions))
             active_wrist_regions = _validate_offline_contact_target_regions(
                 candidates[0],
                 clip_id,
@@ -501,6 +510,15 @@ def validate_contact_root(
         preview = "\n  - ".join(errors[:20])
         suffix = "" if len(errors) <= 20 else f"\n  ... and {len(errors) - 20} more error(s)"
         raise ValueError("Contact sidecar contract validation failed:\n  - " + preview + suffix)
+    if (
+        expected_valid_runtime_windows is not None
+        and runtime_window_count != expected_valid_runtime_windows
+    ):
+        raise ValueError(
+            "Runtime contact-window coverage mismatch: "
+            f"expected {expected_valid_runtime_windows}/{len(motion_ids)}, "
+            f"found {runtime_window_count}/{len(motion_ids)}"
+        )
     if runtime_prepend_compensation:
         print(
             "[INFO] runtime_contact_window_preflight "
@@ -514,7 +532,8 @@ def validate_contact_root(
     )
     print(
         "[INFO] offline_contact_target_preflight "
-        f"contact_clip_coverage={len(motion_ids)}/{len(motion_ids)} "
+        f"required={require_offline_contact_targets} "
+        f"contact_clip_coverage={contact_target_clip_count}/{len(motion_ids)} "
         f"wrist_clip_coverage={wrist_target_clip_count}/{len(motion_ids)} "
         f"per_region={coverage}",
         file=sys.stderr,
@@ -545,6 +564,19 @@ def main() -> None:
         "--offline-wrist-region-names",
         default=json.dumps(DEFAULT_OFFLINE_WRIST_REGION_NAMES),
     )
+    parser.add_argument(
+        "--allow-missing-offline-contact-targets",
+        action="store_true",
+        help=(
+            "Validate all present contact arrays but allow clips with no non-empty contact target. "
+            "This is only appropriate when positive offline/contact-guidance rewards are disabled."
+        ),
+    )
+    parser.add_argument(
+        "--expected-valid-runtime-windows",
+        type=int,
+        help="Require this exact number of clips to have a valid runtime contact window.",
+    )
     args = parser.parse_args()
     tracked_body_names = json.loads(args.tracked_body_names)
     if not isinstance(tracked_body_names, list) or not all(isinstance(value, str) for value in tracked_body_names):
@@ -569,6 +601,8 @@ def main() -> None:
             runtime_prepend_duration_s=args.runtime_prepend_duration_s,
             offline_contact_region_names=offline_contact_region_names,
             offline_wrist_region_names=offline_wrist_region_names,
+            require_offline_contact_targets=not args.allow_missing_offline_contact_targets,
+            expected_valid_runtime_windows=args.expected_valid_runtime_windows,
         )
     except Exception as exc:
         raise SystemExit(f"[ERROR] {exc}") from exc

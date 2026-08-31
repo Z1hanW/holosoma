@@ -573,8 +573,34 @@ export STUDENT_MOTION_END_MODE
 export HOLOSOMA_DISABLE_AUTO_RESET=0
 export HOLOSOMA_DISABLE_CLIP_END_RESET=0
 export HOLOSOMA_DISABLE_MOTION_END_RESET=0
-export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1
-export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=1
+ALLOW_PARTIAL_CONTACT_SIDECARS=$(echo "${ALLOW_PARTIAL_CONTACT_SIDECARS:-0}" | tr '[:upper:]' '[:lower:]')
+case "${ALLOW_PARTIAL_CONTACT_SIDECARS}" in
+  1|true|yes|on)
+    case "$(echo "${ENABLE_OFFLINE_CONTACT_GUIDANCE:-True}" | tr '[:upper:]' '[:lower:]')" in
+      0|false|no|off)
+        ;;
+      *)
+        echo "[ERROR] ALLOW_PARTIAL_CONTACT_SIDECARS requires ENABLE_OFFLINE_CONTACT_GUIDANCE=False." >&2
+        exit 2
+        ;;
+    esac
+    if [[ "${CONTACT_SIDECAR_MODE:-full-sidecars}" != "full-sidecars" ]]; then
+      echo "[ERROR] ALLOW_PARTIAL_CONTACT_SIDECARS is only valid for full-sidecars rollout data." >&2
+      exit 2
+    fi
+    export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=0
+    export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=0
+    ;;
+  0|false|no|off|"")
+    export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=1
+    export HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=1
+    ;;
+  *)
+    echo "[ERROR] ALLOW_PARTIAL_CONTACT_SIDECARS must be a boolean. Got: ${ALLOW_PARTIAL_CONTACT_SIDECARS}" >&2
+    exit 2
+    ;;
+esac
+export ALLOW_PARTIAL_CONTACT_SIDECARS
 echo "[INFO] training_reset_contract disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET} disable_motion_end_reset=${HOLOSOMA_DISABLE_MOTION_END_RESET}"
 echo "[INFO] contact_coverage_contract intervals=${HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE} targets=${HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE}"
 case "$(echo "${AS_SUCCESS133_FINAL0P5}" | tr '[:upper:]' '[:lower:]')" in
@@ -1288,6 +1314,10 @@ PY
       --runtime-prepend-duration-s "${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}"
     )
   fi
+  CONTACT_PARTIAL_TARGET_ARGS=()
+  if [[ "${ALLOW_PARTIAL_CONTACT_SIDECARS}" == "1" ]]; then
+    CONTACT_PARTIAL_TARGET_ARGS=(--allow-missing-offline-contact-targets)
+  fi
   if [[ "${CONTACT_SIDECAR_MODE}" == "runtime-intervals" ]]; then
     case "$(echo "${ENABLE_OFFLINE_CONTACT_GUIDANCE:-True}" | tr '[:upper:]' '[:lower:]')" in
       0|false|no|off)
@@ -1313,6 +1343,7 @@ PY
       --motion-end-mode "${STUDENT_MOTION_END_MODE}" \
       "${CONTACT_VALIDATOR_EXPECTED_ARGS[@]}" \
       "${CONTACT_RUNTIME_PREPEND_ARGS[@]}" \
+      "${CONTACT_PARTIAL_TARGET_ARGS[@]}" \
       --tracked-body-names "${AS_ROLLOUT_TRACKED_BODY_NAMES}" \
       --ref-body-name "${AS_ROLLOUT_REF_BODY_NAME}" \
       --offline-contact-region-names "${OFFLINE_CONTACT_REGION_NAMES}" \

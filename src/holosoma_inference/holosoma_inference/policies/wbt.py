@@ -2654,6 +2654,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._reset_per_model_motion_state_for_setup()
 
         self._onnx_metadata = metadata
+        self._configure_policy_recurrent_state(metadata)
         embedded_timeline_contract = embedded_motion_timeline_contract_from_metadata(
             metadata
         )
@@ -2744,12 +2745,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._onnx_output_fetch.append("ref_pos_xyz")
 
         def policy_act(input_feed):
-            prepared_feed = self._prepare_policy_input_feed(input_feed)
-            output = self.onnx_policy_session.run(self._onnx_output_fetch, prepared_feed)
-            return {
-                name: self._require_finite_array(value, label=f"ONNX output {name!r}")
-                for name, value in zip(self._onnx_output_fetch, output, strict=True)
-            }
+            return self._run_policy_onnx(input_feed, self._onnx_output_fetch)
 
         self.policy = policy_act
 
