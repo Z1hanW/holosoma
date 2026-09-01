@@ -2,6 +2,14 @@
 
 仓库中较长的科学训练约束和实验交接记录位于 `agent.md`。涉及正式训练、resume、policy init、evaluation 或 W&B 生命周期时，先查阅其中对应章节，不得仅凭旧命令猜测实验契约。
 
+## 正式训练启动不上传视频
+
+未来任何 formal training 的新建、重启、resume 或迁移都不得把 replay/video 录制、上传或远端 W&B media 验证作为启动门：
+
+- launcher/worker 不得要求 `RULE90_*`、`REPLAY_PREFLIGHT_*` 或预先存在的 `vis/replay`；source、data、object、shard、teacher/checkpoint 和 ONNX 合同通过后应直接启动训练。
+- `FRESH_WANDB_RUN_ID` 仅可作为可选的预分配 identity；未提供时由训练 logger 创建 fresh run，不能为了取得 run ID 先上传视频。
+- 用户显式要求 replay/video 时，使用独立的录制/上传流程，不得阻塞、延迟或改变 training launch，也不得把缺少视频当成训练失败。
+
 ## Policy rollout 视频的默认指令：抬起后持续纯前向
 
 除非用户明确要求 checkpoint-native/reference-tracking、指定其他 command，或要求 reference-motion replay，今后录制 checkpoint policy rollout 视频时默认使用“物体抬起后持续纯前向”，不得只录 native motion-derived command 后就作为默认交付：
@@ -41,7 +49,7 @@ W&B 交付契约：
 - 上传完成后用 fresh W&B API 复核 run 已 `finished`、独立 MP4 数等于 source clip 数、Artifact 中为 `N` 个 MP4 加一个 manifest，并核对 summary count、manifest digest 与 source-view digest。只有远端复核通过才可向用户报告完成。
 - 本地保留带时间戳的 output root、分片日志、逐 clip manifest、最终 `reference_replay_manifest.json` 和 `wandb_result.json`，便于重试与审计。
 
-这与 formal-training Rule-90 的单条 `vis/replay` 不同：Rule-90 是训练前只回放 canonical 第一条 clip 的 provenance gate；这里的用户交付是把 effective bank 的全部 reference sequences 各录一条并在独立 W&B run 中可浏览。
+以上仅适用于用户显式要求的 replay 交付；它不是 formal-training 的启动门，也不得在训练启动前自动执行。
 
 ### 已确认的黄金样例
 

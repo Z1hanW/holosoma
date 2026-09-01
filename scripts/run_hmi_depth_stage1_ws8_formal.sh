@@ -4,8 +4,8 @@ set -euo pipefail
 # Single-node, eight-rank formal Stage-1 launcher.  Code always comes from the
 # caller's clean exact-commit Git clone.  Scientific assets and audit receipts
 # are immutable, SHA-bound inputs and never carry executable source.
-if [[ $# -ne 13 ]]; then
-  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <rule90-manifest> <rule90-manifest-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256>" >&2
+if [[ $# -ne 11 ]]; then
+  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256>" >&2
   exit 2
 fi
 
@@ -17,12 +17,10 @@ RUN_NAME=$4
 RUN_ROOT=$5
 RUN_CONTRACT=$6
 RUN_CONTRACT_SHA256=$7
-RULE90_MANIFEST=$8
-RULE90_MANIFEST_SHA256=$9
-SOURCE_ID=${10}
-GIT_ARCHIVE_SHA256=${11}
-ONNX_RECEIPT=${12}
-ONNX_RECEIPT_SHA256=${13}
+SOURCE_ID=$8
+GIT_ARCHIVE_SHA256=$9
+ONNX_RECEIPT=${10}
+ONNX_RECEIPT_SHA256=${11}
 
 readonly ORIGIN_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=origin/experiment/hmi-depth-interface
@@ -70,7 +68,6 @@ check_sha() {
 [[ ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]] || die "invalid expected commit"
 [[ ${EXPECTED_TREE} =~ ^[0-9a-f]{40}$ ]] || die "invalid expected tree"
 [[ ${RUN_CONTRACT_SHA256} =~ ^[0-9a-f]{64}$ ]] || die "invalid contract SHA256"
-[[ ${RULE90_MANIFEST_SHA256} =~ ^[0-9a-f]{64}$ ]] || die "invalid Rule-90 manifest SHA256"
 [[ ${GIT_ARCHIVE_SHA256} =~ ^[0-9a-f]{64}$ ]] || die "invalid Git archive SHA256"
 [[ ${ONNX_RECEIPT_SHA256} =~ ^[0-9a-f]{64}$ ]] || die "invalid ONNX receipt SHA256"
 [[ ${SOURCE_ID} =~ ^src-[0-9a-f]{64}$ ]] || die "invalid immutable source id"
@@ -99,7 +96,6 @@ check_sha "${SHARD_MANIFEST_SHA256}" "${SHARD_MANIFEST}"
 check_sha "${CANONICAL_NPZ_SHA256}" "${MOTION_VIEW}/${CANONICAL_CLIP_ID}.npz"
 check_sha "${CANONICAL_URDF_SHA256}" "${MOTION_VIEW}/_single_slot_urdfs/${CANONICAL_CLIP_ID}.urdf"
 check_sha "${RUN_CONTRACT_SHA256}" "${RUN_CONTRACT}"
-check_sha "${RULE90_MANIFEST_SHA256}" "${RULE90_MANIFEST}"
 check_sha "${ONNX_RECEIPT_SHA256}" "${ONNX_RECEIPT}"
 
 # shellcheck disable=SC1091
@@ -162,16 +158,6 @@ assert onnx["terminal_pair"]["onnx_checker"] is True
 assert onnx["terminal_pair"]["onnxruntime_loaded"] is True
 assert onnx["terminal_pair"]["pytorch_vs_ort"] is True
 PY
-
-"${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
-  --manifest "${RULE90_MANIFEST}" \
-  --expected-manifest-sha256 "${RULE90_MANIFEST_SHA256}" \
-  --expected-source-snapshot-id "${SOURCE_ID}" \
-  --expected-entity "${ENTITY}" \
-  --expected-project "${PROJECT}" \
-  --expected-run-id "${WANDB_RUN_ID}" \
-  --expected-run-name "${RUN_NAME}" \
-  --expected-world-size "${WORLD_SIZE}" >/dev/null
 
 mapfile -t GPU_ROWS < <(nvidia-smi --query-gpu=index,name,ecc.errors.uncorrected.volatile.total --format=csv,noheader,nounits)
 [[ ${#GPU_ROWS[@]} -eq 8 ]] || die "expected exactly eight GPUs"
@@ -277,7 +263,7 @@ unset RESUME_CKPT RESUME_CHECKPOINT RESUME_MODEL_FILE RESUME_STEP
 unset POLICY_INIT_CKPT POLICY_INIT_CHECKPOINT RESUME_FROM_BOX BOX_RESUME_CKPT
 unset TEACHER_CHECKPOINT TEACHER_CHECKPOINT_EXPECTED_SHA256
 export WANDB_ENTITY="${ENTITY}" WANDB_PROJECT="${PROJECT}" WANDB_RUN_ID
-export WANDB_RESUME=must WANDB_RESUME_SAME_RUN=0 WANDB_CONSOLE=off WANDB_INIT_TIMEOUT=120
+export WANDB_RESUME=never WANDB_RESUME_SAME_RUN=0 WANDB_CONSOLE=off WANDB_INIT_TIMEOUT=120
 export WANDB_DIR="${RUN_ROOT}/wandb" LOGGER_BASE_DIR="${RUN_ROOT}/training_logs"
 export HOLOSOMA_REQUIRE_WANDB_RUN=1
 

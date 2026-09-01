@@ -98,8 +98,8 @@ The single-node formal Stage-1 entrypoint is
 `scripts/run_hmi_depth_stage1_ws8_formal.sh`. It requires a clean clone fetched
 directly from the pushed experiment branch, binds the exact Git commit/tree,
 CORL79 single-slot view, 8-rank/4096-env shard topology, real ONNX receipt,
-immutable run contract, and remotely verified Rule-90 manifest before checking
-GPU idleness or starting workers. It launches fresh Stage 1 only: 8 ranks,
+and immutable run contract before checking GPU idleness or starting workers.
+Replay/video publication is not part of the launch path. It launches fresh Stage 1 only: 8 ranks,
 4096 environments per rank, 15,000 iterations, 1,000-iteration atomic PT+ONNX
 checkpoints, and no resume or policy initialization.
 
@@ -116,4 +116,5 @@ shapes must remain identical. The launcher uses the exact 109-clip m8 bank,
 50/50 track/generation partition, 20,000 iterations, no contact reward, and
 the upstream Stage-2 exploration reset `std=0.45`. It requires a real
 policy-init canary/ONNX receipt, immutable m8 PT/pair digests, and a remotely
-verified Rule-90 replay before taking formal GPUs.
+verified source/data contract before taking formal GPUs. Replay/video remains
+an explicit, post-launch diagnostic only.

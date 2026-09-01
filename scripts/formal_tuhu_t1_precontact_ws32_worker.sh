@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 17 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^[0-3]$ ]]; then
-  echo "usage: $0 MODE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA" >&2
+if [[ $# -ne 15 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^[0-3]$ ]]; then
+  echo "usage: $0 MODE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA" >&2
   exit 2
 fi
 
 readonly MODE=$1 NODE_RANK=$2 EXPECTED_IP=$3 SOURCE_ROOT=$4 PERSIST_ROOT=$5
 readonly MASTER_ADDR=$6 MASTER_PORT=$7 RUN_ID=$8 RUN_NAME=$9 CONTRACT_PATH=${10}
-readonly CONTRACT_SHA=${11} RULE90_PATH=${12} RULE90_SHA=${13} CANARY_PATH=${14}
-readonly CANARY_SHA=${15} COMMIT_SHA=${16} TREE_SHA=${17}
+readonly CONTRACT_SHA=${11} CANARY_PATH=${12} CANARY_SHA=${13} COMMIT_SHA=${14}
+readonly TREE_SHA=${15}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly NPROC=8 NNODES=4 WORLD_SIZE=32 ENVIRONMENTS_PER_RANK=2048
@@ -31,7 +31,7 @@ readonly ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_drop_button','
 
 if [[ ${MODE} == formal ]]; then
   readonly TARGET_ITERATIONS=60000 SAVE_INTERVAL=1000
-  [[ ${RUN_ID} != - && ${RUN_NAME} != - && ${CONTRACT_PATH} != - && ${RULE90_PATH} != - && ${CANARY_PATH} != - ]]
+  [[ ${RUN_ID} != - && ${RUN_NAME} != - && ${CONTRACT_PATH} != - && ${CANARY_PATH} != - ]]
 else
   readonly TARGET_ITERATIONS=2 SAVE_INTERVAL=2
 fi
@@ -65,7 +65,6 @@ check_sha "${SHARD_MANIFEST_SHA256}" "${SHARD_ROOT}/manifest.json"
 check_sha "${NCCL_SHA256}" "${NCCL_ROOT}/libnccl.so.2"
 if [[ ${MODE} == formal ]]; then
   check_sha "${CONTRACT_SHA}" "${CONTRACT_PATH}"
-  check_sha "${RULE90_SHA}" "${RULE90_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
 fi
 
@@ -145,13 +144,6 @@ expected={"accepted":True,"world_size":32,"environments_per_rank":2048,
 for key,value in expected.items():
     if payload.get(key)!=value: raise SystemExit(f"invalid canary {key}: {payload.get(key)!r}")
 PY
-  if [[ ${NODE_RANK} == 0 ]]; then
-    "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
-      --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
-      --required-manifest-version 1 --expected-source-snapshot-id "${SOURCE_SNAPSHOT_ID}" \
-      --expected-entity zihanw22 --expected-project carry-any --expected-run-id "${RUN_ID}" \
-      --expected-run-name "${RUN_NAME}" --expected-world-size 32
-  fi
 fi
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -193,7 +185,7 @@ export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=True HOLOSOMA_PERCEPTION_I
 export HOLOSOMA_SKIP_INITIAL_CHECKPOINT=1
 if [[ ${MODE} == formal ]]; then
   unset WANDB_DISABLED
-  export WANDB_MODE=online WANDB_CONSOLE=off WANDB_ENTITY=zihanw22 HOLOSOMA_REQUIRE_WANDB_RUN=1 WANDB_RESUME=must
+  export WANDB_MODE=online WANDB_CONSOLE=off WANDB_ENTITY=zihanw22 HOLOSOMA_REQUIRE_WANDB_RUN=1 WANDB_RESUME=never
 else
   export WANDB_MODE=disabled WANDB_DISABLED=true WANDB_CONSOLE=off HOLOSOMA_REQUIRE_WANDB_RUN=0
 fi
@@ -290,7 +282,7 @@ TRAIN_ARGS=(
   --logger.video.enabled=False --logger.headless-recording=False --logger.video.upload-to-wandb=False
   --logger.base-dir="${LOGGER_BASE_DIR}"
 )
-if [[ ${MODE} == formal ]]; then TRAIN_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=must); fi
+if [[ ${MODE} == formal ]]; then TRAIN_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=never); fi
 
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_train_cli.py" --expected-motion-end-mode episodic -- "${TRAIN_ARGS[@]}"
 export HOLOSOMA_TRAINING_PROVENANCE

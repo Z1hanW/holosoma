@@ -51,23 +51,23 @@ grep -F 'test -e "\${snapshot_root}/\${link_path}"' batch_ne.sh >/dev/null ||
   fail 'snapshot installation no longer requires reachable asset symlinks'
 
 # A read-only selected-GPU idle gate must execute before runtime installation
-# and the expensive all-node external closure.  The closure must still execute
-# before the live W&B verifier and launch-intent preflight/publication.
+# and the expensive all-node external closure. The closure must still execute
+# before launch-intent preflight/publication, without a replay/video gate.
 idle_line=$(grep -nF 'preflight_selected_gpus_idle_parallel' batch_ne.sh | tail -1 | cut -d: -f1)
 runtime_line=$(grep -nF 'verify_python_runtimes_before_intent_parallel' batch_ne.sh | tail -1 | cut -d: -f1)
 barrier_line=$(grep -nF 'preflight_external_as_asset_closures_parallel' batch_ne.sh | tail -1 | cut -d: -f1)
-wandb_line=$(grep -nF 'verify_fresh_wandb_replay_preflight' batch_ne.sh | tail -1 | cut -d: -f1)
 intent_line=$(grep -nF 'echo "[INFO] Preflighting launch intent on ${preflight_node}"' batch_ne.sh | cut -d: -f1)
 [[ "${idle_line}" =~ ^[1-9][0-9]*$ \
     && "${runtime_line}" =~ ^[1-9][0-9]*$ \
     && "${barrier_line}" =~ ^[1-9][0-9]*$ \
-    && "${wandb_line}" =~ ^[1-9][0-9]*$ \
     && "${intent_line}" =~ ^[1-9][0-9]*$ \
     && "${idle_line}" -lt "${runtime_line}" \
     && "${runtime_line}" -lt "${barrier_line}" \
-    && "${barrier_line}" -lt "${wandb_line}" \
-    && "${wandb_line}" -lt "${intent_line}" ]] ||
-  fail 'read-only idle/runtime/external/W&B/intent gates are not safely ordered'
+    && "${barrier_line}" -lt "${intent_line}" ]] ||
+  fail 'read-only idle/runtime/external/intent gates are not safely ordered'
+if grep -F 'wandb_replay_preflight.py' batch_ne.sh >/dev/null; then
+  fail 'external-AS launch path still invokes replay/video preflight'
+fi
 
 IDLE_PROBE_BODY="${TMP_DIR}/selected_gpu_idle_probe.sh"
 awk '
@@ -92,77 +92,6 @@ awk '
 ' batch_ne.sh >"${IDLE_PARALLEL_BODY}"
 if grep -F 'SKIP_NODE_HEALTH_CHECK' "${IDLE_PARALLEL_BODY}" >/dev/null; then
   fail 'selected-GPU idle gate is still bypassable through SKIP_NODE_HEALTH_CHECK'
-fi
-
-# Read-only real r29 evidence: the final single-slot map semantics must match
-# the Rule-90 v2 manifest fields exactly, not merely a synthetic fixture.
-R29_MANIFEST="outputs/formal_single_motion_replay_20260718_r29_corrected/dual_8hdketa1/replay_preflight_manifest.json"
-if [[ -f "${R29_MANIFEST}" ]]; then
-  "${PYTHON_BIN:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python3}" - \
-      "${R29_MANIFEST}" "${REPO_ROOT}" <<'PY'
-from __future__ import annotations
-
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-manifest_path = Path(sys.argv[1])
-repo_root = Path(sys.argv[2])
-sys.path.insert(0, str(repo_root / "scripts"))
-from prepare_as_rank_shards import compute_rank_shard_source_digest
-
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-inputs = manifest["inputs"]
-view = inputs["single_slot_view_digest"]
-candidates = list((repo_root / "data" / "ds_as_data").glob(
-    f"*/_single_slot_motion_bank/by-source/{view}"
-))
-if len(candidates) != 1:
-    raise SystemExit(f"[FAIL] expected one local r29 single-slot view, found {candidates!r}")
-single_dir = candidates[0].resolve()
-single_map = single_dir / "_clip_object_urdf_map.json"
-single_manifest = json.loads((single_dir / "manifest.json").read_text(encoding="utf-8"))
-payload = json.loads(single_map.read_text(encoding="utf-8"))
-clip_id = inputs["motion_clip_id"]
-entry = payload["clips"][clip_id]
-
-
-def digest(path: Path) -> str:
-    value = hashlib.sha256()
-    with path.resolve(strict=True).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            value.update(chunk)
-    return value.hexdigest()
-
-
-def resolve(raw: str, base: Path) -> Path:
-    path = Path(raw)
-    return path if path.is_absolute() else base / path
-
-
-urdf = resolve(entry["object_urdf_path"], single_map.parent)
-mesh = resolve(entry["object_mesh_path"], single_map.parent)
-actual = {
-    "motion_npz_sha256": digest(single_dir / f"{clip_id}.npz"),
-    "object_map_sha256": digest(single_map),
-    "object_urdf_sha256": digest(urdf),
-    "object_mesh_sha256": digest(mesh),
-    "single_slot_source_digest": single_manifest["source_digest"],
-    "single_slot_view_digest": single_manifest["view_digest"],
-    "rank_shard_source_digest": compute_rank_shard_source_digest(
-        motion_dir=single_dir,
-        object_map=single_map,
-        world_size=int(inputs.get("world_size", manifest["inputs"]["world_size"])),
-    ),
-}
-for key, value in actual.items():
-    if value != inputs[key]:
-        raise SystemExit(
-            f"[FAIL] real r29 {key} differs: actual={value} expected={inputs[key]}"
-        )
-print("[PASS] real r29 Rule-90 v2 AS closure matches motion/map/URDF/mesh and three digests")
-PY
 fi
 
 SNAPSHOT_CACHE="${TMP_DIR}/snapshot-cache"
@@ -311,7 +240,7 @@ run_case() {
   if [[ -n "${missing_role}" ]]; then
     [[ ! -e "${post_marker}" ]] ||
       fail "${case_name} passed the external barrier despite missing ${missing_role}"
-    grep -F 'External AS asset closure failed before W&B verification and launch intent.' \
+    grep -F 'External AS asset closure failed before launch intent.' \
       "${output}" >/dev/null || {
         sed -n '1,120p' "${output}" >&2
         fail "${case_name} did not fail at the external closure boundary"
@@ -323,7 +252,7 @@ run_case() {
     }
     grep -F 'external_as_asset_closure_verified' "${output}" >/dev/null ||
       fail 'complete external closure emitted no exact identity'
-    grep -F 'All nodes passed one identical external AS asset closure before W&B verification' \
+    grep -F 'All nodes passed one identical external AS asset closure before launch intent' \
       "${output}" >/dev/null ||
       fail 'complete external closure did not reach the all-node equality barrier'
   fi
@@ -335,7 +264,7 @@ run_case missing-urdf urdf >/dev/null
 run_case missing-mesh mesh >/dev/null
 
 # A busy selected GPU must fail before the first external bank materialization,
-# before W&B verification, and before any lifecycle intent.  The fake SSH
+# before any lifecycle intent. The fake SSH
 # rejects the exact early probe command; no remote command is allowed to reach
 # the later materializer marker.
 BUSY_REPO=$(make_external_repo busy-node '')
@@ -387,7 +316,7 @@ for BUSY_ACTION in launch all; do
     fail "busy-node ${BUSY_ACTION} passed the external barrier"
   [[ ! -e "${BUSY_INTENT_MARKER}" ]] ||
     fail "busy-node ${BUSY_ACTION} reached launch intent"
-  grep -F 'no external-AS materialization, W&B verification, or lifecycle mutation was reached' \
+  grep -F 'no external-AS materialization, launch intent, or lifecycle mutation was reached' \
     "${BUSY_OUTPUT}" >/dev/null || {
       sed -n '1,140p' "${BUSY_OUTPUT}" >&2
       fail "busy-node ${BUSY_ACTION} did not fail at the mandatory read-only gate"
@@ -479,7 +408,7 @@ REVALIDATE_ENV=(
 # Model the old self-authentication bypass: change a scientific rank-map field
 # and update the mutable manifest SHA to match those changed bytes.  A verifier
 # that merely trusts manifest.shards[*].object_map_sha256 would accept this;
-# the source-derived plan must reject it both before W&B and immediately before
+# the source-derived plan must reject it both before intent and immediately before
 # the real entrypoint.
 RANK_ROOT="${SINGLE_DIR}/_rank_shards/by-source/${CLOSURE_ENV[5]}/ws1"
 RANK_MAP="${RANK_ROOT}/rank_0/_clip_object_urdf_map.json"
@@ -564,12 +493,12 @@ env \
 COHERENT_PREFLIGHT_RC=$?
 set -e
 (( COHERENT_PREFLIGHT_RC != 0 )) ||
-  fail 'coherently changed rank map+manifest passed the pre-W&B barrier'
+  fail 'coherently changed rank map+manifest passed the pre-intent barrier'
 [[ ! -e "${COHERENT_PREFLIGHT_POST}" ]] ||
   fail 'coherently changed rank map+manifest passed the external barrier'
 [[ ! -e "${COHERENT_PREFLIGHT_INTENT}" ]] ||
   fail 'coherently changed rank map+manifest reached launch intent'
-grep -F 'External AS asset closure failed before W&B verification and launch intent.' \
+grep -F 'External AS asset closure failed before launch intent.' \
   "${COHERENT_PREFLIGHT_OUTPUT}" >/dev/null || {
     sed -n '1,160p' "${COHERENT_PREFLIGHT_OUTPUT}" >&2
     fail 'coherent rank-map preflight drift failed outside the external closure gate'
@@ -722,4 +651,4 @@ grep -F 'Effective AS rank-shard source changed after the all-node barrier' \
     fail 'real perception wrapper rejected the rank contract for an unexpected reason'
   }
 
-echo '[PASS] busy GPUs fail before heavy work; external closure fails before W&B/intent; complete closure passes; solid/contact/source/view/rank drift is rejected before training'
+echo '[PASS] busy GPUs fail before heavy work; external closure fails before intent; complete closure passes; solid/contact/source/view/rank drift is rejected before training'

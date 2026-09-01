@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ( $# -ne 20 && $# -ne 21 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
-  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE]" >&2
+if [[ ( $# -ne 18 && $# -ne 19 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
+  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE]" >&2
   exit 2
 fi
 
 readonly MODE=$1 POLICY_ARCH=$2 NODE_RANK=$3 EXPECTED_IP=$4 SOURCE_ROOT=$5 PERSIST_ROOT=$6
 readonly MASTER_ADDR=$7 MASTER_PORT=$8 RUN_ID=$9 RUN_NAME=${10} CONTRACT_PATH=${11}
-readonly CONTRACT_SHA=${12} RULE90_PATH=${13} RULE90_SHA=${14} CANARY_PATH=${15}
-readonly CANARY_SHA=${16} COMMIT_SHA=${17} TREE_SHA=${18} SHARD_DIGEST=${19}
-readonly SHARD_MANIFEST_SHA=${20}
-readonly SAMPLING_PROFILE=${21:-fixed_startzero_0p2}
+readonly CONTRACT_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15}
+readonly TREE_SHA=${16} SHARD_DIGEST=${17} SHARD_MANIFEST_SHA=${18}
+readonly SAMPLING_PROFILE=${19:-fixed_startzero_0p2}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly NPROC=8 NNODES=4 WORLD_SIZE=32 ENVIRONMENTS_PER_RANK=2048
@@ -69,9 +68,9 @@ fi
 if [[ ${MODE} == formal ]]; then
   readonly TARGET_ITERATIONS=40000 SAVE_INTERVAL=1000 CURRICULUM_END_ITER=39999
   for value in "${RUN_ID}" "${RUN_NAME}" "${CONTRACT_PATH}" "${CONTRACT_SHA}" \
-    "${RULE90_PATH}" "${RULE90_SHA}" "${CANARY_PATH}" "${CANARY_SHA}"; do
+    "${CANARY_PATH}" "${CANARY_SHA}"; do
     [[ -n ${value} && ${value} != - ]] || {
-      echo "[ERROR] formal mode requires immutable W&B, contract, Rule-90, and canary inputs" >&2
+      echo "[ERROR] formal mode requires immutable W&B, contract, and canary inputs" >&2
       exit 2
     }
   done
@@ -184,7 +183,6 @@ check_sha "${NCCL_SHA256}" "${NCCL_ROOT}/libnccl.so.2"
 
 if [[ ${MODE} == formal ]]; then
   check_sha "${CONTRACT_SHA}" "${CONTRACT_PATH}"
-  check_sha "${RULE90_SHA}" "${RULE90_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
   "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" \
     "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" <<'PY'
@@ -369,7 +367,7 @@ export HOLOSOMA_SKIP_INITIAL_CHECKPOINT=1
 if [[ ${MODE} == formal ]]; then
   unset WANDB_DISABLED
   export WANDB_MODE=online WANDB_CONSOLE=off WANDB_ENTITY=zihanw22
-  export HOLOSOMA_REQUIRE_WANDB_RUN=1 WANDB_RESUME=must
+  export HOLOSOMA_REQUIRE_WANDB_RUN=1 WANDB_RESUME=never
 else
   export WANDB_MODE=disabled WANDB_DISABLED=true WANDB_CONSOLE=off
   export HOLOSOMA_REQUIRE_WANDB_RUN=0
@@ -547,7 +545,7 @@ else
   )
 fi
 if [[ ${MODE} == formal ]]; then
-  TRAIN_ARGS+=(--logger.id="${RUN_ID_EFFECTIVE}" --logger.resume=must)
+  TRAIN_ARGS+=(--logger.id="${RUN_ID_EFFECTIVE}" --logger.resume=never)
 fi
 
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_train_cli.py" \
@@ -594,14 +592,6 @@ print(json.dumps(provenance, sort_keys=True, separators=(",", ":")))
 PY
 )
 printf '%s\n' "${HOLOSOMA_TRAINING_PROVENANCE}" > "${RUN_ROOT}/training_provenance.json"
-
-if [[ ${MODE} == formal && ${NODE_RANK} == 0 ]]; then
-  "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
-    --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
-    --required-manifest-version 1 --expected-source-snapshot-id "${SOURCE_SNAPSHOT_ID}" \
-    --expected-entity zihanw22 --expected-project carry-any --expected-run-id "${RUN_ID_EFFECTIVE}" \
-    --expected-run-name "${RUN_NAME_EFFECTIVE}" --expected-world-size 32
-fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then

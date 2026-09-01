@@ -29,8 +29,6 @@ def test_worker_rejects_unknown_teacher_arm_before_node_checks() -> None:
         "-",
         "-",
         "-",
-        "-",
-        "-",
         "0" * 40,
         "1" * 40,
     ]

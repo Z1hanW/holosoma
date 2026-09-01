@@ -166,6 +166,8 @@ batch_base=(
   SKIP_GIT_PULL=1
   SKIP_NODE_HEALTH_CHECK=1
   HOLOSOMA_REQUIRE_PYTHON_RUNTIME_OVERLAY=0
+  REMOTE_RUN_ROOT="${TMP_DIR}/remote-run-root"
+  LOGGER_BASE_DIR="${TMP_DIR}/remote-run-root/training_logs"
   SOURCE_SNAPSHOT_CACHE="${TMP_DIR}/snapshot-cache"
 )
 
@@ -225,18 +227,6 @@ expect_failure \
   'DISTILL_AS_FORMAL_FRESH=1 is defined only for DISTILL_AS_ENTRYPOINT=distill_as_dual_button_solid.sh' \
   "${batch_base[@]}" DISTILL_AS_FORMAL_FRESH=1 bash batch_ne.sh launch
 
-expect_failure \
-  "${TMP_DIR}/formal-v1-replay.out" \
-  'DISTILL_AS_FORMAL_FRESH=1 requires REPLAY_PREFLIGHT_REQUIRED_VERSION=2' \
-  "${batch_base[@]}" \
-    DISTILL_AS_ENTRYPOINT=distill_as_dual_button_solid.sh \
-    DISTILL_AS_FORMAL_FRESH=1 REPLAY_PREFLIGHT_REQUIRED_VERSION=1 \
-    bash batch_ne.sh launch
-if rg -n 'source_snapshot_id=|\[DRY_RUN\].*(ssh|scp)' \
-    "${TMP_DIR}/formal-v1-replay.out" >/dev/null; then
-  fail 'formal-fresh v1 replay request reached snapshot construction or remote actions'
-fi
-
 for history_spec in \
     'STUDENT_PROPRIO_HISTORY_LENGTH=5|requires STUDENT_PROPRIO_HISTORY_LENGTH=1' \
     'CONTACT_AWARE_HISTORY_LENGTH=5|requires CONTACT_AWARE_HISTORY_LENGTH=1' \
@@ -261,16 +251,20 @@ for history_spec in \
 done
 unset history_spec history_assignment history_error history_name history_value history_output
 
-for v2_wiring in \
-    '--required-manifest-version "${REPLAY_PREFLIGHT_REQUIRED_VERSION}"' \
-    '--expected-source-archive-sha256 "${SOURCE_SNAPSHOT_ARCHIVE_SHA256}"' \
-    '--expected-entrypoint-archive-member "${DISTILL_AS_ENTRYPOINT}"' \
-    '--expected-entrypoint-sha256 "${DISTILL_AS_ENTRYPOINT_SHA256}"' \
-    'A non-dry-run DISTILL_AS_FORMAL_FRESH=1 launch requires a fresh W&B identity and a Rule-90 v2 replay manifest.'; do
-  grep -F -- "${v2_wiring}" batch_ne.sh >/dev/null ||
-    fail "batch formal-fresh launch omitted Rule-90 v2 wiring: ${v2_wiring}"
+for removed_replay_wiring in \
+    'REPLAY_PREFLIGHT_MANIFEST' \
+    'REPLAY_PREFLIGHT_REQUIRED_VERSION' \
+    'wandb_replay_preflight.py' \
+    'verify_fresh_wandb_replay_preflight' \
+    'load_replay_external_as_contract'; do
+  if grep -F -- "${removed_replay_wiring}" batch_ne.sh >/dev/null; then
+    fail "batch formal launch still depends on replay/video wiring: ${removed_replay_wiring}"
+  fi
 done
-unset v2_wiring
+unset removed_replay_wiring
+grep -F 'optional preallocated fresh W&B identity; no replay/video preflight' \
+  batch_ne.sh >/dev/null ||
+  fail 'batch launcher no longer documents direct fresh W&B startup'
 
 expect_failure \
   "${TMP_DIR}/controller-formal-resume.out" \
@@ -310,7 +304,7 @@ snapshot_id=$(sed -nE 's/^\[INFO\] source_snapshot_id=(src-[0-9a-f]{64}) .*/\1/p
 [[ "${snapshot_id}" =~ ^src-[0-9a-f]{64}$ ]] ||
   fail 'dual batch did not report one content-addressed source snapshot'
 entrypoint_sha=$(sha256sum distill_as_dual_button_solid.sh | awk '{print $1}')
-entrypoint_path="/home/ubuntu/FAR/holosoma_runs/${snapshot_id}/distill_as_dual_button_solid.sh"
+entrypoint_path="${TMP_DIR}/remote-run-root/${snapshot_id}/distill_as_dual_button_solid.sh"
 grep -F "[INFO] distill_as_entrypoint=distill_as_dual_button_solid.sh path=${entrypoint_path} sha256=${entrypoint_sha} formal_fresh=1" \
   "${dual_output}" >/dev/null ||
   fail 'controller did not bind the selected dual entrypoint to snapshot path/SHA/profile'

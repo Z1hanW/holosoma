@@ -28,8 +28,6 @@ def test_worker_rejects_unknown_contact_profile_before_node_or_asset_checks() ->
         "-",
         "-",
         "-",
-        "-",
-        "-",
         "0" * 40,
         "1" * 40,
         "sw_threshold_schedule",
@@ -48,4 +46,3 @@ def test_contact_profile_is_a_single_reward_weight_ablation() -> None:
     assert "wrist-weight=5.0" in text
     assert "force-threshold=1.0" in text
     assert 'positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE}' in text
-

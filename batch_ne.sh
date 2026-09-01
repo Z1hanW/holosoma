@@ -224,10 +224,7 @@ Useful env:
   MOTION_GENERATOR_TEACHER_EXPECTED_SHA256=<sha256>  exact generator identity required for legacy motion banks
   REQUIRE_MOTION_GENERATOR_TEACHER_MATCH=0|1  default 1; require the distillation teacher to equal the motion generator
   RESUME_WANDB_RUN_ID=<id>     optional same-run W&B resume id for RESUME_TRAINING_CKPT
-  FRESH_WANDB_RUN_ID=<id>      fresh W&B id pre-bound by the mandatory vis/replay gate
-  REPLAY_PREFLIGHT_MANIFEST=<json>  local replay manifest uploaded to FRESH_WANDB_RUN_ID
-  REPLAY_PREFLIGHT_MANIFEST_SHA256=<sha256>  exact replay manifest digest
-  REPLAY_PREFLIGHT_REQUIRED_VERSION=1|2  optional exact schema; formal-fresh dual forces v2
+  FRESH_WANDB_RUN_ID=<id>      optional preallocated fresh W&B identity; no replay/video preflight
   WANDB_RESUME_MODE=must       W&B resume mode when RESUME_WANDB_RUN_ID is set
   WANDB_BASE_URL=https://api.wandb.ai  fixed cloud API endpoint for this scientific launcher
   WANDB_INIT_TIMEOUT=120       bounded W&B startup timeout in seconds (1..3600)
@@ -604,17 +601,6 @@ RESUME_FROM_BOX=${RESUME_FROM_BOX:-0}
 RESUME_TRAINING_CKPT=${RESUME_TRAINING_CKPT:-${RESUME_CHECKPOINT:-${RESUME_CKPT:-}}}
 RESUME_WANDB_RUN_ID=${RESUME_WANDB_RUN_ID:-${WANDB_RUN_ID:-${RESUME_WANDB_ID:-}}}
 FRESH_WANDB_RUN_ID=${FRESH_WANDB_RUN_ID:-}
-REPLAY_PREFLIGHT_MANIFEST=${REPLAY_PREFLIGHT_MANIFEST:-}
-REPLAY_PREFLIGHT_MANIFEST_SHA256=${REPLAY_PREFLIGHT_MANIFEST_SHA256:-}
-REPLAY_PREFLIGHT_REQUIRED_VERSION=${REPLAY_PREFLIGHT_REQUIRED_VERSION:-}
-REPLAY_AS_MOTION_CLIP_ID=""
-REPLAY_AS_MOTION_NPZ_SHA256=""
-REPLAY_AS_OBJECT_MAP_SHA256=""
-REPLAY_AS_OBJECT_URDF_SHA256=""
-REPLAY_AS_OBJECT_MESH_SHA256=""
-REPLAY_AS_SINGLE_SLOT_SOURCE_DIGEST=""
-REPLAY_AS_SINGLE_SLOT_VIEW_DIGEST=""
-REPLAY_AS_RANK_SHARD_SOURCE_DIGEST=""
 AS_EXTERNAL_CLOSURE_RECORD=""
 AS_EXTERNAL_MOTION_CLIP_ID=""
 AS_EXTERNAL_SOLID_SOURCE_DIGEST=""
@@ -627,24 +613,6 @@ AS_EXTERNAL_OBJECT_URDF_SHA256=""
 AS_EXTERNAL_OBJECT_MESH_SHA256=""
 AS_EXTERNAL_SINGLE_SLOT_DIR=""
 AS_EXTERNAL_MOTION_GENERATOR_TEACHER_SHA256=""
-if (( CONTROL_ONLY_ACTION == 0 )); then
-  case "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" in
-    ""|1|2)
-      ;;
-    *)
-      echo "[ERROR] REPLAY_PREFLIGHT_REQUIRED_VERSION must be empty, 1, or 2. Got: ${REPLAY_PREFLIGHT_REQUIRED_VERSION}" >&2
-      exit 2
-      ;;
-  esac
-  if [[ "${DISTILL_AS_FORMAL_FRESH}" == 1 ]]; then
-    if [[ -n "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" \
-          && "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" != 2 ]]; then
-      echo "[ERROR] DISTILL_AS_FORMAL_FRESH=1 requires REPLAY_PREFLIGHT_REQUIRED_VERSION=2." >&2
-      exit 2
-    fi
-    REPLAY_PREFLIGHT_REQUIRED_VERSION=2
-  fi
-fi
 WANDB_RESUME_MODE=${WANDB_RESUME_MODE:-${WANDB_RESUME:-must}}
 WANDB_ENTITY=${WANDB_ENTITY:-zihanw22}
 WANDB_RESUME_SAME_RUN=${WANDB_RESUME_SAME_RUN:-}
@@ -1940,24 +1908,6 @@ if [[ -n "${FRESH_WANDB_RUN_ID}" && "${WANDB_RESUME_SAME_RUN}" != "0" ]]; then
   echo "[ERROR] FRESH_WANDB_RUN_ID pre-binds logging identity only; WANDB_RESUME_SAME_RUN must remain 0." >&2
   exit 2
 fi
-if [[ -n "${FRESH_WANDB_RUN_ID}" ]]; then
-  if [[ -z "${REPLAY_PREFLIGHT_MANIFEST}" || -z "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" ]]; then
-    echo "[ERROR] FRESH_WANDB_RUN_ID requires REPLAY_PREFLIGHT_MANIFEST and REPLAY_PREFLIGHT_MANIFEST_SHA256." >&2
-    exit 2
-  fi
-  if [[ ! "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "[ERROR] REPLAY_PREFLIGHT_MANIFEST_SHA256 must be 64 lowercase SHA256 hex." >&2
-    exit 2
-  fi
-  if [[ ! -f "${REPLAY_PREFLIGHT_MANIFEST}" || -L "${REPLAY_PREFLIGHT_MANIFEST}" ]]; then
-    echo "[ERROR] Replay preflight manifest must be a regular non-symlink file: ${REPLAY_PREFLIGHT_MANIFEST}" >&2
-    exit 2
-  fi
-  REPLAY_PREFLIGHT_MANIFEST=$(realpath -e -- "${REPLAY_PREFLIGHT_MANIFEST}")
-elif [[ -n "${REPLAY_PREFLIGHT_MANIFEST}" || -n "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" ]]; then
-  echo "[ERROR] Replay preflight manifest identity was supplied without FRESH_WANDB_RUN_ID." >&2
-  exit 2
-fi
 if [[ -n "${HOLOSOMA_POLICY_INIT_REQUIRED_TERMINAL_TARGET}" \
       && "${RESUME_FROM_BOX}" != "1" ]]; then
   echo "[ERROR] HOLOSOMA_POLICY_INIT_REQUIRED_TERMINAL_TARGET requires RESUME_FROM_BOX=1." >&2
@@ -2748,102 +2698,6 @@ PY
   echo "[INFO] ppo_minibatch_throughput source=snapshot:PPOConfig.num_steps_per_env snapshot_id=${SOURCE_SNAPSHOT_ID} num_steps_per_env=${PPO_NUM_STEPS_PER_ENV} rank_local_rollout_samples=${PPO_RANK_LOCAL_ROLLOUT_SAMPLES} global_rollout_samples=${PPO_GLOBAL_ROLLOUT_SAMPLES} rank_local_samples_per_minibatch_update=${PPO_RANK_LOCAL_SAMPLES_PER_MINIBATCH_UPDATE} global_samples_per_minibatch_update=${PPO_GLOBAL_SAMPLES_PER_MINIBATCH_UPDATE} minibatch_update_rounds_per_iteration=${PPO_MINIBATCH_UPDATE_ROUNDS_PER_ITERATION} num_learning_epochs=${NUM_LEARNING_EPOCHS}"
 }
 
-load_replay_external_as_contract() {
-  if [[ "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" != 2 ]]; then
-    return 0
-  fi
-  # Formal-fresh dry runs intentionally render the complete sealed launch
-  # command before a W&B identity/replay artifact exists.  They never execute
-  # the remote barrier or embedded revalidator, so preserve that controller
-  # preview contract only when both replay identity fields are absent.  Every
-  # real launch (and any dry run claiming a manifest) remains fail-closed.
-  if [[ "${DRY_RUN}" == 1 \
-        && -z "${REPLAY_PREFLIGHT_MANIFEST}" \
-        && -z "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" ]]; then
-    echo "[DRY_RUN] Rule-90 v2 replay bytes will be required before a real formal-fresh launch."
-    return 0
-  fi
-  if [[ ! -f "${REPLAY_PREFLIGHT_MANIFEST}" || -L "${REPLAY_PREFLIGHT_MANIFEST}" ]]; then
-    echo "[ERROR] Rule-90 v2 external-AS preflight requires a regular non-symlink replay manifest." >&2
-    return 2
-  fi
-  local actual_manifest_sha256
-  actual_manifest_sha256=$(sha256sum -- "${REPLAY_PREFLIGHT_MANIFEST}" | awk '{print $1}')
-  if [[ "${actual_manifest_sha256}" != "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" ]]; then
-    echo "[ERROR] Replay preflight manifest SHA256 mismatch before external-AS validation: actual=${actual_manifest_sha256} expected=${REPLAY_PREFLIGHT_MANIFEST_SHA256}" >&2
-    return 2
-  fi
-  local contract_output
-  if ! contract_output=$("${PYTHON_BIN}" - "${REPLAY_PREFLIGHT_MANIFEST}" <<'PY'
-from __future__ import annotations
-
-import json
-import re
-import sys
-from pathlib import Path
-
-manifest_path = Path(sys.argv[1])
-try:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-except Exception as exc:
-    raise SystemExit(f"[ERROR] Could not parse Rule-90 v2 replay manifest inputs: {exc}") from exc
-if not isinstance(payload, dict) or payload.get("version") != 2:
-    raise SystemExit("[ERROR] External-AS replay contract requires manifest version 2")
-inputs = payload.get("inputs")
-if not isinstance(inputs, dict):
-    raise SystemExit("[ERROR] Rule-90 v2 replay manifest has no inputs object")
-fields = (
-    "motion_npz_sha256",
-    "object_map_sha256",
-    "object_urdf_sha256",
-    "object_mesh_sha256",
-    "single_slot_source_digest",
-    "single_slot_view_digest",
-    "rank_shard_source_digest",
-)
-clip_id = inputs.get("motion_clip_id")
-if not isinstance(clip_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", clip_id):
-    raise SystemExit("[ERROR] Rule-90 v2 inputs.motion_clip_id is not one safe clip identifier")
-values = [clip_id]
-for field in fields:
-    value = inputs.get(field)
-    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise SystemExit(f"[ERROR] Rule-90 v2 inputs.{field} is not a lowercase SHA256 digest")
-    values.append(value)
-print("\t".join(values))
-PY
-  ); then
-    return 2
-  fi
-  if [[ -z "${contract_output}" || "${contract_output}" == *$'\n'* ]]; then
-    echo "[ERROR] Rule-90 v2 replay input parser returned a malformed record." >&2
-    return 2
-  fi
-  IFS=$'\t' read -r \
-    REPLAY_AS_MOTION_CLIP_ID \
-    REPLAY_AS_MOTION_NPZ_SHA256 \
-    REPLAY_AS_OBJECT_MAP_SHA256 \
-    REPLAY_AS_OBJECT_URDF_SHA256 \
-    REPLAY_AS_OBJECT_MESH_SHA256 \
-    REPLAY_AS_SINGLE_SLOT_SOURCE_DIGEST \
-    REPLAY_AS_SINGLE_SLOT_VIEW_DIGEST \
-    REPLAY_AS_RANK_SHARD_SOURCE_DIGEST <<<"${contract_output}"
-  local parsed_value
-  for parsed_value in \
-      "${REPLAY_AS_MOTION_NPZ_SHA256}" \
-      "${REPLAY_AS_OBJECT_MAP_SHA256}" \
-      "${REPLAY_AS_OBJECT_URDF_SHA256}" \
-      "${REPLAY_AS_OBJECT_MESH_SHA256}" \
-      "${REPLAY_AS_SINGLE_SLOT_SOURCE_DIGEST}" \
-      "${REPLAY_AS_SINGLE_SLOT_VIEW_DIGEST}" \
-      "${REPLAY_AS_RANK_SHARD_SOURCE_DIGEST}"; do
-    if [[ ! "${parsed_value}" =~ ^[0-9a-f]{64}$ ]]; then
-      echo "[ERROR] Rule-90 v2 replay input parser did not return its exact digest closure." >&2
-      return 2
-    fi
-  done
-}
-
 # Reject an accidentally selected busy/protected node before any expensive
 # runtime installation, external-AS materialization/hash walk, W&B request, or
 # lifecycle write.  This probe is deliberately read-only: it uses only the
@@ -2984,7 +2838,7 @@ preflight_selected_gpus_idle_parallel() {
     fi
   done
   if (( failed != 0 )); then
-    echo "[ERROR] Refusing launch because one or more selected GPU sets are busy or unhealthy; no external-AS materialization, W&B verification, or lifecycle mutation was reached." >&2
+    echo "[ERROR] Refusing launch because one or more selected GPU sets are busy or unhealthy; no external-AS materialization, launch intent, or lifecycle mutation was reached." >&2
     return 1
   fi
   if [[ "${DRY_RUN}" == "1" ]]; then
@@ -3140,10 +2994,6 @@ fi
   "$SINGLE_DIR" "$SINGLE_MAP" "$RANK_ROOT" "$GLOBAL_WORLD_SIZE" \
   "$ENVIRONMENTS_PER_RANK" \
   "$SOLID_SOURCE_DIGEST" "$SOLID_SELECTED_CLIP_COUNT" "$RANK_SOURCE_DIGEST" \
-  "$EXPECTED_MOTION_CLIP_ID" "$EXPECTED_MOTION_NPZ_SHA256" \
-  "$EXPECTED_OBJECT_MAP_SHA256" "$EXPECTED_OBJECT_URDF_SHA256" \
-  "$EXPECTED_OBJECT_MESH_SHA256" "$EXPECTED_SINGLE_SLOT_SOURCE_DIGEST" \
-  "$EXPECTED_SINGLE_SLOT_VIEW_DIGEST" "$EXPECTED_RANK_SHARD_SOURCE_DIGEST" \
   "$MOTION_GENERATOR_TEACHER_EXPECTED_SHA256" \
   "$REQUIRE_MOTION_GENERATOR_TEACHER_MATCH" <<'PY'
 from __future__ import annotations
@@ -3175,14 +3025,6 @@ from motion_generator_teacher import (
     solid_source_digest,
     selected_clip_count_raw,
     rank_source_digest,
-    expected_clip_id,
-    expected_motion_sha,
-    expected_map_sha,
-    expected_urdf_sha,
-    expected_mesh_sha,
-    expected_single_source_digest,
-    expected_single_view_digest,
-    expected_rank_source_digest,
     legacy_expected_generator_sha256,
     require_generator_match_raw,
 ) = sys.argv[1:]
@@ -3247,9 +3089,7 @@ if not isinstance(clips, dict) or len(clips) != selected_clip_count:
 motion_ids = sorted(path.stem for path in single_dir.glob("*.npz"))
 if motion_ids != sorted(str(clip_id) for clip_id in clips):
     raise SystemExit("[ERROR] Effective single-slot motion/map clip sets differ")
-clip_id = expected_clip_id or motion_ids[0]
-if clip_id not in clips:
-    raise SystemExit(f"[ERROR] Replay motion clip is absent from effective training bank: {clip_id}")
+clip_id = motion_ids[0]
 entry = clips[clip_id]
 if not isinstance(entry, dict):
     raise SystemExit(f"[ERROR] Effective object-map entry is not a mapping: {clip_id}")
@@ -3351,22 +3191,6 @@ validate_published_rank_shards(
     expected_source_digest=rank_source_digest,
 )
 
-expected_pairs = (
-    ("motion_npz_sha256", expected_motion_sha, motion_sha),
-    ("object_map_sha256", expected_map_sha, map_sha),
-    ("object_urdf_sha256", expected_urdf_sha, urdf_sha),
-    ("object_mesh_sha256", expected_mesh_sha, mesh_sha),
-    ("single_slot_source_digest", expected_single_source_digest, single_source_digest),
-    ("single_slot_view_digest", expected_single_view_digest, single_view_digest),
-    ("rank_shard_source_digest", expected_rank_source_digest, rank_source_digest),
-)
-for role, expected, actual in expected_pairs:
-    if expected and expected != actual:
-        raise SystemExit(
-            f"[ERROR] Effective external AS {role} differs from Rule-90 v2 replay inputs: "
-            f"actual={actual} expected={expected}"
-        )
-
 print(
     "AS_EXTERNAL_ASSET_CLOSURE\t"
     + "\t".join(
@@ -3402,14 +3226,6 @@ REMOTE
   cmd+="EXPECTED_SELECTED_CLIP_COUNT=$(quote "${OMOMO_EXPECTED_TOTAL}")"$'\n'
   cmd+="GLOBAL_WORLD_SIZE=$(quote "${TOTAL_GPUS}")"$'\n'
   cmd+="ENVIRONMENTS_PER_RANK=$(quote "${PER_GPU_ENVS}")"$'\n'
-  cmd+="EXPECTED_MOTION_CLIP_ID=$(quote "${REPLAY_AS_MOTION_CLIP_ID}")"$'\n'
-  cmd+="EXPECTED_MOTION_NPZ_SHA256=$(quote "${REPLAY_AS_MOTION_NPZ_SHA256}")"$'\n'
-  cmd+="EXPECTED_OBJECT_MAP_SHA256=$(quote "${REPLAY_AS_OBJECT_MAP_SHA256}")"$'\n'
-  cmd+="EXPECTED_OBJECT_URDF_SHA256=$(quote "${REPLAY_AS_OBJECT_URDF_SHA256}")"$'\n'
-  cmd+="EXPECTED_OBJECT_MESH_SHA256=$(quote "${REPLAY_AS_OBJECT_MESH_SHA256}")"$'\n'
-  cmd+="EXPECTED_SINGLE_SLOT_SOURCE_DIGEST=$(quote "${REPLAY_AS_SINGLE_SLOT_SOURCE_DIGEST}")"$'\n'
-  cmd+="EXPECTED_SINGLE_SLOT_VIEW_DIGEST=$(quote "${REPLAY_AS_SINGLE_SLOT_VIEW_DIGEST}")"$'\n'
-  cmd+="EXPECTED_RANK_SHARD_SOURCE_DIGEST=$(quote "${REPLAY_AS_RANK_SHARD_SOURCE_DIGEST}")"$'\n'
   cmd+="MOTION_GENERATOR_TEACHER_EXPECTED_SHA256=$(quote "${MOTION_GENERATOR_TEACHER_EXPECTED_SHA256}")"$'\n'
   cmd+="REQUIRE_MOTION_GENERATOR_TEACHER_MATCH=$(quote "${REQUIRE_MOTION_GENERATOR_TEACHER_MATCH}")"$'\n'
   cmd+="${body}"
@@ -3417,7 +3233,7 @@ REMOTE
   local output marker marker_count
   if ! output=$(remote_run_mutation_bounded \
       "${node}" "${cmd}" "${LAUNCH_PREFLIGHT_TIMEOUT_SECONDS}"); then
-    echo "[ERROR][${node}] External AS asset closure failed before W&B verification and launch intent." >&2
+    echo "[ERROR][${node}] External AS asset closure failed before launch intent." >&2
     return 2
   fi
   if [[ "${DRY_RUN}" == 1 ]]; then
@@ -3461,7 +3277,7 @@ preflight_external_as_asset_closures_parallel() {
   done
   if (( failed != 0 )); then
     rm -rf -- "${result_root}"
-    echo "[ERROR] Refusing launch because one or more nodes lack the exact external AS asset closure; W&B verification and lifecycle intent were not reached." >&2
+    echo "[ERROR] Refusing launch because one or more nodes lack the exact external AS asset closure; lifecycle intent was not reached." >&2
     return 1
   fi
   if [[ "${DRY_RUN}" == 1 ]]; then
@@ -3469,7 +3285,7 @@ preflight_external_as_asset_closures_parallel() {
       command cat -- "${result_paths[${index}]}"
     done
     rm -rf -- "${result_root}"
-    echo "[INFO] Dry-run would enforce the all-node external AS asset closure barrier before W&B verification and launch intent publication."
+    echo "[INFO] Dry-run would enforce the all-node external AS asset closure barrier before launch intent publication."
     return 0
   fi
 
@@ -3544,54 +3360,7 @@ preflight_external_as_asset_closures_parallel() {
     return 2
   fi
   AS_EXTERNAL_CLOSURE_RECORD=${expected_record}
-  echo "[INFO] All nodes passed one identical external AS asset closure before W&B verification: ${expected_record}"
-}
-
-verify_fresh_wandb_replay_preflight() {
-  if [[ -z "${FRESH_WANDB_RUN_ID}" ]]; then
-    return 0
-  fi
-  local verifier="${SCRIPT_DIR}/scripts/wandb_replay_preflight.py"
-  if [[ ! -f "${verifier}" || -L "${verifier}" ]]; then
-    echo "[ERROR] Fresh W&B replay verifier is missing or is a symlink: ${verifier}" >&2
-    return 2
-  fi
-  local actual_manifest_sha256
-  actual_manifest_sha256=$(sha256sum -- "${REPLAY_PREFLIGHT_MANIFEST}" | awk '{print $1}')
-  if [[ "${actual_manifest_sha256}" != "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" ]]; then
-    echo "[ERROR] Replay preflight manifest SHA256 mismatch: actual=${actual_manifest_sha256} expected=${REPLAY_PREFLIGHT_MANIFEST_SHA256}" >&2
-    return 2
-  fi
-  local -a replay_version_args=()
-  if [[ -n "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" ]]; then
-    replay_version_args+=(
-      --required-manifest-version "${REPLAY_PREFLIGHT_REQUIRED_VERSION}"
-    )
-  fi
-  if [[ "${REPLAY_PREFLIGHT_REQUIRED_VERSION}" == 2 ]]; then
-    if [[ ! "${SOURCE_SNAPSHOT_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ \
-          || ! "${DISTILL_AS_ENTRYPOINT_SHA256}" =~ ^[0-9a-f]{64}$ \
-          || -z "${DISTILL_AS_ENTRYPOINT}" ]]; then
-      echo "[ERROR] Rule-90 v2 requires authenticated source-archive and selected-entrypoint identity before replay verification." >&2
-      return 2
-    fi
-    replay_version_args+=(
-      --expected-source-archive-sha256 "${SOURCE_SNAPSHOT_ARCHIVE_SHA256}"
-      --expected-entrypoint-archive-member "${DISTILL_AS_ENTRYPOINT}"
-      --expected-entrypoint-sha256 "${DISTILL_AS_ENTRYPOINT_SHA256}"
-    )
-  fi
-  "${PYTHON_BIN}" "${verifier}" verify \
-    --manifest "${REPLAY_PREFLIGHT_MANIFEST}" \
-    --expected-manifest-sha256 "${REPLAY_PREFLIGHT_MANIFEST_SHA256}" \
-    --expected-source-snapshot-id "${SOURCE_SNAPSHOT_ID}" \
-    "${replay_version_args[@]}" \
-    --expected-entity "${WANDB_ENTITY}" \
-    --expected-project carry-any \
-    --expected-run-id "${FRESH_WANDB_RUN_ID}" \
-    --expected-run-name "${RUN_NAME}" \
-    --expected-world-size "${TOTAL_GPUS}"
-  echo "[INFO] fresh_wandb_replay_preflight_verified=${WANDB_ENTITY}/carry-any/${FRESH_WANDB_RUN_ID} manifest_sha256=${REPLAY_PREFLIGHT_MANIFEST_SHA256}"
+  echo "[INFO] All nodes passed one identical external AS asset closure before launch intent: ${expected_record}"
 }
 
 ensure_local_python_runtime_archive() {
@@ -8855,7 +8624,7 @@ if [[ -n "\${RESUME_WANDB_RUN_ID}" ]]; then
   echo "[INFO][${node}] wandb_same_run_resume=\${WANDB_ENTITY}/carry-any/\${RESUME_WANDB_RUN_ID} mode=\${WANDB_RESUME_MODE}"
 fi
 if [[ -n "\${FRESH_WANDB_RUN_ID}" ]]; then
-  echo "[INFO][${node}] wandb_fresh_prebound_replay=\${WANDB_ENTITY}/carry-any/\${FRESH_WANDB_RUN_ID} mode=\${WANDB_RESUME_MODE}"
+  echo "[INFO][${node}] wandb_fresh_preallocated_identity=\${WANDB_ENTITY}/carry-any/\${FRESH_WANDB_RUN_ID} mode=\${WANDB_RESUME_MODE}"
 fi
 echo "[INFO][${node}] actor_hidden_dims=\${STUDENT_ACTOR_HIDDEN_DIMS}"
 echo "[INFO][${node}] camera_pitch_deg=\${CAMERA_PITCH_DEG-<wrapper-default>}"
@@ -9326,7 +9095,7 @@ if not isinstance(clips, dict) or clip_id not in clips or not isinstance(clips[c
     raise SystemExit("[ERROR] Replay-bound clip disappeared from the effective object map")
 entry = clips[clip_id]
 
-motion_actual, _ = file_sha(single_dir / f"{clip_id}.npz", role="replay-bound motion")
+motion_actual, _ = file_sha(single_dir / f"{clip_id}.npz", role="canonical closure motion")
 map_actual, _ = file_sha(single_map, role="effective object map")
 urdf_candidate = local_path(entry.get("object_urdf_path"), base=single_map.parent, role="object_urdf_path")
 urdf_actual, urdf_path = file_sha(urdf_candidate, role="effective object URDF")
@@ -12042,12 +11811,6 @@ run_launch() {
   # before source installation, remote intent publication, or GPU startup.
   validate_gradient_reduce_contracts
   validate_restart_contract
-  if [[ "${DISTILL_AS_FORMAL_FRESH}" == 1 \
-        && "${DRY_RUN}" != 1 \
-        && -z "${FRESH_WANDB_RUN_ID}" ]]; then
-    echo "[ERROR] A non-dry-run DISTILL_AS_FORMAL_FRESH=1 launch requires a fresh W&B identity and a Rule-90 v2 replay manifest." >&2
-    exit 2
-  fi
   if ! command -v timeout >/dev/null 2>&1; then
     echo "[ERROR] GNU timeout is required before any transactional launch mutation." >&2
     exit 2
@@ -12058,10 +11821,6 @@ run_launch() {
   # remote runtime maintenance, lifecycle mutation, rendezvous reservation, or
   # GPU process can begin.
   resolve_minibatch_throughput_contract
-  # Parse only the already SHA-bound local Rule-90 inputs here.  No live W&B
-  # request is made until every node has proved the exact external AS bytes
-  # that the sealed wrappers will materialize and consume.
-  load_replay_external_as_contract
   # A mistakenly selected busy node must be rejected using only read-only
   # inventory queries before runtime/data hashing can contend with a protected
   # training job.  launch_node retains its later idle check to close the race
@@ -12071,11 +11830,9 @@ run_launch() {
   # its installed byte/distribution closure before asking it to inspect data.
   verify_python_runtimes_before_intent_parallel
   preflight_external_as_asset_closures_parallel
-  # A fresh formal run is first created only to hold its exact kinematic
-  # vis/replay summary.  Re-verify the immutable local manifest and the live
-  # W&B media record only after the all-node data closure, and still before
-  # touching any remote lifecycle state or GPU.
-  verify_fresh_wandb_replay_preflight
+  # Video/replay publication is intentionally outside the launch path.  Once
+  # source, runtime, and external-AS closure checks pass, proceed directly to
+  # lifecycle intent and worker startup.
   if ! harden_lifecycle_namespaces_parallel; then
     echo "[ERROR] Refusing launch because one or more node lifecycle namespaces are unsafe." >&2
     exit 1

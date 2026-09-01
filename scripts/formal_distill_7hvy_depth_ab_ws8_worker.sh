@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ( $# -ne 16 && $# -ne 17 && $# -ne 18 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
-  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA RULE90_PATH RULE90_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA [RECIPE_PROFILE] [CONTACT_PROFILE]" >&2
+if [[ ( $# -ne 14 && $# -ne 15 && $# -ne 16 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(gap|spatial)$ ]]; then
+  echo "usage: $0 MODE ENCODER EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA [RECIPE_PROFILE] [CONTACT_PROFILE]" >&2
   exit 2
 fi
 
 readonly MODE=$1 ENCODER_ARM=$2 EXPECTED_IP=$3 SOURCE_ROOT=$4 PERSIST_ROOT=$5 MASTER_PORT=$6
-readonly RUN_ID=$7 RUN_NAME=$8 CONTRACT_PATH=$9 CONTRACT_SHA=${10} RULE90_PATH=${11}
-readonly RULE90_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15} TREE_SHA=${16}
-readonly RECIPE_PROFILE=${17:-ppo001to100_fullxyz}
-readonly CONTACT_PROFILE=${18:-no_contact}
+readonly RUN_ID=$7 RUN_NAME=$8 CONTRACT_PATH=$9 CONTRACT_SHA=${10} CANARY_PATH=${11}
+readonly CANARY_SHA=${12} COMMIT_SHA=${13} TREE_SHA=${14}
+readonly RECIPE_PROFILE=${15:-ppo001to100_fullxyz}
+readonly CONTACT_PROFILE=${16:-no_contact}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly WORLD_SIZE=8 ENVIRONMENTS_PER_RANK=2048 TOTAL_ENVIRONMENTS=16384
@@ -63,7 +63,7 @@ esac
 if [[ ${MODE} == formal ]]; then
   readonly TARGET_ITERATIONS=40000 SAVE_INTERVAL=1000 CURRICULUM_END_ITER=39999
   [[ ${RUN_ID} =~ ^[a-z0-9]{8}$ && ${RUN_NAME} != - && ${CONTRACT_PATH} != - \
-     && ${RULE90_PATH} != - && ${CANARY_PATH} != - ]]
+     && ${CANARY_PATH} != - ]]
 else
   readonly TARGET_ITERATIONS=2 SAVE_INTERVAL=2 CURRICULUM_END_ITER=1
 fi
@@ -130,7 +130,6 @@ check_sha "${TEACHER_PAIR_SHA256}" "${TEACHER_PAIR}"
 check_sha "${NCCL_SHA256}" "${NCCL_ROOT}/libnccl.so.2"
 if [[ ${MODE} == formal ]]; then
   check_sha "${CONTRACT_SHA}" "${CONTRACT_PATH}"
-  check_sha "${RULE90_SHA}" "${RULE90_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
 fi
 
@@ -255,11 +254,6 @@ if positive_contact_reward:
                 f"{p.get('offline_contact_guidance', {}).get(key)!r} != {value!r}"
             )
 PY
-  "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
-    --manifest "${RULE90_PATH}" --expected-manifest-sha256 "${RULE90_SHA}" \
-    --required-manifest-version 1 --expected-source-snapshot-id "${SOURCE_SNAPSHOT_ID}" \
-    --expected-entity zihanw22 --expected-project carry-any --expected-run-id "${RUN_ID}" \
-    --expected-run-name "${RUN_NAME}" --expected-world-size 8
 fi
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC=8 NNODES=1 NODE_RANK=0 MASTER_ADDR=127.0.0.1 MASTER_PORT
@@ -380,7 +374,7 @@ if [[ ${CONTACT_PROFILE} == no_contact ]]; then
     --reward.terms.offline-contact-guidance.params.wrist-region-names='["left_wrist","right_wrist"]'
   )
 fi
-if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=must); fi
+if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=never); fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   echo "[INFO] worker_preflight_ok mode=${MODE} encoder=${ENCODER_TYPE} teacher=${TEACHER_SHA256} recipe=${RECIPE_PROFILE} ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"

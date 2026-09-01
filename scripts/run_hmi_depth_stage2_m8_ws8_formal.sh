@@ -4,8 +4,8 @@ set -euo pipefail
 # Formal single-node HMI Stage 2 initialized from one authenticated m8 actor.
 # The node must execute this file from a clean exact-commit clone fetched from
 # origin. Scientific assets are separately SHA-bound and contain no source.
-if [[ $# -ne 18 ]]; then
-  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <rule90-manifest> <rule90-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256> <policy-init-pt> <policy-init-sha256> <policy-pair-json> <policy-pair-sha256> <object_xy|root_xy>" >&2
+if [[ $# -ne 16 ]]; then
+  echo "usage: $0 <commit> <tree> <run-id> <run-name> <run-root> <run-contract> <contract-sha256> <source-id> <git-archive-sha256> <onnx-receipt> <onnx-receipt-sha256> <policy-init-pt> <policy-init-sha256> <policy-pair-json> <policy-pair-sha256> <object_xy|root_xy>" >&2
   exit 2
 fi
 
@@ -17,17 +17,15 @@ RUN_NAME=$4
 RUN_ROOT=$5
 RUN_CONTRACT=$6
 RUN_CONTRACT_SHA256=$7
-RULE90_MANIFEST=$8
-RULE90_MANIFEST_SHA256=$9
-SOURCE_ID=${10}
-GIT_ARCHIVE_SHA256=${11}
-ONNX_RECEIPT=${12}
-ONNX_RECEIPT_SHA256=${13}
-POLICY_INIT_CHECKPOINT=${14}
-POLICY_INIT_SHA256=${15}
-POLICY_PAIR_JSON=${16}
-POLICY_PAIR_SHA256=${17}
-GOAL_TARGET=${18}
+SOURCE_ID=$8
+GIT_ARCHIVE_SHA256=$9
+ONNX_RECEIPT=${10}
+ONNX_RECEIPT_SHA256=${11}
+POLICY_INIT_CHECKPOINT=${12}
+POLICY_INIT_SHA256=${13}
+POLICY_PAIR_JSON=${14}
+POLICY_PAIR_SHA256=${15}
+GOAL_TARGET=${16}
 
 readonly ORIGIN_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=origin/main
@@ -85,7 +83,7 @@ check_sha() {
 
 [[ ${EXPECTED_COMMIT} =~ ^[0-9a-f]{40}$ ]] || die "invalid expected commit"
 [[ ${EXPECTED_TREE} =~ ^[0-9a-f]{40}$ ]] || die "invalid expected tree"
-for digest in "${RUN_CONTRACT_SHA256}" "${RULE90_MANIFEST_SHA256}" "${GIT_ARCHIVE_SHA256}" \
+for digest in "${RUN_CONTRACT_SHA256}" "${GIT_ARCHIVE_SHA256}" \
   "${ONNX_RECEIPT_SHA256}" "${POLICY_INIT_SHA256}" "${POLICY_PAIR_SHA256}"; do
   [[ ${digest} =~ ^[0-9a-f]{64}$ ]] || die "invalid SHA256 argument"
 done
@@ -131,7 +129,6 @@ check_sha "${SHARD_MANIFEST_SHA256}" "${SHARD_MANIFEST}"
 check_sha "${CANONICAL_NPZ_SHA256}" "${MOTION_VIEW}/${CANONICAL_CLIP_ID}.npz"
 check_sha "${CANONICAL_URDF_SHA256}" "${MOTION_VIEW}/_single_slot_urdfs/${CANONICAL_CLIP_ID}.urdf"
 check_sha "${RUN_CONTRACT_SHA256}" "${RUN_CONTRACT}"
-check_sha "${RULE90_MANIFEST_SHA256}" "${RULE90_MANIFEST}"
 check_sha "${ONNX_RECEIPT_SHA256}" "${ONNX_RECEIPT}"
 check_sha "${POLICY_INIT_SHA256}" "${POLICY_INIT_CHECKPOINT}"
 check_sha "${POLICY_PAIR_SHA256}" "${POLICY_PAIR_JSON}"
@@ -195,14 +192,6 @@ assert receipt["terminal_pair"]["onnx_checker"] is True
 assert receipt["terminal_pair"]["onnxruntime_loaded"] is True
 assert receipt["terminal_pair"]["pytorch_vs_ort"] is True
 PY
-
-"${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/wandb_replay_preflight.py" verify \
-  --manifest "${RULE90_MANIFEST}" \
-  --expected-manifest-sha256 "${RULE90_MANIFEST_SHA256}" \
-  --expected-source-snapshot-id "${SOURCE_ID}" \
-  --expected-entity "${ENTITY}" --expected-project "${PROJECT}" \
-  --expected-run-id "${WANDB_RUN_ID}" --expected-run-name "${RUN_NAME}" \
-  --expected-world-size "${WORLD_SIZE}" >/dev/null
 
 mapfile -t GPU_ROWS < <(nvidia-smi --query-gpu=index,name,ecc.errors.uncorrected.volatile.total --format=csv,noheader,nounits)
 [[ ${#GPU_ROWS[@]} -eq 8 ]] || die "expected exactly eight GPUs"
@@ -307,7 +296,7 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE=convex_decomposition HOLOSOMA_ACTIVATE_OBJE
 unset HOLOSOMA_ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD
 unset RESUME_CKPT RESUME_CHECKPOINT RESUME_MODEL_FILE RESUME_STEP TEACHER_CHECKPOINT TEACHER_CHECKPOINT_EXPECTED_SHA256
 
-export WANDB_ENTITY="${ENTITY}" WANDB_PROJECT="${PROJECT}" WANDB_RUN_ID WANDB_RESUME=must WANDB_RESUME_SAME_RUN=0
+export WANDB_ENTITY="${ENTITY}" WANDB_PROJECT="${PROJECT}" WANDB_RUN_ID WANDB_RESUME=never WANDB_RESUME_SAME_RUN=0
 export WANDB_CONSOLE=off WANDB_INIT_TIMEOUT=120 WANDB_DIR="${RUN_ROOT}/wandb" LOGGER_BASE_DIR="${RUN_ROOT}/training_logs"
 export HOLOSOMA_REQUIRE_WANDB_RUN=1
 
