@@ -92,6 +92,8 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "DAGGER_MATCH_STD_VALUE=True",
         "PPO_START=0.1 PPO_TARGET=0.9",
         "export EXPORT_ONNX=True",
+        "WANDB_RESUME_MODE=never",
+        '--logger.resume=never',
     ]
     for value in required:
         assert value in text
@@ -99,6 +101,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
     assert "--command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False" not in text
     assert "--command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=True" not in text
     assert "--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=1.0" not in text
+    assert "WANDB_RESUME_MODE=must" not in text
 
 
 def test_worker_requires_an_explicit_policy_profile() -> None:
