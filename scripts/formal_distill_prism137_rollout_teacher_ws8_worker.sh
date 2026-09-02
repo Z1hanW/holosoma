@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 14 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(teacher_9x40k|teacher_ch228k)$ ]]; then
-  echo "usage: $0 MODE TEACHER_ARM EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA" >&2
+if [[ $# -ne 15 || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(teacher_9x40k|teacher_ch228k)$ \
+   || ! $3 =~ ^(small_mlp|large_mlp)$ ]]; then
+  echo "usage: $0 MODE TEACHER_ARM POLICY_PROFILE EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA" >&2
   exit 2
 fi
 
-readonly MODE=$1 TEACHER_ARM=$2 EXPECTED_IP=$3 SOURCE_ROOT=$4 PERSIST_ROOT=$5 MASTER_PORT=$6
-readonly RUN_ID=$7 RUN_NAME=$8 CONTRACT_PATH=$9 CONTRACT_SHA=${10} CANARY_PATH=${11}
-readonly CANARY_SHA=${12} COMMIT_SHA=${13} TREE_SHA=${14}
+readonly MODE=$1 TEACHER_ARM=$2 POLICY_PROFILE=$3 EXPECTED_IP=$4 SOURCE_ROOT=$5 PERSIST_ROOT=$6
+readonly MASTER_PORT=$7 RUN_ID=$8 RUN_NAME=$9 CONTRACT_PATH=${10} CONTRACT_SHA=${11}
+readonly CANARY_PATH=${12} CANARY_SHA=${13} COMMIT_SHA=${14} TREE_SHA=${15}
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly WORLD_SIZE=8 ENVIRONMENTS_PER_RANK=2048 TOTAL_ENVIRONMENTS=16384
@@ -90,6 +91,15 @@ readonly BAD_REF_POS=1.0 BAD_REF_ORI=1.2 BAD_BODY_POS=0.55 BAD_OBJECT_POS=0.65 B
 readonly PPO_START=0.1 PPO_TARGET=0.9 DAGGER_MATCH_STD_VALUE=True
 readonly PPO_START_NOISE_STD_VALUE= PPO_START_NOISE_STD_FORCE_NONE_VALUE=True
 readonly START_ZERO_END=1.0
+case ${POLICY_PROFILE} in
+  small_mlp)
+    readonly STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]'
+    ;;
+  large_mlp)
+    readonly STUDENT_ACTOR_HIDDEN_DIMS='[2048,1024,512,256,128]'
+    ;;
+esac
+readonly STUDENT_CRITIC_HIDDEN_DIMS='[512,256,128]'
 if [[ ${MODE} == formal ]]; then
   readonly START_ZERO_START_ITER=2500 START_ZERO_END_ITER=39999
 else
@@ -269,7 +279,8 @@ if [[ ${MODE} == formal ]]; then
     "${ENCODER_TYPE}" "${TEACHER_ARM}" "${TEACHER_SHA256}" "${COMMAND_BANK_DIGEST}" \
     "${SINGLE_SLOT_VIEW_DIGEST}" \
     "${PPO_START}" "${PPO_TARGET}" "${POSITIVE_CONTACT_REWARD_VALUE}" \
-    "${T1_VALID_WINDOW_CLIPS}" <<'PY'
+    "${T1_VALID_WINDOW_CLIPS}" "${STUDENT_ACTOR_HIDDEN_DIMS}" \
+    "${STUDENT_CRITIC_HIDDEN_DIMS}" <<'PY'
 import json, sys
 from pathlib import Path
 p=json.loads(Path(sys.argv[1]).read_text())
@@ -284,6 +295,8 @@ expected={"accepted":True,"world_size":8,"environments_per_rank":2048,
           "ppo_start_coefficient":float(sys.argv[10]),"ppo_target_coefficient":float(sys.argv[11]),
           "contact_profile":"no_contact","positive_contact_reward":positive_contact_reward,"export_onnx":True,
           "t1_contact_window_valid_clip_count":int(sys.argv[13]),
+          "actor_hidden_dims":json.loads(sys.argv[14]),
+          "critic_hidden_dims":json.loads(sys.argv[15]),
           "onnx_checker_passed":True,"onnxruntime_load_passed":True,
           "pytorch_ort_parity_passed":True,"finite_metrics":True,"distillation_enabled":True}
 for key,value in expected.items():
@@ -365,7 +378,7 @@ export ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0
 export RESET_NOISE_SCALE=1.0 MAX_EPISODE_LENGTH_S=10.0
 export ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE=True CONTACT_INTERVAL_RUNTIME_PREPEND_COMPENSATION=True CAMERA_PITCH_DEG=0
 export STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
-export STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]' STUDENT_POLICY_TYPE=mlp
+export STUDENT_ACTOR_HIDDEN_DIMS STUDENT_POLICY_TYPE=mlp
 export PER_GPU_ENVS=${ENVIRONMENTS_PER_RANK} MIN_PER_GPU_ENVS=${ENVIRONMENTS_PER_RANK} TOTAL_NUM_ENVS=${TOTAL_ENVIRONMENTS}
 export TRAINING_SEED=42 NUM_LEARNING_ITERATIONS=${TARGET_ITERATIONS} TARGET_LEARNING_ITERATION=${TARGET_ITERATIONS}
 export SAVE_INTERVAL NUM_MINI_BATCHES=4 NUM_LEARNING_EPOCHS=7
@@ -414,6 +427,7 @@ EXTRA_ARGS=(
   --simulator.config.scene.env-spacing=5.0
   --algo.config.reset-rollout-at-checkpoint=False
   --algo.config.num-steps-per-env=24
+  --algo.config.module-dict.critic.layer-config.hidden-dims="${STUDENT_CRITIC_HIDDEN_DIMS}"
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy=uniform_clip
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-pos=0.20
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-vel=0.35
@@ -458,12 +472,12 @@ fi
 if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=never); fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  echo "[INFO] worker_preflight_ok mode=${MODE} teacher_arm=${TEACHER_ARM} teacher=${TEACHER_SHA256} clips=137 encoder=${ENCODER_TYPE} actor_scalar=94 actor_total=126 ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward button=kinematic_lift sampling=uniform_clip_plus_uniform_t1_boost7_no_adaptive_failure_sampler contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
+  echo "[INFO] worker_preflight_ok mode=${MODE} teacher_arm=${TEACHER_ARM} policy_profile=${POLICY_PROFILE} actor_hidden_dims=${STUDENT_ACTOR_HIDDEN_DIMS} critic_hidden_dims=${STUDENT_CRITIC_HIDDEN_DIMS} teacher=${TEACHER_SHA256} clips=137 encoder=${ENCODER_TYPE} actor_scalar=94 actor_total=126 ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward button=kinematic_lift sampling=uniform_clip_plus_uniform_t1_boost7_no_adaptive_failure_sampler contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
   exit 0
 fi
 if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d') ]]; then
   echo "[ERROR] GPU apps appeared after preflight" >&2; exit 2
 fi
 cd "${SOURCE_ROOT}"
-echo "[INFO] launch mode=${MODE} teacher_arm=${TEACHER_ARM} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} ppo_schedule=${PPO_START}_to_${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
+echo "[INFO] launch mode=${MODE} teacher_arm=${TEACHER_ARM} policy_profile=${POLICY_PROFILE} actor_hidden_dims=${STUDENT_ACTOR_HIDDEN_DIMS} critic_hidden_dims=${STUDENT_CRITIC_HIDDEN_DIMS} encoder=${ENCODER_TYPE} teacher_sha=${TEACHER_SHA256} ppo_schedule=${PPO_START}_to_${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
 exec bash "${SOURCE_ROOT}/distill_as_button.sh" "${TEACHER}" "${EXTRA_ARGS[@]}"

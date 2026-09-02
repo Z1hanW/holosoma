@@ -19,6 +19,7 @@ def test_worker_rejects_unknown_teacher_arm_before_node_checks() -> None:
         str(WORKER),
         "canary",
         "unknown_teacher",
+        "large_mlp",
         "192.0.2.1",
         "/missing/source",
         "/missing/persist",
@@ -60,7 +61,12 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
     text = WORKER.read_text()
     required = [
         "far_tracking_cnn_small",
+        "small_mlp",
+        "large_mlp",
         "STUDENT_ACTOR_HIDDEN_DIMS='[512,256,128]'",
+        "STUDENT_ACTOR_HIDDEN_DIMS='[2048,1024,512,256,128]'",
+        "STUDENT_CRITIC_HIDDEN_DIMS='[512,256,128]'",
+        '--algo.config.module-dict.critic.layer-config.hidden-dims="${STUDENT_CRITIC_HIDDEN_DIMS}"',
         "g1-29dof-wbt-w-object-generalist-tracking-no-contact",
         "ENABLE_OFFLINE_CONTACT_GUIDANCE_VALUE=False",
         "USE_ADAPTIVE_TIMESTEPS_SAMPLER=False",
@@ -93,6 +99,31 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
     assert "--command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False" not in text
     assert "--command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=True" not in text
     assert "--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=1.0" not in text
+
+
+def test_worker_requires_an_explicit_policy_profile() -> None:
+    args = [
+        "bash",
+        str(WORKER),
+        "canary",
+        "teacher_9x40k",
+        "unknown_policy",
+        "192.0.2.1",
+        "/missing/source",
+        "/missing/persist",
+        "29999",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "0" * 40,
+        "1" * 40,
+    ]
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "POLICY_PROFILE" in result.stderr
 
 
 def test_generic_distill_launcher_propagates_partial_target_contract() -> None:
