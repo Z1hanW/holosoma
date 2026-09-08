@@ -81,6 +81,13 @@ def main() -> None:
         raise RuntimeError("Checkpoint pair PT mismatch")
     if pair["onnx"]["sha256"] != EXPECTED_CHECKPOINT["onnx_sha256"]:
         raise RuntimeError("Checkpoint pair ONNX mismatch")
+    summaries = sorted(EVAL_ROOT.glob("output/shard_*/summary.json"))
+    if len(summaries) != 8:
+        raise RuntimeError("Expected all eight completed rollout shard summaries")
+    for summary_path in summaries:
+        summary = json.loads(summary_path.read_text())
+        if summary.get("source_checkpoint_sha256") != EXPECTED_CHECKPOINT["pt_sha256"]:
+            raise RuntimeError(f"Rollout checkpoint identity mismatch: {summary_path}")
 
     metadata_paths = sorted(EVAL_ROOT.glob("output/shard_*/clips/*/metadata.json"))
     if len(metadata_paths) != 137:
@@ -252,7 +259,25 @@ def main() -> None:
             )
             + "\n"
         )
+        for file_path in staging.rglob("*"):
+            if file_path.is_file():
+                with file_path.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                file_path.chmod(0o444)
+        directories = sorted([p for p in staging.rglob("*") if p.is_dir()], reverse=True)
+        for directory in directories + [staging]:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            directory.chmod(0o555)
         staging.rename(target)
+        descriptor = os.open(PUBLICATION_ROOT, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
