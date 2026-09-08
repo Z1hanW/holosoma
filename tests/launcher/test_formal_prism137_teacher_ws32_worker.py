@@ -2,10 +2,46 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import json
+import math
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER = ROOT / "scripts" / "formal_prism137_teacher_ws32_worker.sh"
+
+
+@pytest.mark.parametrize(
+    "profile,pos,vel,pitch",
+    [("baseline", 0.2, 0.35, 47.6), ("mgkt_joint_noise_47p6", 0.1, 0.0, 47.6),
+     ("mgkt_joint_noise_37", 0.1, 0.0, 37.0)],
+)
+def test_ablation_profile_values(profile, pos, vel, pitch):
+    source = WORKER.read_text()
+    block = "case ${ABLATION_PROFILE} in" + source.split("case ${ABLATION_PROFILE} in", 1)[1].split("esac", 1)[0] + "esac"
+    proc = subprocess.run(
+        ["bash", "-c", "set -eu\nPOLICY_ARCH=command_student_large_mlp\n"
+         + f"ABLATION_PROFILE={profile}\n" + block
+         + '\nprintf "%s\\n" "$INITIAL_DOF_POS_NOISE" "$INITIAL_DOF_VEL_NOISE" "$CAMERA_PHYSICAL_PITCH_DEG" "$CAMERA_MOUNT_QUAT"'],
+        check=True, text=True, capture_output=True,
+    )
+    values = proc.stdout.splitlines()
+    assert list(map(float, values[:3])) == [pos, vel, pitch]
+    quat = json.loads(values[3])
+    assert quat == pytest.approx([0, math.sin(math.radians(pitch / 2)), 0, math.cos(math.radians(pitch / 2))])
+    assert '--perception.camera-pitch-deg=0.0' in source
+    assert '"ablation_profile": sys.argv[7]' in source
+    assert '"initial_dof_pos_noise_rad": float(sys.argv[8])' in source
+
+
+def test_ablation_rejects_unknown_profile_before_node_checks():
+    args = ["canary", "command_student_large_mlp", "0", "192.0.2.1", "/missing/source",
+            "/missing/persist", "192.0.2.2", "29999", "-", "-", "-", "-", "-", "-",
+            "0" * 40, "1" * 40, "2" * 64, "3" * 64, "linear_startzero_0to1", "unknown"]
+    proc = subprocess.run(["bash", str(WORKER), *args], text=True, capture_output=True)
+    assert proc.returncode == 2
+    assert "unsupported ablation profile" in proc.stderr
 
 
 def test_worker_has_valid_bash_syntax() -> None:

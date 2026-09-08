@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ( $# -ne 18 && $# -ne 19 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
-  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE]" >&2
+if [[ ( $# -lt 18 || $# -gt 20 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
+  echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE] [ABLATION_PROFILE]" >&2
   exit 2
 fi
 
@@ -11,6 +11,28 @@ readonly MASTER_ADDR=$7 MASTER_PORT=$8 RUN_ID=$9 RUN_NAME=${10} CONTRACT_PATH=${
 readonly CONTRACT_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15}
 readonly TREE_SHA=${16} SHARD_DIGEST=${17} SHARD_MANIFEST_SHA=${18}
 readonly SAMPLING_PROFILE=${19:-fixed_startzero_0p2}
+readonly ABLATION_PROFILE=${20:-baseline}
+case ${ABLATION_PROFILE} in
+  baseline)
+    readonly INITIAL_DOF_POS_NOISE=0.20 INITIAL_DOF_VEL_NOISE=0.35 CAMERA_PHYSICAL_PITCH_DEG=47.6
+    readonly CAMERA_MOUNT_QUAT='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
+    ;;
+  mgkt_joint_noise_47p6|mgkt_joint_noise_37)
+    [[ ${POLICY_ARCH} == command_student_large_mlp ]] || {
+      echo "[ERROR] joint-noise/camera ablation requires command_student_large_mlp" >&2
+      exit 2
+    }
+    readonly INITIAL_DOF_POS_NOISE=0.10 INITIAL_DOF_VEL_NOISE=0.0
+    if [[ ${ABLATION_PROFILE} == mgkt_joint_noise_37 ]]; then
+      readonly CAMERA_PHYSICAL_PITCH_DEG=37.0
+      readonly CAMERA_MOUNT_QUAT='[0.0,0.31730465640509214,0.0,0.9483236552061993]'
+    else
+      readonly CAMERA_PHYSICAL_PITCH_DEG=47.6
+      readonly CAMERA_MOUNT_QUAT='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
+    fi
+    ;;
+  *) echo "[ERROR] unsupported ablation profile: ${ABLATION_PROFILE}" >&2; exit 2 ;;
+esac
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
 readonly REMOTE_REF=main
 readonly NPROC=8 NNODES=4 WORLD_SIZE=32 ENVIRONMENTS_PER_RANK=2048
@@ -185,7 +207,9 @@ if [[ ${MODE} == formal ]]; then
   check_sha "${CONTRACT_SHA}" "${CONTRACT_PATH}"
   check_sha "${CANARY_SHA}" "${CANARY_PATH}"
   "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" \
-    "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" <<'PY'
+    "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" \
+    "${ABLATION_PROFILE}" "${INITIAL_DOF_POS_NOISE}" "${INITIAL_DOF_VEL_NOISE}" \
+    "${CAMERA_PHYSICAL_PITCH_DEG}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -217,6 +241,13 @@ if sys.argv[6] == "linear_startzero_0to1":
         "sampling_profile": "linear_startzero_0to1",
         "start_at_timestep_zero_probability_start": 0.0,
         "start_at_timestep_zero_probability_end": 1.0,
+    })
+if sys.argv[7] != "baseline":
+    expected.update({
+        "ablation_profile": sys.argv[7],
+        "initial_dof_pos_noise_rad": float(sys.argv[8]),
+        "initial_dof_vel_noise_rad_s": float(sys.argv[9]),
+        "camera_physical_pitch_deg": float(sys.argv[10]),
     })
 for key, value in expected.items():
     if payload.get(key) != value:
@@ -488,8 +519,8 @@ TRAIN_ARGS=(
   --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter=0
   --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter="${CURRICULUM_END_ITER}"
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=1.0
-  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-pos=0.20
-  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-vel=0.35
+  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-pos="${INITIAL_DOF_POS_NOISE}"
+  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-vel="${INITIAL_DOF_VEL_NOISE}"
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos='[0.08,0.08,0.025]'
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-rot='[0.15,0.15,0.30]'
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-lin-vel='[0.20,0.20,0.10]'
@@ -509,7 +540,8 @@ TRAIN_ARGS=(
   --perception.camera-warp-depth-offset-std=0.03
   --perception.object-geometry-mode=mesh
   --perception.sensor-offset='[0.0576235,0.01753,0.42987]'
-  --perception.camera-mount-quat='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
+  --perception.camera-mount-quat="${CAMERA_MOUNT_QUAT}"
+  --perception.camera-pitch-deg=0.0
   --perception.camera-frame-quat='[-0.5,0.5,-0.5,0.5]'
   --robot.object.enabled=True
   --robot.object.object-urdf-path="${OBJECT_SPEC_PATH}"
@@ -558,7 +590,9 @@ HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_t
   --contact-interval-runtime-prepend-compensation false --source-root "${SOURCE_ROOT}")
 HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" - "${HOLOSOMA_TRAINING_PROVENANCE}" \
   "${VERIFY_ROOT}/node_${NODE_RANK}.json" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" \
-  "${START_AT_ZERO_PROB}" "${START_AT_ZERO_PROB_END}" "${CURRICULUM_END_ITER}" <<'PY'
+  "${START_AT_ZERO_PROB}" "${START_AT_ZERO_PROB_END}" "${CURRICULUM_END_ITER}" \
+  "${ABLATION_PROFILE}" "${INITIAL_DOF_POS_NOISE}" "${INITIAL_DOF_VEL_NOISE}" \
+  "${CAMERA_PHYSICAL_PITCH_DEG}" <<'PY'
 import json
 import sys
 
@@ -587,11 +621,16 @@ provenance.update({
     "critic_hidden_dims": [512, 256, 128],
     "lstm_hidden_dim": 256 if sys.argv[3] == "lstm" else None,
     "lstm_num_layers": 1 if sys.argv[3] == "lstm" else None,
+    "ablation_profile": sys.argv[8],
+    "initial_dof_pos_noise_rad": float(sys.argv[9]),
+    "initial_dof_vel_noise_rad_s": float(sys.argv[10]),
+    "camera_physical_pitch_deg": float(sys.argv[11]),
 })
 print(json.dumps(provenance, sort_keys=True, separators=(",", ":")))
 PY
 )
 printf '%s\n' "${HOLOSOMA_TRAINING_PROVENANCE}" > "${RUN_ROOT}/training_provenance.json"
+echo "[INFO] ablation_profile=${ABLATION_PROFILE} initial_dof_pos_noise_rad=${INITIAL_DOF_POS_NOISE} initial_dof_vel_noise_rad_s=${INITIAL_DOF_VEL_NOISE} camera_physical_pitch_deg=${CAMERA_PHYSICAL_PITCH_DEG}"
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
