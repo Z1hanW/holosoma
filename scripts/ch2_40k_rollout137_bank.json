@@ -1,0 +1,76 @@
+{
+  "bank": "/data/holosoma_inputs/ch2ckwzw_model40000_rollout137_precomputed_turn_forward_v1/by-source/7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc",
+  "bank_digest": "7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc",
+  "dataset": {
+    "all_137_retained_without_success_filtering": true,
+    "category_counts": {
+      "ball": 34,
+      "barrel": 34,
+      "bin": 34,
+      "box": 35
+    },
+    "clip_count": 137,
+    "command_timeline": {
+      "forward_and_yaw_never_overlap": true,
+      "lateral_command_always_zero": true,
+      "mode": "precomputed_turn_then_forward",
+      "phase_counts_zero_forward_yaw": [
+        16745,
+        27230,
+        5208
+      ],
+      "runtime_pickup_latch_required": true
+    },
+    "contact_sidecar_training_dependency": false,
+    "effective_command_bank": "/data/holosoma_inputs/ch2ckwzw_model40000_rollout137_precomputed_turn_forward_v1/by-source/7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc",
+    "fps": 50,
+    "frames_per_clip": 359,
+    "manifest_sha256": "1047c5c3a2aba297127683054d9d0cea33fda43ea171b964e7ab9cb6c5b150e7",
+    "object_map_sha256": "867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59",
+    "parent_checkpoint": {
+      "checkpoint": "model_40000",
+      "onnx_sha256": "90c33ea012226b88d206fe2ed0224f505b6c3ba0d9d1306ab2e2eb49d3ef5cc6",
+      "pt_sha256": "14e644323b8e6a7b769dbf641d9f625bee895742b7064368b55afd0710a0d665",
+      "role": "rollout_producer_only_not_online_training_teacher",
+      "wandb_run": "zihanw22/carry-any/ch2ckwzw"
+    },
+    "rank_shards": {
+      "duplicates": false,
+      "environments_per_rank": 2048,
+      "exact_global_coverage_once": true,
+      "manifest_sha256": "34877f50eb06739d49629ddac6fad157d600bf15d55506d482b874caabc4bb42",
+      "source_digest": "d8e5833fa479c372ef4e5e25d7ce8b9d525ffec087dc6464a3a1aa5f8d988546",
+      "world_size": 32
+    },
+    "raw_rollout_bank": "/data/holosoma_inputs/ch2ckwzw_model40000_rollout137_20260908/by-source/0bab4cdc7a2ff469dfe7855d817caef84ef26b834a00a9b73eb05db05e20bf47",
+    "raw_rollout_digest": "0bab4cdc7a2ff469dfe7855d817caef84ef26b834a00a9b73eb05db05e20bf47",
+    "raw_rollout_manifest_sha256": "418ae32cd8f16ec1d427b05d67f56ea04d93d1acd1f0bd417ebd32f7d248060e",
+    "semantics": "checkpoint_actor_simulator_rollout_motion_bank_with_precomputed_policy_commands",
+    "single_slot_source_digest": "39826c72c99c0d5544b5a434484c9beee302e9e681736cfc8daabb1ffbdf1d26",
+    "single_slot_view_digest": "7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc"
+  },
+  "manifest_sha256": "1047c5c3a2aba297127683054d9d0cea33fda43ea171b964e7ab9cb6c5b150e7",
+  "old_reference_different_clips": 137,
+  "phase_counts": [
+    16745,
+    27230,
+    5208
+  ],
+  "raw_collection_core_success_count": 129,
+  "raw_collection_strict_success_count": 109,
+  "shard_digest": "d8e5833fa479c372ef4e5e25d7ce8b9d525ffec087dc6464a3a1aa5f8d988546",
+  "shard_manifest_sha256": "34877f50eb06739d49629ddac6fad157d600bf15d55506d482b874caabc4bb42",
+  "source_digest": "39826c72c99c0d5544b5a434484c9beee302e9e681736cfc8daabb1ffbdf1d26",
+  "trajectory_fields_exactly_preserved": [
+    "joint_pos",
+    "joint_vel",
+    "body_pos_w",
+    "body_quat_w",
+    "body_lin_vel_w",
+    "body_ang_vel_w",
+    "object_pos_w",
+    "object_quat_w",
+    "object_lin_vel_w",
+    "object_ang_vel_w"
+  ]
+}
