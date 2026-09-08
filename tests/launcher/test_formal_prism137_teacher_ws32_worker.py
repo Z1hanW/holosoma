@@ -15,7 +15,8 @@ WORKER = ROOT / "scripts" / "formal_prism137_teacher_ws32_worker.sh"
 @pytest.mark.parametrize(
     "profile,pos,vel,pitch",
     [("baseline", 0.2, 0.35, 47.6), ("mgkt_joint_noise_47p6", 0.1, 0.0, 47.6),
-     ("mgkt_joint_noise_37", 0.1, 0.0, 37.0)],
+     ("mgkt_joint_noise_37", 0.1, 0.0, 37.0),
+     ("ch2_40k_joint_noise_47p6", 0.1, 0.0, 47.6)],
 )
 def test_ablation_profile_values(profile, pos, vel, pitch):
     source = WORKER.read_text()
@@ -46,6 +47,24 @@ def test_ablation_rejects_unknown_profile_before_node_checks():
 
 def test_worker_has_valid_bash_syntax() -> None:
     subprocess.run(["bash", "-n", str(WORKER)], check=True)
+
+
+def test_final_ch2_data_profile_fails_closed_without_git_bound_bank():
+    args = ["canary", "command_student_large_mlp", "0", "192.0.2.1", "/missing/source",
+            "/missing/persist", "192.0.2.2", "29999", "-", "-", "-", "-", "-", "-",
+            "0" * 40, "1" * 40, "2" * 64, "3" * 64, "linear_startzero_0to1", "ch2_40k_joint_noise_47p6"]
+    proc = subprocess.run(["bash", str(WORKER), *args], text=True, capture_output=True)
+    assert proc.returncode == 2
+    assert "invalid final40K rollout binding" in proc.stderr
+
+
+def test_final_ch2_profile_binds_producer_and_canary_data():
+    source = WORKER.read_text()
+    assert 'parent["checkpoint"] == "model_40000"' in source
+    assert 'parent["wandb_run"] == "zihanw22/carry-any/ch2ckwzw"' in source
+    assert '"rollout_command_bank_digest": sys.argv[11]' in source
+    assert '"rank_shard_digest": sys.argv[12]' in source
+    assert 'rollout NPZ hash mismatch' in source
 
 
 def test_worker_rejects_unknown_architecture_before_node_or_asset_checks() -> None:

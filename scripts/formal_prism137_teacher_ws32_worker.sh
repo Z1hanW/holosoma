@@ -17,7 +17,7 @@ case ${ABLATION_PROFILE} in
     readonly INITIAL_DOF_POS_NOISE=0.20 INITIAL_DOF_VEL_NOISE=0.35 CAMERA_PHYSICAL_PITCH_DEG=47.6
     readonly CAMERA_MOUNT_QUAT='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
     ;;
-  mgkt_joint_noise_47p6|mgkt_joint_noise_37)
+  mgkt_joint_noise_47p6|mgkt_joint_noise_37|ch2_40k_joint_noise_47p6)
     [[ ${POLICY_ARCH} == command_student_large_mlp ]] || {
       echo "[ERROR] joint-noise/camera ablation requires command_student_large_mlp" >&2
       exit 2
@@ -44,9 +44,38 @@ readonly PYTHON_RUNTIME_SHA256=dd7ca81fa848917c362b3a239893a7a26f4c89d42b4f85cb5
 readonly NCCL_ROOT=/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly NCCL_SHA256=e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
-  readonly SINGLE_SLOT_SOURCE_DIGEST=42903c7e443ccd836af133700058b0772545efcbc5af11d3193b60f0ec72dddd
-  readonly SINGLE_SLOT_VIEW_DIGEST=95e5a54bb1e429874af7a93bfb6bb902b5fc9bd7564eab481d3bce5cd01c0303
-  readonly MOTION_DIR=/data/holosoma_inputs/ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1/by-source/${SINGLE_SLOT_VIEW_DIGEST}
+  if [[ ${ABLATION_PROFILE} == ch2_40k_joint_noise_47p6 ]]; then
+    # This small binding is part of the exact Git source, not ambient node config.
+    mapfile -t bank_fields < <("${PYTHON_BIN}" - "${SOURCE_ROOT}/scripts/ch2_40k_rollout137_bank.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+binding = json.loads(Path(sys.argv[1]).read_text())
+parent = binding["dataset"]["parent_checkpoint"]
+assert parent["wandb_run"] == "zihanw22/carry-any/ch2ckwzw"
+assert parent["checkpoint"] == "model_40000"
+assert parent["pt_sha256"] == "14e644323b8e6a7b769dbf641d9f625bee895742b7064368b55afd0710a0d665"
+assert binding["dataset"]["clip_count"] == 137
+assert Path(binding["bank"]).name == binding["bank_digest"]
+for key in ("source_digest", "bank_digest", "bank", "manifest_sha256"):
+    print(binding[key])
+print(json.dumps(binding["phase_counts"]))
+PY
+    )
+    [[ ${#bank_fields[@]} -eq 5 ]] || { echo "[ERROR] invalid final40K rollout binding" >&2; exit 2; }
+    readonly SINGLE_SLOT_SOURCE_DIGEST=${bank_fields[0]}
+    readonly SINGLE_SLOT_VIEW_DIGEST=${bank_fields[1]}
+    readonly MOTION_DIR=${bank_fields[2]}
+    readonly COMMAND_BANK_MANIFEST_SHA=${bank_fields[3]}
+    readonly COMMAND_PHASE_COUNTS=${bank_fields[4]}
+  else
+    readonly SINGLE_SLOT_SOURCE_DIGEST=42903c7e443ccd836af133700058b0772545efcbc5af11d3193b60f0ec72dddd
+    readonly SINGLE_SLOT_VIEW_DIGEST=95e5a54bb1e429874af7a93bfb6bb902b5fc9bd7564eab481d3bce5cd01c0303
+    readonly MOTION_DIR=/data/holosoma_inputs/ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1/by-source/${SINGLE_SLOT_VIEW_DIGEST}
+    readonly COMMAND_BANK_MANIFEST_SHA=f162e31fa38a63ac679158184d8a9f4864e17ae83dd1f8e7aa001b9e64619487
+    readonly COMMAND_PHASE_COUNTS='[16941, 27976, 4266]'
+  fi
   readonly OBJECT_SPEC_PATH=${MOTION_DIR}/_clip_object_urdf_map.json
   readonly SOURCE_MOTION_DIR=${MOTION_DIR}
   readonly SOURCE_OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}
@@ -143,21 +172,27 @@ readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "$
 readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
 if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
-  check_sha f162e31fa38a63ac679158184d8a9f4864e17ae83dd1f8e7aa001b9e64619487 "${MOTION_DIR}/manifest.json"
+  check_sha "${COMMAND_BANK_MANIFEST_SHA}" "${MOTION_DIR}/manifest.json"
   check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
   [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
     echo "[ERROR] command rollout motion bank must contain exactly 137 regular clips" >&2
     exit 2
   }
-  "${PYTHON_BIN}" - "${MOTION_DIR}" <<'PY'
+  "${PYTHON_BIN}" - "${MOTION_DIR}" "${COMMAND_PHASE_COUNTS}" <<'PY'
+import hashlib
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 
 root = Path(sys.argv[1])
+manifest = json.loads((root / "manifest.json").read_text())
+expected_sha = {row["clip_id"]: row["derived_npz_sha256"] for row in manifest["clips"]}
 phase_counts = np.zeros((3,), dtype=np.int64)
 for path in sorted(root.glob("*.npz")):
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha[path.stem]:
+        raise SystemExit(f"rollout NPZ hash mismatch: {path}")
     with np.load(path, allow_pickle=False) as data:
         if not {"policy_command_xy_yaw", "policy_command_phase"} <= set(data.files):
             raise SystemExit(f"missing command fields: {path}")
@@ -170,7 +205,7 @@ for path in sorted(root.glob("*.npz")):
         if not np.all((command[:, 0] == 0.0) | (command[:, 2] == 0.0)):
             raise SystemExit(f"forward/yaw overlap: {path}")
         phase_counts += np.bincount(phase.astype(np.int64), minlength=3)
-if phase_counts.tolist() != [16941, 27976, 4266]:
+if phase_counts.tolist() != json.loads(sys.argv[2]):
     raise SystemExit(f"command phase-count drift: {phase_counts.tolist()}")
 PY
 elif [[ ${POLICY_ARCH} == large_mlp ]]; then
@@ -209,7 +244,7 @@ if [[ ${MODE} == formal ]]; then
   "${PYTHON_BIN}" - "${CANARY_PATH}" "${COMMIT_SHA}" "${TREE_SHA}" \
     "${SOURCE_SNAPSHOT_ID}" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" \
     "${ABLATION_PROFILE}" "${INITIAL_DOF_POS_NOISE}" "${INITIAL_DOF_VEL_NOISE}" \
-    "${CAMERA_PHYSICAL_PITCH_DEG}" <<'PY'
+    "${CAMERA_PHYSICAL_PITCH_DEG}" "${SINGLE_SLOT_VIEW_DIGEST}" "${SHARD_DIGEST}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -241,6 +276,11 @@ if sys.argv[6] == "linear_startzero_0to1":
         "sampling_profile": "linear_startzero_0to1",
         "start_at_timestep_zero_probability_start": 0.0,
         "start_at_timestep_zero_probability_end": 1.0,
+    })
+if sys.argv[7] == "ch2_40k_joint_noise_47p6":
+    expected.update({
+        "rollout_command_bank_digest": sys.argv[11],
+        "rank_shard_digest": sys.argv[12],
     })
 if sys.argv[7] != "baseline":
     expected.update({
