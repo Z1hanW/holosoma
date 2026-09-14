@@ -1,0 +1,1 @@
+/home/unitree/FAR/holosoma/_ckps/reference/swl41n4x/model_20000.onnx
