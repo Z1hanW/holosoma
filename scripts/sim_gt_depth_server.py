@@ -39,6 +39,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--near", type=float, default=0.3)
     parser.add_argument("--far", type=float, default=3.0)
     parser.add_argument("--rate-hz", type=float, default=30.0)
+    parser.add_argument("--camera-profile-path", type=Path)
     return parser.parse_args(argv)
 
 
@@ -72,16 +73,25 @@ def _quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     )
 
 
-def d435i_urdf_mujoco_quaternion() -> np.ndarray:
+def camera_mujoco_quaternion(mount_quaternion_xyzw: Sequence[float]) -> np.ndarray:
     """Use the same Warp/Isaac-to-MuJoCo camera conversion as SceneManager."""
-    user = _euler_xyz_to_quat_wxyz(np.deg2rad([0.0, 47.6, 0.0]))
+    mount_xyzw = np.asarray(mount_quaternion_xyzw, dtype=np.float64).reshape(-1)
+    if mount_xyzw.size != 4 or not np.isfinite(mount_xyzw).all():
+        raise ValueError(f"Invalid camera mount quaternion: {mount_quaternion_xyzw}")
+    user = mount_xyzw[[3, 0, 1, 2]]
+    user /= np.linalg.norm(user)
     base = _euler_xyz_to_quat_wxyz(np.deg2rad([-90.0, 0.0, -90.0]))
     flip = np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
     quaternion = _quat_mul_wxyz(_quat_mul_wxyz(user, base), flip)
     return quaternion / np.linalg.norm(quaternion)
 
 
-def build_scene(scene_path: Path, vertical_fov_deg: float):
+def build_scene(
+    scene_path: Path,
+    vertical_fov_deg: float,
+    camera_position_xyz: Sequence[float],
+    mount_quaternion_xyzw: Sequence[float],
+):
     """Build a static all-zero G1 scene; non-robot geoms are filtered at render time."""
     spec = mujoco.MjSpec.from_file(str(scene_path))
 
@@ -94,8 +104,8 @@ def build_scene(scene_path: Path, vertical_fov_deg: float):
     camera_name = "sim_gt_d435i_urdf"
     torso.add_camera(
         name=camera_name,
-        pos=[0.0576235, 0.01753, 0.41987],
-        quat=d435i_urdf_mujoco_quaternion().tolist(),
+        pos=[float(value) for value in camera_position_xyz],
+        quat=camera_mujoco_quaternion(mount_quaternion_xyzw).tolist(),
         fovy=vertical_fov_deg,
     )
     floor = spec.geom("floor")
@@ -152,7 +162,23 @@ def apply_robot_status(model: mujoco.MjModel, data: mujoco.MjData, status: dict)
     return True
 
 
+def _apply_camera_profile(args: argparse.Namespace) -> dict | None:
+    if args.camera_profile_path is None:
+        return None
+    profile_path = args.camera_profile_path.expanduser().resolve()
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    camera = profile["camera"]
+    args.height, args.width = (int(value) for value in camera["raw_shape"])
+    args.horizontal_fov_deg = float(camera["horizontal_fov_deg"])
+    args.vertical_fov_deg = float(camera["vertical_fov_deg"])
+    args.near = float(camera["near"])
+    args.far = float(camera["far"])
+    args.rate_hz = float(camera["fps"])
+    return profile
+
+
 def run(args: argparse.Namespace) -> None:
+    camera_profile = _apply_camera_profile(args)
     scene_path = args.scene.expanduser().resolve()
     if not scene_path.is_file():
         raise FileNotFoundError(f"MuJoCo scene not found: {scene_path}")
@@ -161,7 +187,22 @@ def run(args: argparse.Namespace) -> None:
     if not (0.0 < args.horizontal_fov_deg < 180.0 and 0.0 < args.vertical_fov_deg < 180.0):
         raise ValueError("Camera FOV must be between 0 and 180 degrees")
 
-    model, data, camera_name = build_scene(scene_path, args.vertical_fov_deg)
+    camera_position_xyz = [0.0576235, 0.01753, 0.41987]
+    mount_quaternion_xyzw = [0.0, 0.4035452902, 0.0, 0.9149596691]
+    if camera_profile is not None:
+        camera_position_xyz = camera_profile["camera"]["position_xyz"]
+        mount_quaternion_xyzw = camera_profile["camera"]["mount_quaternion_xyzw"]
+        print(
+            f"[sim_gt_depth] checkpoint camera: {camera_profile['camera']['label']} "
+            f"position={camera_position_xyz}",
+            flush=True,
+        )
+    model, data, camera_name = build_scene(
+        scene_path,
+        args.vertical_fov_deg,
+        camera_position_xyz,
+        mount_quaternion_xyzw,
+    )
     # MuJoCo stores vertical FOV. The configured 106x60 aspect and 58.6-degree
     # vertical FOV produce the requested horizontal field of view.
     implied_hfov = math.degrees(

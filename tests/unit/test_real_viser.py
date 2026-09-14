@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,41 @@ def test_parse_args_can_enable_sim_gt_panel(tmp_path) -> None:
     assert args.sim_gt_depth_shm_name == "sim_gt_depth_raw_shm"
     assert (args.sim_gt_depth_height, args.sim_gt_depth_width) == (60, 106)
     assert args.sim_gt_depth_channels == 2
+
+
+def test_camera_profile_configures_realtime_depth_and_sim_views(tmp_path) -> None:
+    profile_path = tmp_path / "camera_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "camera": {
+                    "label": "test: D435 37.0 deg down",
+                    "raw_shape": [60, 106],
+                    "policy_shape": [58, 87],
+                    "crop": [2, 0, 4, 4],
+                    "near": 0.3,
+                    "far": 3.0,
+                    "horizontal_fov_deg": 89.5,
+                    "vertical_fov_deg": 58.6,
+                    "fps": 30.0,
+                    "position_xyz": [0.01, 0.01, 0.44],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = real_viser._parse_args(
+        ["--state-path", str(tmp_path / "state.json"), "--camera-profile-path", str(profile_path)]
+    )
+
+    real_viser.apply_camera_profile(args)
+
+    assert (args.depth_source_height, args.depth_source_width) == (60, 106)
+    assert (args.depth_height, args.depth_width) == (58, 87)
+    assert (args.depth_crop_y_start, args.depth_crop_y_end) == (2, 0)
+    assert (args.depth_crop_x_start, args.depth_crop_x_end) == (4, -4)
+    assert (args.sim_gt_depth_height, args.sim_gt_depth_width) == (60, 106)
+    assert args.rate_hz == 30.0
 
 
 def test_normalized_depth_to_meters_maps_policy_range() -> None:

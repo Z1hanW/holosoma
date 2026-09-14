@@ -25,8 +25,13 @@ state_args=()
 if [[ -n "$state_path" ]]; then
   state_args+=(--state-path "$state_path")
 fi
+camera_profile_args=()
+if [[ -n "${HOLOSOMA_SIM_GT_CAMERA_PROFILE_PATH:-}" ]]; then
+  camera_profile_args+=(--camera-profile-path "$HOLOSOMA_SIM_GT_CAMERA_PROFILE_PATH")
+fi
 
 exec env MUJOCO_GL="${HOLOSOMA_SIM_GT_MUJOCO_GL:-egl}" \
   "$python_bin" scripts/sim_gt_depth_server.py \
   --shm-name "$shm_name" \
+  "${camera_profile_args[@]}" \
   "${state_args[@]}"

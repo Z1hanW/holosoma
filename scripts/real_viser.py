@@ -38,6 +38,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--horizontal-fov-deg", type=float, default=89.5)
     parser.add_argument("--vertical-fov-deg", type=float, default=58.6)
     parser.add_argument("--depth-profile", default="D435i")
+    parser.add_argument("--camera-profile-path", type=Path)
     parser.add_argument("--depth-source-height", type=int)
     parser.add_argument("--depth-source-width", type=int)
     parser.add_argument("--depth-crop-y-start", type=int, default=0)
@@ -55,11 +56,37 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--urdf-path", type=Path, default=DEFAULT_URDF_PATH)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--rate-hz", type=float, default=20.0)
+    parser.add_argument("--rate-hz", type=float)
     parser.add_argument("--root-height", type=float, default=0.78)
     parser.add_argument("--open-browser", action="store_true")
     parser.add_argument("--no-depth", action="store_true", help="Hide the policy-depth panel and point cloud.")
     return parser.parse_args(argv)
+
+
+def apply_camera_profile(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Apply one checkpoint-derived camera contract to all depth views."""
+    if args.camera_profile_path is None:
+        return None
+    profile_path = args.camera_profile_path.expanduser().resolve()
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    camera = profile["camera"]
+    args.depth_source_height, args.depth_source_width = (int(value) for value in camera["raw_shape"])
+    args.depth_height, args.depth_width = (int(value) for value in camera["policy_shape"])
+    crop_top, crop_bottom, crop_left, crop_right = (int(value) for value in camera["crop"])
+    args.depth_crop_y_start = crop_top
+    args.depth_crop_y_end = -crop_bottom if crop_bottom else 0
+    args.depth_crop_x_start = crop_left
+    args.depth_crop_x_end = -crop_right if crop_right else 0
+    args.depth_near = float(camera["near"])
+    args.depth_far = float(camera["far"])
+    args.horizontal_fov_deg = float(camera["horizontal_fov_deg"])
+    args.vertical_fov_deg = float(camera["vertical_fov_deg"])
+    args.depth_profile = str(camera["label"])
+    args.sim_gt_depth_height = args.depth_source_height
+    args.sim_gt_depth_width = args.depth_source_width
+    if args.rate_hz is None:
+        args.rate_hz = float(camera["fps"])
+    return profile
 
 
 def read_status(path: Path) -> dict[str, Any]:
@@ -329,6 +356,9 @@ def _import_viser():
 
 
 def run(args: argparse.Namespace) -> None:
+    camera_profile = apply_camera_profile(args)
+    if args.rate_hz is None:
+        args.rate_hz = 30.0
     viser, ViserUrdf = _import_viser()
     urdf_path = args.urdf_path.expanduser().resolve()
     if not urdf_path.is_file():
@@ -418,7 +448,7 @@ def run(args: argparse.Namespace) -> None:
             show_sim_gt = server.gui.add_checkbox("Show sim GT", initial_value=True)
             sim_gt_image = server.gui.add_image(
                 np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-                label="Robot + flat-ground MuJoCo GT (same colormap as Real D435)",
+                label=f"MuJoCo GT: {args.depth_profile}",
             )
             sim_gt_md = server.gui.add_markdown("Waiting for MuJoCo GT shared memory...")
             comparison_image = server.gui.add_image(
@@ -461,14 +491,38 @@ def run(args: argparse.Namespace) -> None:
     url_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     url = f"http://{url_host}:{args.port}"
     print(f"[real_viser] live viewer: {url}", flush=True)
+    if camera_profile is not None:
+        camera = camera_profile["camera"]
+        print(
+            f"[real_viser] checkpoint camera: {camera['label']} "
+            f"position={camera['position_xyz']} rate={args.rate_hz:.1f} Hz",
+            flush=True,
+        )
     if args.open_browser:
         _open_browser_later(url)
 
     period = 1.0 / max(float(args.rate_hz), 1.0)
     last_status_text_update = 0.0
+    rate_window_started = time.monotonic()
+    rate_window_frames = 0
+    measured_rate_hz = 0.0
+    last_rate_log = rate_window_started
     try:
         while not stop.is_set():
             started = time.monotonic()
+            rate_window_frames += 1
+            rate_elapsed = started - rate_window_started
+            if rate_elapsed >= 1.0:
+                measured_rate_hz = rate_window_frames / rate_elapsed
+                rate_window_started = started
+                rate_window_frames = 0
+                if started - last_rate_log >= 5.0:
+                    print(
+                        f"[real_viser] realtime update rate={measured_rate_hz:.1f} Hz "
+                        f"target={args.rate_hz:.1f} Hz",
+                        flush=True,
+                    )
+                    last_rate_log = started
             status = read_status(args.state_path)
             source_names = status.get("dof_names", ())
             q_actual = status.get("q_actual", ())
@@ -600,6 +654,7 @@ def run(args: argparse.Namespace) -> None:
                 mode_label = "STIFF HOLD" if bool(status.get("stiff_hold_active", False)) else "POLICY"
                 status_md.content = (
                     f"**{state_label} · {mode_label}** · telemetry age `{age:.2f}s`  \n"
+                    f"viewer `{measured_rate_hz:.1f} Hz` / target `{args.rate_hz:.1f} Hz`  \n"
                     f"policy active `{bool(status.get('use_policy_action', False))}` · "
                     f"motion frame `{int(status.get('motion_timestep', 0) or 0)}`  \n"
                     f"command `{command_text}`  \n"
@@ -615,7 +670,7 @@ def run(args: argparse.Namespace) -> None:
                         depth_md.content = (
                             f"profile `{args.depth_profile}` · buffer `{args.depth_shm_name}` · "
                             f"policy input `{args.depth_width}x{args.depth_height}` · "
-                            f"valid `{valid_percent:.1f}%`"
+                            f"valid `{valid_percent:.1f}%` · realtime `{measured_rate_hz:.1f} Hz`"
                         )
                 if sim_gt_reader is not None and sim_gt_md is not None:
                     if sim_gt_depth is None:
@@ -624,7 +679,8 @@ def run(args: argparse.Namespace) -> None:
                         valid = np.isfinite(sim_gt_depth) & (sim_gt_depth < 0.499)
                         valid_percent = 100.0 * float(np.count_nonzero(valid)) / float(sim_gt_depth.size)
                         sim_gt_md.content = (
-                            "geometry `G1 + flat ground` · colormap `same as Real D435` · "
+                            f"profile `{args.depth_profile}` · geometry `G1 + flat ground` · "
+                            "colormap `same as Real D435` · "
                             f"raw metric buffer `{args.sim_gt_depth_shm_name}` · "
                             f"render `{args.sim_gt_depth_width}x{args.sim_gt_depth_height}` · "
                             f"policy input `{args.depth_width}x{args.depth_height}` · "

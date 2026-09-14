@@ -46,17 +46,31 @@ if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
 else
   echo "[command_window] skipping: no DISPLAY/WAYLAND_DISPLAY"
 fi
+source scripts/source_inference_setup.sh
+
+camera_profile_path="${log_dir}/camera_profile.json"
+resolved_model_path_file="${log_dir}/resolved_model_path.txt"
+PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
+python3 scripts/checkpoint_camera_profile.py \
+  --model-path "$model_path" \
+  --output "$camera_profile_path" \
+  --resolved-model-path-output "$resolved_model_path_file" \
+  --download-dir "${log_dir}/checkpoint"
+model_path="$(<"$resolved_model_path_file")"
+echo "[real_drop] resolved_model_path=${model_path}"
 
 if [[ "${HOLOSOMA_REAL_DROP_SIM_GT:-1}" != "0" ]]; then
   sim_gt_log="${log_dir}/sim_gt_depth.log"
   sim_gt_shm_name="${HOLOSOMA_REAL_DROP_SIM_GT_SHM_NAME:-sim_gt_depth_raw_shm}"
   if command -v setsid >/dev/null 2>&1; then
     env HOLOSOMA_SIM_GT_STATE_PATH="$command_status_path" HOLOSOMA_SIM_GT_SHM_NAME="$sim_gt_shm_name" \
+      HOLOSOMA_SIM_GT_CAMERA_PROFILE_PATH="$camera_profile_path" \
       setsid bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
     sim_gt_pid=$!
     sim_gt_process_group=$sim_gt_pid
   else
     HOLOSOMA_SIM_GT_STATE_PATH="$command_status_path" HOLOSOMA_SIM_GT_SHM_NAME="$sim_gt_shm_name" \
+      HOLOSOMA_SIM_GT_CAMERA_PROFILE_PATH="$camera_profile_path" \
       bash sim_gt_depth.sh >"$sim_gt_log" 2>&1 &
     sim_gt_pid=$!
   fi
@@ -64,7 +78,6 @@ if [[ "${HOLOSOMA_REAL_DROP_SIM_GT:-1}" != "0" ]]; then
 else
   echo "[real_drop] MuJoCo sim GT disabled by HOLOSOMA_REAL_DROP_SIM_GT=0"
 fi
-source scripts/source_inference_setup.sh
 
 if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
   viser_browser_args=()
@@ -77,12 +90,7 @@ if [[ "${HOLOSOMA_REAL_VISER:-1}" != "0" ]]; then
     --state-path "$command_status_path" \
     --host "${HOLOSOMA_REAL_VISER_HOST:-127.0.0.1}" \
     --port "${HOLOSOMA_REAL_VISER_PORT:-8080}" \
-    --depth-profile "Real D435: 0mcqao8k processing" \
-    --depth-source-height 60 \
-    --depth-source-width 106 \
-    --depth-crop-y-start 2 \
-    --depth-crop-x-start 4 \
-    --depth-crop-x-end -4 \
+    --camera-profile-path "$camera_profile_path" \
     --sim-gt-depth-shm-name "${HOLOSOMA_REAL_DROP_SIM_GT_SHM_NAME:-sim_gt_depth_raw_shm}" \
     "${viser_browser_args[@]}" &
   viser_pid=$!

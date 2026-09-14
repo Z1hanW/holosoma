@@ -96,11 +96,15 @@ For the two-terminal real depth experiment, start the camera and policy as usual
 ```bash
 bash real_depth.sh
 bash real_drop.sh
+# Or test the archived SW/CORL reference policy:
+bash real_corl.sh
 ```
 
-`real_drop.sh` and `real_debug.sh` start a Viser dashboard at `http://127.0.0.1:8080` and open it automatically when a desktop display is available. The dashboard shows the measured G1 pose, target-pose overlay, controller mode, joint-error telemetry, the exact normalized D435i policy input, and a depth point cloud. Both launch the flat-ground MuJoCo GT view and robot-only comparison; during `real_drop.sh`, the GT renderer follows the measured robot joints and base orientation from live telemetry.
+`real_depth.sh` starts a camera-only Viser dashboard at `http://127.0.0.1:8081`. `real_drop.sh`, `real_corl.sh`, and `real_debug.sh` start the policy dashboard at `http://127.0.0.1:8080`; they open it automatically when a desktop display is available. The dashboard runs at the checkpoint camera rate (normally 30 Hz) and shows its measured update rate, measured G1 pose, target-pose overlay, controller mode, joint-error telemetry, exact normalized D435i policy input, and depth point cloud.
 
-Set `HOLOSOMA_REAL_VISER=0` to disable the viewer, `HOLOSOMA_REAL_VISER_PORT` to choose another port, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep it from opening a browser. When running over SSH, forward the port (for example, `ssh -L 8080:localhost:8080 ...`) and open the same URL locally.
+`real_drop.sh` and `real_corl.sh` extract the camera mount quaternion, sensor offset, crop, resize, depth range, FOV, and FPS from the selected ONNX checkpoint. The same generated profile configures both Viser and the flat-ground MuJoCo GT/robot-only comparison, preventing a 37-degree policy from being compared with the 47.6-degree camera setup. `real_depth.sh` uses the current `real_drop` checkpoint by default; set `HOLOSOMA_REAL_DEPTH_MODEL_PATH` when viewing another policy. Depth-image recording is off by default to preserve realtime throughput; set `HOLOSOMA_REAL_DEPTH_SAVE_IMAGES=1` to record frames.
+
+Set `HOLOSOMA_REAL_VISER=0` to disable a policy viewer, `HOLOSOMA_REAL_DEPTH_VISER=0` to disable the camera-only viewer, `HOLOSOMA_REAL_VISER_PORT` or `HOLOSOMA_REAL_DEPTH_VISER_PORT` to choose other ports, or `HOLOSOMA_REAL_VISER_OPEN_BROWSER=0` to keep them from opening a browser. When running over SSH, forward both ports (for example, `ssh -L 8080:localhost:8080 -L 8081:localhost:8081 ...`) and open the URLs locally.
 
 ### Real Unitree Diagnostic-Pose Debug
 
