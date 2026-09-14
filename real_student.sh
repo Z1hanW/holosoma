@@ -78,7 +78,7 @@ HOLOSOMA_POLICY_DEBUG_INPUT_PATH="${log_dir}/depth_command.jsonl" \
 HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-100000}" \
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
-  inference:g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1 \
+  inference:g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf \
   --task.model-path "$model_path" \
   --task.use-joystick \
   --task.rl-rate 50 \
