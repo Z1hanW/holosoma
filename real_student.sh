@@ -5,9 +5,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
-default_model_path="${ROOT_DIR}/_ckps/swl41n4x_model_20000.onnx"
+student_policy="${HOLOSOMA_REAL_STUDENT_POLICY:-ifqh0k53}"
+case "$student_policy" in
+  ifqh0k53|unywo70f)
+    default_model_path="${ROOT_DIR}/_ckps/${student_policy}_model_40000.onnx"
+    wandb_model_path="wandb://zihanw22/carry-any/${student_policy}/model_40000.onnx"
+    ;;
+  *)
+    echo "Unknown HOLOSOMA_REAL_STUDENT_POLICY: ${student_policy}" >&2
+    echo "Available policies: ifqh0k53, unywo70f" >&2
+    exit 2
+    ;;
+esac
 if [[ ! -f "$default_model_path" ]]; then
-  default_model_path="wandb://zihanw22/carry-any/swl41n4x/model_20000.onnx"
+  default_model_path="$wandb_model_path"
 fi
 model_path="${HOLOSOMA_REAL_STUDENT_MODEL_PATH:-${HOLOSOMA_REAL_MODEL_PATH:-$default_model_path}}"
 
@@ -17,6 +28,7 @@ exec > >(tee -a "${log_dir}/run.log") 2>&1
 command_status_path="${log_dir}/latest_command.json"
 
 echo "[real_student] log_dir=${log_dir}"
+echo "[real_student] student_policy=${student_policy}"
 echo "[real_student] model_path=${model_path}"
 command_window_pid=""
 viser_pid=""
