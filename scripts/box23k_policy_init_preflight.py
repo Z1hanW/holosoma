@@ -34,6 +34,7 @@ def main() -> None:
     from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
     from holosoma.utils.inference_helpers import export_policy_as_onnx, validate_exported_policy_onnx
     from holosoma.utils.policy_init_preflight import validate_policy_init_checkpoint
+    from holosoma.utils.runtime_asset_manifest import finalize_runtime_asset_provenance
     from holosoma.utils.tyro_utils import TYRO_CONIFG
 
     torch.set_num_threads(2)
@@ -46,7 +47,11 @@ def main() -> None:
         raise ValueError("Box23K profile must be pure PPO with ONNX enabled.")
     if config.training.checkpoint is not None or config.training.stage4_init_checkpoint is not None:
         raise ValueError("Only actor initialization is permitted, not resume or actor-critic initialization.")
-    provenance = json.loads(os.environ["HOLOSOMA_TRAINING_PROVENANCE"])
+    # Match train_agent's pre-simulator asset closure, not the launch-time
+    # pending sentinel. The parent worker retains its own unmodified environment.
+    provenance = finalize_runtime_asset_provenance(config)
+    if provenance is None:
+        raise ValueError("Box initialization requires authenticated launch provenance.")
     checkpoint_path = Path(config.training.policy_init_checkpoint)
     validate_policy_init_checkpoint(checkpoint_path, config.to_serializable_dict(), current_provenance=provenance)
     checkpoint, checkpoint_sha = load_verified_torch_checkpoint(
