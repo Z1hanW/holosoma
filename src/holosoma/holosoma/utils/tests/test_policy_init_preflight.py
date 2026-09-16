@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from holosoma.utils.policy_init_preflight import (
+    BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
     PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
@@ -782,7 +783,7 @@ def test_m8_to_hmi_migration_rejects_nondefault_inert_lstm_field(tmp_path):
         "lstm_hidden_dim"
     ] = 512
 
-    with pytest.raises(ValueError, match="inert MLP default"):
+    with pytest.raises(ValueError, match="lstm_hidden_dim"):
         validate_policy_init_checkpoint(_save(tmp_path, saved), current)
 
 
@@ -832,6 +833,57 @@ def test_policy_init_migration_profile_rejects_stale_identical_contract(tmp_path
     )
 
     with pytest.raises(ValueError, match="contracts are already identical"):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
+
+
+def _box_to_rollout_command_config_pair():
+    saved, _ = _m8_to_hmi_command_config_pair()
+    motion = saved["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]
+    motion.update(
+        contact_aware_sparse_root_command_mode="tracking_error",
+        zero_root_command_when_drop_active=False,
+    )
+    current = copy.deepcopy(saved)
+    current["command"]["setup_terms"]["motion_command"]["params"]["motion_config"].update(
+        contact_aware_sparse_root_command_mode="precomputed_turn_then_forward",
+        zero_root_command_when_drop_active=True,
+        contact_aware_button_window_mode="kinematic_lift",
+    )
+    current["training"]["policy_init_actor_contract_migration"] = (
+        BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION
+    )
+    current["perception"].update(encoder_pretrained=False, encoder_freeze_backbone=False)
+    current["algo"]["config"]["module_dict"]["actor"]["layer_config"].update(
+        perception_pretrained=False, perception_freeze_backbone=False,
+    )
+    return saved, current
+
+
+def test_box_to_rollout_migration_is_explicit_and_preserves_actor_state(tmp_path):
+    saved, current = _box_to_rollout_command_config_pair()
+    checkpoint = _save(tmp_path, saved)
+    before = checkpoint.read_bytes()
+    validate_policy_init_checkpoint(checkpoint, current)
+    assert checkpoint.read_bytes() == before
+    current["training"].pop("policy_init_actor_contract_migration")
+    with pytest.raises(ValueError, match="actor semantic contract mismatch"):
+        validate_policy_init_checkpoint(checkpoint, current)
+
+
+@pytest.mark.parametrize("drift", ["camera", "source_window", "target_window", "drop"])
+def test_box_to_rollout_migration_rejects_undeclared_drift(tmp_path, drift):
+    saved, current = _box_to_rollout_command_config_pair()
+    source_motion = saved["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]
+    target_motion = current["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]
+    if drift == "camera":
+        current["perception"]["camera_pitch_deg"] = 47.6
+    elif drift == "source_window":
+        source_motion["contact_aware_button_window_mode"] = "kinematic_lift"
+    elif drift == "target_window":
+        target_motion["contact_aware_button_window_mode"] = "contact_interval"
+    else:
+        target_motion["zero_root_command_when_drop_active"] = False
+    with pytest.raises(ValueError):
         validate_policy_init_checkpoint(_save(tmp_path, saved), current)
 
 
@@ -976,8 +1028,20 @@ def test_canonical_actor_contract_resolves_legacy_defaults_and_symbolic_action_d
         flow_train_noise_std=1.0,
         flow_time_epsilon=1e-4,
         flow_inference_noise_std=0.0,
+        lstm_hidden_dim=256,
+        lstm_num_layers=1,
     )
     assert canonical_actor_contract(saved) == canonical_actor_contract(current)
+
+
+@pytest.mark.parametrize("field,value", [("lstm_hidden_dim", 512), ("lstm_num_layers", 2)])
+def test_policy_init_rejects_nondefault_new_recurrent_fields(tmp_path, field, value):
+    saved = _config()
+    checkpoint = _save(tmp_path, saved)
+    current = copy.deepcopy(saved)
+    current["algo"]["config"]["module_dict"]["actor"]["layer_config"][field] = value
+    with pytest.raises(ValueError, match=field):
+        validate_policy_init_checkpoint(checkpoint, current)
 
 
 def test_canonical_actor_contract_materializes_exact_legacy_perception_defaults():

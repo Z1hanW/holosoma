@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ( $# -lt 18 || $# -gt 20 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp)$ || ! $3 =~ ^[0-3]$ ]]; then
+if [[ ( $# -lt 18 || $# -gt 20 ) || ! $1 =~ ^(canary|formal)$ || ! $2 =~ ^(mlp|lstm|large_mlp|command_student_large_mlp|command_student_box23k)$ || ! $3 =~ ^[0-3]$ ]]; then
   echo "usage: $0 MODE POLICY_PROFILE NODE_RANK EXPECTED_IP SOURCE_ROOT PERSIST_ROOT MASTER_ADDR MASTER_PORT RUN_ID RUN_NAME CONTRACT_PATH CONTRACT_SHA CANARY_PATH CANARY_SHA COMMIT_SHA TREE_SHA SHARD_DIGEST SHARD_MANIFEST_SHA [SAMPLING_PROFILE] [ABLATION_PROFILE]" >&2
   exit 2
 fi
@@ -12,6 +12,10 @@ readonly CONTRACT_SHA=${12} CANARY_PATH=${13} CANARY_SHA=${14} COMMIT_SHA=${15}
 readonly TREE_SHA=${16} SHARD_DIGEST=${17} SHARD_MANIFEST_SHA=${18}
 readonly SAMPLING_PROFILE=${19:-fixed_startzero_0p2}
 readonly ABLATION_PROFILE=${20:-baseline}
+if [[ ${POLICY_ARCH} == command_student_box23k && ! ${ABLATION_PROFILE} =~ ^box23k_corl_(13k|40k)$ ]]; then
+  echo "[ERROR] box23k actor requires an explicit rollout producer profile" >&2
+  exit 2
+fi
 case ${ABLATION_PROFILE} in
   baseline)
     readonly INITIAL_DOF_POS_NOISE=0.20 INITIAL_DOF_VEL_NOISE=0.35 CAMERA_PHYSICAL_PITCH_DEG=47.6
@@ -31,6 +35,15 @@ case ${ABLATION_PROFILE} in
       readonly CAMERA_MOUNT_QUAT='[0.0,0.40354529635239006,0.0,0.9149596678498247]'
     fi
     ;;
+  box23k_corl_13k|box23k_corl_40k)
+    [[ ${POLICY_ARCH} == command_student_box23k ]] || {
+      echo "[ERROR] box23k profile requires the exact small box actor" >&2; exit 2
+    }
+    readonly INITIAL_DOF_POS_NOISE=0.10 INITIAL_DOF_VEL_NOISE=0.0 CAMERA_PHYSICAL_PITCH_DEG=37.0
+    readonly CAMERA_MOUNT_QUAT='[0.00644801,0.23350163,0.00644801,0.97231365]'
+    readonly POLICY_INIT_SHA=e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d
+    readonly POLICY_INIT_PATH=/data/holosoma_checkpoint_cache/zihanw22_boxer_d9m3z369-recovered/by-sha256/${POLICY_INIT_SHA}.pt
+    ;;
   *) echo "[ERROR] unsupported ablation profile: ${ABLATION_PROFILE}" >&2; exit 2 ;;
 esac
 readonly REMOTE_URL=https://github.com/Z1hanW/holosoma
@@ -43,8 +56,8 @@ readonly PYTHON_RUNTIME=${PYTHON_RUNTIME_ROOT}/site-packages
 readonly PYTHON_RUNTIME_SHA256=dd7ca81fa848917c362b3a239893a7a26f4c89d42b4f85cb515d91622f1690bc
 readonly NCCL_ROOT=/home/ubuntu/FAR/holosoma_runs/.runtime/nccl/e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
 readonly NCCL_SHA256=e4a7aee9c3eecf53fac780441d2f03b578ab8db8874b71f8e391bcec7adb2899
-if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
-  if [[ ${ABLATION_PROFILE} == ch2_40k_joint_noise_47p6 ]]; then
+if [[ ${POLICY_ARCH} == command_student_* ]]; then
+  if [[ ${ABLATION_PROFILE} == ch2_40k_joint_noise_47p6 || ${ABLATION_PROFILE} == box23k_corl_40k ]]; then
     # This small binding is part of the exact Git source, not ambient node config.
     mapfile -t bank_fields < <("${PYTHON_BIN}" - "${SOURCE_ROOT}/scripts/ch2_40k_rollout137_bank.json" <<'PY'
 import json
@@ -171,7 +184,7 @@ mkdir -p "${RUN_ROOT}" "${LOGGER_BASE_DIR}" "${VERIFY_ROOT}" "${PERSIST_ROOT}/wa
 readonly GIT_MANIFEST_SHA256=$(git -C "${SOURCE_ROOT}" ls-tree -r --full-tree "${COMMIT_SHA}" | sha256sum | awk '{print $1}')
 readonly SOURCE_SNAPSHOT_ID=src-${GIT_MANIFEST_SHA256}
 
-if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_* ]]; then
   check_sha "${COMMAND_BANK_MANIFEST_SHA}" "${MOTION_DIR}/manifest.json"
   check_sha 867522fd61c63e6fcf37e0a041792f438e821f34ff482e26b07b47de6bfb7b59 "${OBJECT_SPEC_PATH}"
   [[ $(find "${MOTION_DIR}" -maxdepth 1 -type f ! -type l -name '*.npz' | wc -l) -eq 137 ]] || {
@@ -250,7 +263,7 @@ import sys
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text())
-student = sys.argv[5] == "command_student_large_mlp"
+student = sys.argv[5].startswith("command_student_")
 expected = {
     "accepted": True,
     "world_size": 32,
@@ -277,7 +290,7 @@ if sys.argv[6] == "linear_startzero_0to1":
         "start_at_timestep_zero_probability_start": 0.0,
         "start_at_timestep_zero_probability_end": 1.0,
     })
-if sys.argv[7] == "ch2_40k_joint_noise_47p6":
+if sys.argv[7] == "ch2_40k_joint_noise_47p6" or sys.argv[7].startswith("box23k_corl_"):
     expected.update({
         "rollout_command_bank_digest": sys.argv[11],
         "rank_shard_digest": sys.argv[12],
@@ -288,6 +301,13 @@ if sys.argv[7] != "baseline":
         "initial_dof_pos_noise_rad": float(sys.argv[8]),
         "initial_dof_vel_noise_rad_s": float(sys.argv[9]),
         "camera_physical_pitch_deg": float(sys.argv[10]),
+    })
+if sys.argv[5] == "command_student_box23k":
+    expected.update({
+        "policy_init_sha256": "e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d",
+        "actor_hidden_dims": [512, 256, 128],
+        "camera_sensor_offset": [0.01, 0.01, 0.44],
+        "camera_additional_pitch_deg": 10.0,
     })
 for key, value in expected.items():
     if payload.get(key) != value:
@@ -427,7 +447,7 @@ export HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=0
 export HOLOSOMA_REQUIRE_CONTACT_INTERVAL_COVERAGE=0 HOLOSOMA_REQUIRE_CONTACT_TARGET_COVERAGE=0
 export HOLOSOMA_MOTION_METRICS_INTERVAL=16
 export HOLOSOMA_DISABLE_AUTO_RESET=0 HOLOSOMA_DISABLE_CLIP_END_RESET=0 HOLOSOMA_DISABLE_MOTION_END_RESET=0
-if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_* ]]; then
   export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=True
 else
   export HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=False
@@ -447,11 +467,15 @@ fi
 POLICY_ARGS=(--algo.config.module-dict.critic.layer-config.hidden-dims='[512,256,128]')
 OBSERVATION_ARGS=()
 TRAINING_PROFILE_ARGS=()
-if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_* ]]; then
   POLICY_ARGS+=(
     --algo.config.module-dict.actor.input-dim="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
-    --algo.config.module-dict.actor.layer-config.hidden-dims='[2048,1024,512,256,128]'
   )
+  if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
+    POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[512,256,128]')
+  else
+    POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[2048,1024,512,256,128]')
+  fi
   OBSERVATION_ARGS+=(
     --observation.groups.actor_obs_root_contact_aware.history-length=1
     --observation.groups.actor_obs_drop_button.history-length=1
@@ -476,7 +500,7 @@ else
   )
   POLICY_ARGS+=(--algo.config.module-dict.actor.layer-config.hidden-dims='[512,256,128]')
 fi
-if [[ ${POLICY_ARCH} != command_student_large_mlp ]]; then
+if [[ ${POLICY_ARCH} != command_student_* ]]; then
   OBSERVATION_ARGS+=(
     --observation.groups.actor_obs.history-length=1
     --observation.groups.critic_obs.history-length=1
@@ -599,7 +623,7 @@ TRAIN_ARGS=(
   --logger.video.upload-to-wandb=False
   --logger.base-dir="${LOGGER_BASE_DIR}"
 )
-if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+if [[ ${POLICY_ARCH} == command_student_* ]]; then
   TRAIN_ARGS+=(
     --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=precomputed_turn_then_forward
     --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode=kinematic_lift
@@ -620,6 +644,47 @@ if [[ ${MODE} == formal ]]; then
   TRAIN_ARGS+=(--logger.id="${RUN_ID_EFFECTIVE}" --logger.resume=never)
 fi
 
+PROVENANCE_INIT_ARGS=()
+if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
+  check_sha "${POLICY_INIT_SHA}" "${POLICY_INIT_PATH}"
+  PROVENANCE_INIT_ARGS+=(--policy-init-checkpoint "${POLICY_INIT_PATH}")
+  # Keep the initializer's full perception producer, not just its pitch angle.
+  # The explicit migration changes only command values in the existing slots.
+  TRAIN_ARGS+=(
+    --training.policy-init-checkpoint="${POLICY_INIT_PATH}"
+    --training.policy-init-actor-contract-migration=box_tracking_to_precomputed_kinematic_drop_exclusive_v1
+    --perception.sensor-offset='[0.01,0.01,0.44]'
+    --perception.camera-pitch-deg=10.0
+    --perception.camera-apply-sensor-noise=False
+    --perception.camera-body-name=torso_link
+    --perception.camera-width=106
+    --perception.camera-height=60
+    --perception.update-hz=30.0
+    --perception.camera-fps=30.0
+    --perception.camera-near=0.3
+    --perception.camera-far=3.0
+    --perception.max-distance=3.0
+    --perception.camera-warp-preprocess=True
+    --perception.camera-warp-resize='[58,87]'
+    --perception.camera-warp-crop-top=2
+    --perception.camera-warp-crop-bottom=0
+    --perception.camera-warp-crop-left=4
+    --perception.camera-warp-crop-right=4
+    --perception.camera-warp-normalize=True
+    --perception.camera-warp-latency-frame='[3,4]'
+    --perception.camera-warp-buffer-len=6
+    --perception.encoder-pretrained=False
+    --perception.encoder-freeze-backbone=False
+    --perception.camera-warp-hole-reference-batch-size=4096
+    --perception.camera-warp-hole-seed-semantics=legacy_fixed_v1
+    --perception.reset-refresh-semantics=legacy_full_v1
+    --perception.camera-mesh-file-map.pelvis=combined_pelvis.STL
+    --perception.camera-mesh-file-map.left_wrist_yaw_link=combined_left_wrist_spherehand.STL
+    --perception.camera-mesh-file-map.right_wrist_yaw_link=combined_right_wrist_spherehand.STL
+    --robot.asset.asset-root=/data/holosoma_inputs/box23k_robot_depth_assets_v1/by-source/260857dfe65e50004be2aca468efa210125e350b9f39dfe80ed2f423fbcd6d56
+  )
+fi
+
 "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_train_cli.py" \
   --expected-motion-end-mode episodic -- "${TRAIN_ARGS[@]}"
 
@@ -627,6 +692,7 @@ export HOLOSOMA_TRAINING_PROVENANCE
 HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/compute_training_provenance.py" \
   --training-regime pure_rl --motion-dir "${MOTION_DIR}" --object-map "${OBJECT_SPEC_PATH}" \
   --motion-shard-manifest "${HOLOSOMA_MOTION_SHARD_MANIFEST}" \
+  "${PROVENANCE_INIT_ARGS[@]}" \
   --contact-interval-runtime-prepend-compensation false --source-root "${SOURCE_ROOT}")
 HOLOSOMA_TRAINING_PROVENANCE=$("${PYTHON_BIN}" - "${HOLOSOMA_TRAINING_PROVENANCE}" \
   "${VERIFY_ROOT}/node_${NODE_RANK}.json" "${POLICY_ARCH}" "${SAMPLING_PROFILE}" \
@@ -670,10 +736,14 @@ print(json.dumps(provenance, sort_keys=True, separators=(",", ":")))
 PY
 )
 printf '%s\n' "${HOLOSOMA_TRAINING_PROVENANCE}" > "${RUN_ROOT}/training_provenance.json"
+if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
+  "${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/box23k_policy_init_preflight.py" \
+    --output "${RUN_ROOT}/initializer_preflight.json" -- "${TRAIN_ARGS[@]}"
+fi
 echo "[INFO] ablation_profile=${ABLATION_PROFILE} initial_dof_pos_noise_rad=${INITIAL_DOF_POS_NOISE} initial_dof_vel_noise_rad_s=${INITIAL_DOF_VEL_NOISE} camera_physical_pitch_deg=${CAMERA_PHYSICAL_PITCH_DEG}"
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  if [[ ${POLICY_ARCH} == command_student_large_mlp ]]; then
+  if [[ ${POLICY_ARCH} == command_student_* ]]; then
     echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} sampling_profile=${SAMPLING_PROFILE} startzero=${START_AT_ZERO_PROB}->${START_AT_ZERO_PROB_END}@${CURRICULUM_END_ITER} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=kinematic_lift contact_reward=false max_episode_s=10 export_onnx=true"
   else
     echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor=178 critic=310 pure_ppo=true tracking_error=true contact=false max_episode_s=10 export_onnx=true"

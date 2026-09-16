@@ -43,6 +43,9 @@ POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV = (
 TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION = (
     "tracking_error_to_precomputed_turn_then_forward_drop_exclusive_v1"
 )
+BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION = (
+    "box_tracking_to_precomputed_kinematic_drop_exclusive_v1"
+)
 PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION = (
     "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
 )
@@ -197,6 +200,10 @@ def _canonical_actor_module(actor: dict[str, Any], *, actions_dim: int) -> dict[
         # current dataclass default: no pretrained perception payload.
         "perception_pretrained_sha256": None,
     }
+    if result.get("type") != "LSTM":
+        # Legacy feedforward actors do not consume these new fields. Keep
+        # rejecting explicit non-default values and incomplete LSTM configs.
+        layer_defaults.update(lstm_hidden_dim=256, lstm_num_layers=1)
     for field, default in layer_defaults.items():
         layer_config.setdefault(field, default)
     return _json_value(result)
@@ -797,6 +804,7 @@ def _actor_contract_migration_profile(
         )
     if profile not in {
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
+        BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
         *_PRECOMPUTED_TO_HMI_MIGRATIONS,
     }:
         raise ValueError(
@@ -818,7 +826,9 @@ def _apply_explicit_policy_init_actor_contract_migration(
     perception preprocessing, robot/action contract, and normalization.  Only
     the values carried by the existing root-command slots change from live
     tracking error to the immutable precomputed turn/forward schedule, while
-    drop becomes exclusive.  Any additional drift remains fail-closed.
+    drop becomes exclusive. The explicit box profile also selects the kinematic
+    pickup cue and corrects inert native-CNN metadata without changing weights
+    or trainability. Any additional drift remains fail-closed.
     """
 
     if profile in _PRECOMPUTED_TO_HMI_MIGRATIONS:
@@ -828,7 +838,10 @@ def _apply_explicit_policy_init_actor_contract_migration(
             profile=profile,
         )
         return
-    if profile != TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION:
+    if profile not in {
+        TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
+        BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
+    }:
         raise AssertionError(f"Unhandled actor-contract migration profile: {profile!r}")
     saved_command = saved_contract.get("command_observation_semantics")
     current_command = current_contract.get("command_observation_semantics")
@@ -844,6 +857,17 @@ def _apply_explicit_policy_init_actor_contract_migration(
         "contact_aware_sparse_root_command_mode": "precomputed_turn_then_forward",
         "zero_root_command_when_drop_active": True,
     }
+    if profile == BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION:
+        # New rollout banks deliberately use the kinematic cue for every clip,
+        # not a per-clip fallback for absent physical-contact annotations.
+        expected_source.update(
+            contact_aware_button_window_mode="contact_interval",
+            contact_aware_carry_window_mode="peak_height",
+        )
+        expected_target.update(
+            contact_aware_button_window_mode="kinematic_lift",
+            contact_aware_carry_window_mode="peak_height",
+        )
     for field, expected in expected_source.items():
         if saved_command.get(field) != expected:
             raise ValueError(
@@ -861,6 +885,25 @@ def _apply_explicit_policy_init_actor_contract_migration(
     migrated_command = migrated["command_observation_semantics"]
     for field, value in expected_target.items():
         migrated_command[field] = value
+    if profile == BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION:
+        for contract in (saved_contract, current_contract):
+            if contract["perception"].get("encoder_type") != "far_tracking_cnn_small":
+                raise ValueError("Box rollout migration requires the native small depth CNN.")
+            if contract["actor_module"]["layer_config"].get("perception_encoder_type") != "far_tracking_cnn_small":
+                raise ValueError("Box rollout migration requires the native small actor encoder.")
+        # Native CNNs have always been trainable; these legacy flags only
+        # controlled external backbones. Correct their persisted metadata.
+        for path, fields in (
+            (("perception",), ("encoder_pretrained", "encoder_freeze_backbone")),
+            (("actor_module", "layer_config"), ("perception_pretrained", "perception_freeze_backbone")),
+        ):
+            source = _require_path(saved_contract, path)
+            target = _require_path(current_contract, path)
+            corrected = _require_path(migrated, path)
+            for field in fields:
+                if source.get(field) is not True or target.get(field) is not False:
+                    raise ValueError(f"Box rollout migration requires native CNN {field}: true->false.")
+                corrected[field] = False
     residual_differences = _diff(migrated, current_contract)
     if residual_differences:
         preview = "\n  - ".join(residual_differences[:30])
@@ -871,7 +914,8 @@ def _apply_explicit_policy_init_actor_contract_migration(
         )
         raise ValueError(
             f"Policy-init migration {profile!r} permits only the declared root-command "
-            "mode and drop-exclusivity changes; residual actor semantic drift:\n  - "
+            "mode, declared button/drop changes and native-CNN metadata correction; "
+            "residual actor semantic drift:\n  - "
             + preview
             + suffix
         )
@@ -879,7 +923,9 @@ def _apply_explicit_policy_init_actor_contract_migration(
         "[INFO] policy_init_actor_contract_migration_verified "
         f"profile={profile} "
         "source_mode=tracking_error target_mode=precomputed_turn_then_forward "
-        "source_drop_exclusive=false target_drop_exclusive=true",
+        "source_drop_exclusive=false target_drop_exclusive=true "
+        f"source_button_window={saved_command.get('contact_aware_button_window_mode')} "
+        f"target_button_window={current_command.get('contact_aware_button_window_mode')}",
         flush=True,
     )
 

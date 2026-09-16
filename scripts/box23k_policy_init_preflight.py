@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Validate the exact legacy box actor before the opt-in rollout137 PPO job."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src" / "holosoma"))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("train_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    cli = args.train_args
+    if cli and cli[0] == "--":
+        cli = cli[1:]
+
+    import torch
+    import tyro
+    from holosoma.agents.modules.module_utils import setup_ppo_actor_module
+    from holosoma.config_types.algo import LayerConfig, ModuleConfig
+    from holosoma.config_values.experiment import AnnotatedExperimentConfig
+    from holosoma.observation.config_utils import apply_observation_overrides
+    from holosoma.perception.config_utils import apply_perception_overrides
+    from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
+    from holosoma.utils.inference_helpers import export_policy_as_onnx, validate_exported_policy_onnx
+    from holosoma.utils.policy_init_preflight import validate_policy_init_checkpoint
+    from holosoma.utils.tyro_utils import TYRO_CONIFG
+
+    torch.set_num_threads(2)
+    config = tyro.cli(AnnotatedExperimentConfig, args=cli, config=TYRO_CONIFG)
+    if config.training.num_envs != 32 * 2048:
+        raise ValueError("Box23K profile requires exactly 32 ranks x 2048 environments.")
+    config = dataclasses.replace(config, training=dataclasses.replace(config.training, num_envs=2048))
+    config = apply_perception_overrides(apply_observation_overrides(config))
+    if not config.training.export_onnx or config.algo.config.distill.enabled:
+        raise ValueError("Box23K profile must be pure PPO with ONNX enabled.")
+    if config.training.checkpoint is not None or config.training.stage4_init_checkpoint is not None:
+        raise ValueError("Only actor initialization is permitted, not resume or actor-critic initialization.")
+    provenance = json.loads(os.environ["HOLOSOMA_TRAINING_PROVENANCE"])
+    checkpoint_path = Path(config.training.policy_init_checkpoint)
+    validate_policy_init_checkpoint(checkpoint_path, config.to_serializable_dict(), current_provenance=provenance)
+    checkpoint, checkpoint_sha = load_verified_torch_checkpoint(
+        checkpoint_path, expected_sha256="e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d",
+    )
+
+    binding = json.loads((ROOT / "scripts" / "box23k_robot_assets.json").read_text())
+    asset_root = Path(binding["asset_root"])
+    if str(asset_root) != config.robot.asset.asset_root:
+        raise ValueError("Robot asset root differs from the Git-bound immutable asset package.")
+    manifest_bytes = (asset_root / "manifest.json").read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != binding["manifest_sha256"]:
+        raise ValueError("Robot asset manifest SHA mismatch.")
+    for record in json.loads(manifest_bytes)["files"]:
+        path = asset_root / record["path"]
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Missing regular robot asset: {path}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
+            raise ValueError(f"Robot asset changed: {path}")
+    for name in config.perception.camera_mesh_file_map.values():
+        if not (asset_root / "g1" / "meshes" / name).is_file():
+            raise ValueError(f"Missing exact camera mesh; remapping is forbidden: {name}")
+
+    actor_cfg = config.algo.config.module_dict.actor
+    dims = dict(zip(actor_cfg.input_dim, [3, 1, 90], strict=True))
+    dims["perception_obs"] = 5046
+    history = {key: 1 for key in dims}
+    actor = setup_ppo_actor_module(dims, actor_cfg, 29, 0.01, "cpu", history)
+    actor.load_state_dict(checkpoint["actor_model_state_dict"], strict=True)
+    actor.eval()
+    old = dict(checkpoint["experiment_config"]["algo"]["config"]["module_dict"]["actor"])
+    old["layer_config"] = LayerConfig(**old["layer_config"])
+    original = setup_ppo_actor_module(dims, ModuleConfig(**old), 29, 0.01, "cpu", history)
+    original.load_state_dict(checkpoint["actor_model_state_dict"], strict=True)
+    original.eval()
+    if not all(p.requires_grad for p in actor.actor_module.perception_encoder.parameters()):
+        raise ValueError("The native depth CNN must remain trainable.")
+    generator = torch.Generator().manual_seed(42)
+    example = {
+        "actor_obs": torch.randn(14, 94, generator=generator),
+        "perception_obs": torch.rand(14, 5046, generator=generator) - 0.5,
+    }
+    with torch.inference_mode():
+        source_output = original.act_inference(example)
+        target_output = actor.act_inference(example)
+    torch.testing.assert_close(source_output, target_output, rtol=0, atol=0)
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self, policy):
+            super().__init__()
+            self.actor = policy
+
+        def forward(self, actor_obs, perception_obs):
+            return self.actor.act_inference({"actor_obs": actor_obs, "perception_obs": perception_obs})
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    onnx_path = args.output.with_suffix(".onnx")
+    wrapper = Wrapper(actor).eval()
+    export_policy_as_onnx(wrapper, str(onnx_path), example, perception_input_name="perception_obs")
+    parity = validate_exported_policy_onnx(
+        wrapper=wrapper, onnx_file_path=str(onnx_path), example_obs_dict=example,
+        perception_input_name="perception_obs",
+    )
+    report = {
+        "accepted": True, "scope": "cpu_initializer_and_exact_robot_assets_not_live_simulator_acceptance",
+        "checkpoint_sha256": checkpoint_sha, "source_vs_target_actor_max_abs_error": 0.0,
+        "depth_encoder_trainable": True, "onnx_validation": parity,
+        "robot_asset_binding": binding, "per_rank_config": config.to_serializable_dict(),
+    }
+    args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(f"[INFO] box23k_initialization_preflight_ok checkpoint={checkpoint_sha} report={args.output}")
+
+
+if __name__ == "__main__":
+    main()

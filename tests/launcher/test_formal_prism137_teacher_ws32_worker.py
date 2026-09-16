@@ -49,6 +49,48 @@ def test_worker_has_valid_bash_syntax() -> None:
     subprocess.run(["bash", "-n", str(WORKER)], check=True)
 
 
+@pytest.mark.parametrize("producer", ["13k", "40k"])
+def test_box23k_preserves_initializer_and_legacy_camera(producer):
+    source = WORKER.read_text()
+    block = "case ${ABLATION_PROFILE} in" + source.split("case ${ABLATION_PROFILE} in", 1)[1].split("esac", 1)[0] + "esac"
+    proc = subprocess.run(
+        ["bash", "-c", "set -eu\nPOLICY_ARCH=command_student_box23k\n"
+         + f"ABLATION_PROFILE=box23k_corl_{producer}\n" + block
+         + '\nprintf "%s\\n" "$POLICY_INIT_SHA" "$CAMERA_MOUNT_QUAT"'],
+        check=True, text=True, capture_output=True,
+    )
+    digest, mount = proc.stdout.splitlines()
+    assert digest == "e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d"
+    assert json.loads(mount) == [0.00644801, 0.23350163, 0.00644801, 0.97231365]
+    init_block = source.split("PROVENANCE_INIT_ARGS=()", 1)[1].split('"${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_train_cli.py"', 1)[0]
+    assert 'if [[ ${POLICY_ARCH} == command_student_box23k ]]' in init_block
+    for flag in (
+        "--perception.sensor-offset='[0.01,0.01,0.44]'",
+        "--perception.camera-pitch-deg=10.0",
+        "--perception.camera-warp-resize='[58,87]'",
+        "--perception.camera-warp-latency-frame='[3,4]'",
+        "--perception.camera-warp-buffer-len=6",
+        "--perception.camera-warp-hole-reference-batch-size=4096",
+        "--perception.camera-apply-sensor-noise=False",
+        "--training.policy-init-actor-contract-migration=box_tracking_to_precomputed_kinematic_drop_exclusive_v1",
+    ):
+        assert flag in init_block
+
+
+@pytest.mark.parametrize("arch,profile", [
+    ("command_student_box23k", "baseline"),
+    ("command_student_large_mlp", "box23k_corl_13k"),
+])
+def test_box23k_profile_cannot_leak_into_other_experiments(arch, profile):
+    args = ["canary", arch, "0", "192.0.2.1", "/missing/source",
+            "/missing/persist", "192.0.2.2", "29999", "-", "-", "-", "-", "-", "-",
+            "0" * 40, "1" * 40, "2" * 64, "3" * 64, "linear_startzero_0to1", profile]
+    proc = subprocess.run(["bash", str(WORKER), *args], text=True, capture_output=True)
+    assert proc.returncode == 2
+    assert "box23k" in proc.stderr
+    assert "node-rank/IP mismatch" not in proc.stderr
+
+
 def test_final_ch2_data_profile_fails_closed_without_git_bound_bank():
     args = ["canary", "command_student_large_mlp", "0", "192.0.2.1", "/missing/source",
             "/missing/persist", "192.0.2.2", "29999", "-", "-", "-", "-", "-", "-",
