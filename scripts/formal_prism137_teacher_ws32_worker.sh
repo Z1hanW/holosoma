@@ -527,6 +527,18 @@ else
   )
 fi
 
+CAMERA_POSE_ARGS=(
+  --perception.camera-apply-sensor-noise=True
+  --perception.sensor-offset='[0.0576235,0.01753,0.42987]'
+  --perception.camera-pitch-deg=0.0
+)
+if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
+  CAMERA_POSE_ARGS=(
+    --perception.camera-apply-sensor-noise=False
+    --perception.sensor-offset='[0.01,0.01,0.44]'
+    --perception.camera-pitch-deg=10.0
+  )
+fi
 TRAIN_ARGS=(
   "${TRAINING_PROFILE_ARGS[@]}"
   command:g1-29dof-wbt-w-object-generalist
@@ -596,16 +608,14 @@ TRAIN_ARGS=(
   --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=2.0
   --command.setup-terms.motion-command.params.motion-config.contact-interval-runtime-prepend-compensation=False
   --reward.terms.offline-contact-guidance.weight=0.0
-  --perception.camera-apply-sensor-noise=True
+  "${CAMERA_POSE_ARGS[@]}"
   --perception.camera-warp-edge-noise=True
   --perception.camera-warp-enable-holes=True
   --perception.camera-warp-hole-prob=0.2
   --perception.camera-warp-additive-noise-std=0.03
   --perception.camera-warp-depth-offset-std=0.03
   --perception.object-geometry-mode=mesh
-  --perception.sensor-offset='[0.0576235,0.01753,0.42987]'
   --perception.camera-mount-quat="${CAMERA_MOUNT_QUAT}"
-  --perception.camera-pitch-deg=0.0
   --perception.camera-frame-quat='[-0.5,0.5,-0.5,0.5]'
   --robot.object.enabled=True
   --robot.object.object-urdf-path="${OBJECT_SPEC_PATH}"
@@ -648,14 +658,12 @@ PROVENANCE_INIT_ARGS=()
 if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
   check_sha "${POLICY_INIT_SHA}" "${POLICY_INIT_PATH}"
   PROVENANCE_INIT_ARGS+=(--policy-init-checkpoint "${POLICY_INIT_PATH}")
+  BOX_CAMERA_MESH_MAP=$("${PYTHON_BIN}" -c 'import json,sys; print(repr(json.load(open(sys.argv[1]))["camera_mesh_file_map"]))' "${SOURCE_ROOT}/scripts/box23k_robot_assets.json")
   # Keep the initializer's full perception producer, not just its pitch angle.
   # The explicit migration changes only command values in the existing slots.
   TRAIN_ARGS+=(
     --training.policy-init-checkpoint="${POLICY_INIT_PATH}"
     --training.policy-init-actor-contract-migration=box_tracking_to_precomputed_kinematic_drop_exclusive_v1
-    --perception.sensor-offset='[0.01,0.01,0.44]'
-    --perception.camera-pitch-deg=10.0
-    --perception.camera-apply-sensor-noise=False
     --perception.camera-body-name=torso_link
     --perception.camera-width=106
     --perception.camera-height=60
@@ -665,22 +673,20 @@ if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
     --perception.camera-far=3.0
     --perception.max-distance=3.0
     --perception.camera-warp-preprocess=True
-    --perception.camera-warp-resize='[58,87]'
+    --perception.camera-warp-resize='(58,87)'
     --perception.camera-warp-crop-top=2
     --perception.camera-warp-crop-bottom=0
     --perception.camera-warp-crop-left=4
     --perception.camera-warp-crop-right=4
     --perception.camera-warp-normalize=True
-    --perception.camera-warp-latency-frame='[3,4]'
+    --perception.camera-warp-latency-frame='(3,4)'
     --perception.camera-warp-buffer-len=6
     --perception.encoder-pretrained=False
     --perception.encoder-freeze-backbone=False
     --perception.camera-warp-hole-reference-batch-size=4096
     --perception.camera-warp-hole-seed-semantics=legacy_fixed_v1
     --perception.reset-refresh-semantics=legacy_full_v1
-    --perception.camera-mesh-file-map.pelvis=combined_pelvis.STL
-    --perception.camera-mesh-file-map.left_wrist_yaw_link=combined_left_wrist_spherehand.STL
-    --perception.camera-mesh-file-map.right_wrist_yaw_link=combined_right_wrist_spherehand.STL
+    --perception.camera-mesh-file-map="${BOX_CAMERA_MESH_MAP}"
     --robot.asset.asset-root=/data/holosoma_inputs/box23k_robot_depth_assets_v1/by-source/260857dfe65e50004be2aca468efa210125e350b9f39dfe80ed2f423fbcd6d56
   )
 fi

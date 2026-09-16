@@ -63,12 +63,13 @@ def test_box23k_preserves_initializer_and_legacy_camera(producer):
     assert digest == "e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d"
     assert json.loads(mount) == [0.00644801, 0.23350163, 0.00644801, 0.97231365]
     init_block = source.split("PROVENANCE_INIT_ARGS=()", 1)[1].split('"${PYTHON_BIN}" "${SOURCE_ROOT}/scripts/validate_train_cli.py"', 1)[0]
+    init_block += source.split("CAMERA_POSE_ARGS=(", 1)[1].split("TRAIN_ARGS=(", 1)[0]
     assert 'if [[ ${POLICY_ARCH} == command_student_box23k ]]' in init_block
     for flag in (
         "--perception.sensor-offset='[0.01,0.01,0.44]'",
         "--perception.camera-pitch-deg=10.0",
-        "--perception.camera-warp-resize='[58,87]'",
-        "--perception.camera-warp-latency-frame='[3,4]'",
+        "--perception.camera-warp-resize='(58,87)'",
+        "--perception.camera-warp-latency-frame='(3,4)'",
         "--perception.camera-warp-buffer-len=6",
         "--perception.camera-warp-hole-reference-batch-size=4096",
         "--perception.camera-apply-sensor-noise=False",
