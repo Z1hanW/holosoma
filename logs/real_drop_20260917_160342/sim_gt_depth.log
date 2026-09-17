@@ -1,0 +1,6 @@
+[sim_gt_depth] python=/home/unitree/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python
+[sim_gt_depth] geometry=robot+flat-ground comparison=robot-parts-only pose=all-zero
+[sim_gt_depth] bridge=disabled (render-only, no DDS)
+[sim_gt_depth] checkpoint camera: izz2f2df: D435 37.0 deg down position=[0.009999999776482582, 0.009999999776482582, 0.4399999976158142]
+[sim_gt_depth] MuJoCo GT ready: /dev/shm/sim_gt_depth_raw_shm shape=(1, 2, 60, 106) flat-ground scene + robot-only comparison mask
+[sim_gt_depth] following measured robot pose from /home/unitree/FAR/holosoma/logs/real_drop_20260917_160342/latest_command.json
