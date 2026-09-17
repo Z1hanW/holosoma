@@ -22,6 +22,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resolved-model-path-output", type=Path)
     parser.add_argument("--image-server-config-output", type=Path)
     parser.add_argument("--download-dir", type=Path, default=Path("/tmp/holosoma_checkpoints"))
+    parser.add_argument("--training-depth", action="store_true",
+                        help="Validate current box23K PPO depth, not a pitch-based legacy preset")
     return parser.parse_args(argv)
 
 
@@ -133,7 +135,7 @@ def _profile_from_legacy(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def extract_profile(model_path: Path) -> dict[str, Any]:
+def extract_profile(model_path: Path, *, training_depth: bool = False) -> dict[str, Any]:
     model = onnx.load(str(model_path), load_external_data=False)
     onnx.checker.check_model(model)
     metadata = {item.key: _json_value(item.value) for item in model.metadata_props}
@@ -157,7 +159,7 @@ def extract_profile(model_path: Path) -> dict[str, Any]:
     run_id = run_path.rstrip("/").rsplit("/", 1)[-1]
     camera["label"] = f"{run_id}: D435 {camera['rotation_xyz_deg'][1]:.1f} deg down"
     digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
-    return {
+    profile = {
         "version": 1,
         "checkpoint": {
             "path": str(model_path),
@@ -166,6 +168,27 @@ def extract_profile(model_path: Path) -> dict[str, Any]:
         },
         "camera": camera,
     }
+    if training_depth:
+        from holosoma.sensors.training_depth import validate_training_depth_profile
+
+        profile["training_depth_contract"] = metadata["perception_observation_contract"]
+        profile["training_depth_contract_sha256"] = metadata["perception_observation_contract_sha256"]
+        validate_training_depth_profile(profile)
+        if {value.name for value in model.graph.input} != {"actor_obs", "perception_obs"}:
+            raise ValueError("Expected non-recurrent command/depth actor inputs")
+        if _input_width(model, "actor_obs") != 94:
+            raise ValueError("Expected 94D command/drop/proprio actor")
+        config = metadata["experiment_config"]
+        actor = config["algo"]["config"]["module_dict"]["actor"]
+        expected_groups = ["actor_obs_root_contact_aware", "actor_obs_drop_button",
+                           "actor_obs_proprio_with_actions_no_linvel"]
+        if actor["input_dim"] != expected_groups:
+            raise ValueError("Unsupported actor observation group order")
+        profile["deployment_command_mode"] = "explicit_manual_robot_heading_command_not_native_rollout"
+        profile["synthetic_training_noise_applied"] = False
+        profile["physical_mount_and_intrinsics_verified"] = False
+        profile["depth_latency"] = "capture_timestamp_at_or_before_now_minus_3_or_4_over_30_seconds"
+    return profile
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -199,7 +222,7 @@ def _resolve_model_path(model_path: str, download_dir: Path) -> Path:
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     model_path = _resolve_model_path(args.model_path, args.download_dir)
-    profile = extract_profile(model_path)
+    profile = extract_profile(model_path, training_depth=args.training_depth)
     _atomic_write(args.output, json.dumps(profile, indent=2, sort_keys=True) + "\n")
     if args.resolved_model_path_output is not None:
         _atomic_write(args.resolved_model_path_output, f"{model_path}\n")

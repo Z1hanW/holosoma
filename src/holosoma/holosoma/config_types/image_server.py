@@ -128,6 +128,12 @@ class ImageServerConfig:
     camera_type: Literal["zed", "realsense"] = "zed"
     """Camera backend to use when running the standalone image server."""
 
+    training_depth_profile: str | None = None
+    """Exact ONNX-derived box23K depth profile; absent preserves legacy entrypoints."""
+
+    shared_memory_name: str = "depth_img_shm"
+    depth_status_path: str | None = None
+
     def __post_init__(self):
         if self.depth_source == "depth_gum" and not self.enable_gum_depth_prediction:
             raise ValueError(

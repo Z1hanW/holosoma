@@ -110,6 +110,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_ref_pos_xyz_0 = None
         self._depth_img_shm = None
         self._depth_img_array = None
+        self._training_depth_profile = None
         self._motion_root_pos_w = None
         self._motion_root_quat_wxyz = None
         self._motion_root_command_origin_xy = None
@@ -362,6 +363,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return self._get_ref_body_pose_in_world(robot_state_data)[1]
 
     def setup_policy(self, model_path):
+        depth_profile_path = os.environ.get("HOLOSOMA_TRAINING_DEPTH_PROFILE")
+        if depth_profile_path:
+            from holosoma.sensors.training_depth import load_training_depth_profile
+
+            self._training_depth_profile = load_training_depth_profile(depth_profile_path, model_path)
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
@@ -1102,16 +1108,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
 
         if self._depth_img_array is None:
+            shm_name = os.environ.get("HOLOSOMA_DEPTH_SHM_NAME", "depth_img_shm")
             try:
-                self._depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+                self._depth_img_shm = shared_memory.SharedMemory(name=shm_name)
             except FileNotFoundError as exc:
                 raise RuntimeError(
-                    "perception_obs requires shared memory 'depth_img_shm'. Start the MuJoCo image server first."
+                    f"perception_obs requires shared memory {shm_name!r}. Start the matching depth server first."
                 ) from exc
             self._depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self._depth_img_shm.buf)
             logger.info("[WBT] Depth shared memory attached: shape={}", expected_shape)
 
-        flattened = self._depth_img_array.copy().reshape(1, -1).astype(np.float32, copy=False)
+        if getattr(self, "_training_depth_profile", None) is not None:
+            from holosoma.sensors.training_depth import read_bound_depth
+
+            image = read_bound_depth(self._depth_img_array, os.environ["HOLOSOMA_DEPTH_STATUS_PATH"],
+                                     self._training_depth_profile, os.environ["HOLOSOMA_DEPTH_SHM_NAME"])
+        else:
+            image = self._depth_img_array.copy()
+        flattened = image.reshape(1, -1).astype(np.float32, copy=False)
         expected_dim = self.obs_dims["cam_depth"]
         if flattened.shape[1] != expected_dim:
             raise ValueError(

@@ -2,6 +2,72 @@
 
 Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
+## Current Box23K PPO Depth Deployment (2026-09-17)
+
+Use `real_training.sh` for `drtl73fd` (resumed `rp2leis2`) and `izz2f2df`.
+It requires an explicit ONNX: there is no old-policy or camera-preset fallback.
+The depth producer and actor are bound to the same checkpoint SHA256 and exported
+perception contract, with separate shared memory for each launch.
+
+```bash
+# CPU-only checks; does not open a camera or robot control interface.
+bash real_training.sh wandb://zihanw22/carry-any/drtl73fd/model_09000.onnx --preflight-only
+
+# On the robot, after checking the physical mount, optics and safety setup:
+bash real_training.sh /absolute/path/to/model_09000.onnx
+```
+
+The launcher uses the existing `hsinference` setup. `HOLOSOMA_PYTHON` may select
+an already provisioned Python explicitly; `HOLOSOMA_REAL_INTERFACE` defaults to
+`eth0`. It never stops other camera services. A busy device is an error.
+
+- Expected mount relative to `torso_link`: XYZ `[0.01,0.01,0.44]` m, effective
+  RPY approximately `[1.2174,36.9983,1.1157]` degrees (27-degree mount plus 10-degree pitch).
+- RealSense `848x480` is resampled to the training `106x60` raster first, then
+  cropped top=2/bottom=0/left=4/right=4 and resized to `87x58`. Cubic interpolation
+  is explicit; the former positional OpenCV argument silently selected linear.
+- Sensor zero/nonfinite/missing depth becomes far=3 m. The training clamp and
+  normalization are preserved: `(depth-0.3)/2.7-0.5`. No synthetic training
+  edge noise, holes or Gaussian noise is added to real sensor measurements.
+- Select capture timestamps at or before `now - 3/30` or `now - 4/30` seconds,
+  including measured hardware latency. Do not add a fixed 3-4 frame queue on
+  top of hardware latency. Global-time timestamps are required; warm-up never
+  publishes a fake zero image. Missing/stale/mismatched data raises an error.
+- Policy commands remain **explicit manual heading-frame relative commands**,
+  not velocities or native motion replay. Drop still zeros XYZ-command slots
+  (`dx,dy,dyaw`). There is no new automatic real-world pickup detector: training's
+  object-state pickup latch cannot be inferred from a monocular depth stream by
+  this patch. Keep root commands zero until pickup when testing this workflow.
+- No code can physically rotate the camera or verify its intrinsics remotely.
+  Full-frame resampling assumes matching optical FOV. The generated profile
+  explicitly records physical calibration as unverified. Timestamp tests verify
+  software selection, not the real device's measured timing or sim2real quality.
+
+`scripts/check_training_depth_parity.py` checks the deterministic pixel operations
+against methods from an exact training checkout, then compares ONNX actions.
+Training-only noise is disabled in this **offline comparison**, never in training.
+Tests and changes do not touch `main`, live training, or running robot processes.
+Legacy `real_corl.sh`, `real_student.sh`, and `real_depth.sh` are not silently
+rebound to these new checkpoints; use the new entrypoint for the bound contract.
+
+Validation on 2026-09-17 used training commit
+`886b2afc5e9366a6e4a61dbb44a87f9ee5603385`. Each ONNX received 64 deterministic
+depth probes, including missing returns and sharp edges. Maximum normalized-pixel
+error was `9.78e-6`; maximum action error was `2.27e-6` for `drtl73fd/model_09000`
+and `3.49e-6` for `izz2f2df/model_11000`. Both remote pair manifests matched the
+downloaded ONNX SHA256/size. Both passed the new launcher in CPU-only mode in
+`hsinference` without PyTorch; PyTorch is needed only for the offline parity test.
+Detailed local audit: `/data/holosoma_sim2real_audits/depth_match_20260917/`.
+
+Targeted tests: 16 core/camera tests passed under `hssim`, and 16 camera/policy/
+legacy-regression tests passed under `hsinference` (two camera tests overlap).
+Two pre-existing text-assertion tests in `test_real_debug_config.py` still fail:
+`test_real_drop_launches_pose_synced_flat_ground_sim_gt` and
+`test_sim_gt_renderer_is_isolated_from_real_robot_dds`. They also fail against the
+unchanged files archived from `b9bd43ca`; their legacy visualization paths were
+not changed here. Hardware camera/control tests were not run. No new fallback
+was added. The repository's optional `bd` executable was unavailable on this host.
+
 ## Features
 
 - **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)
