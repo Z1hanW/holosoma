@@ -1,1 +1,0 @@
-/home/unitree/FAR/holosoma/_ckps/swl41n4x_model_15500.onnx

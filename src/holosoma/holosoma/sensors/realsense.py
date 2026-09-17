@@ -23,9 +23,6 @@ class RealSenseCameraConfig:
     fps: int = 30
     """Capture frame rate for both depth and color streams."""
 
-    require_global_time: bool = False
-    """Require capture timestamps suitable for training-bound latency selection."""
-
     enable_rgb: bool = True
     """Enable the color (RGB) stream."""
 
@@ -98,12 +95,6 @@ class RealSenseCamera:
                 rs.stream.infrared, 2, width, height, rs.format.y8, self.config.fps,
             )
 
-        if self.config.require_global_time:
-            device = rs_config.resolve(rs.pipeline_wrapper(self.pipeline)).get_device()
-            depth_sensor = device.first_depth_sensor()
-            if not depth_sensor.supports(rs.option.global_time_enabled):
-                raise RuntimeError("RealSense global capture timestamps are required")
-            depth_sensor.set_option(rs.option.global_time_enabled, 1.0)
         profile = self.pipeline.start(rs_config)
 
         # Depth scale: converts raw uint16 depth values to meters
@@ -305,10 +296,6 @@ class RealSenseCamera:
         process_ms = (t_end - t_start) * 1000
 
         if frame_ts is not None and ts_domain == rs.timestamp_domain.global_time:
-            if self.config.require_global_time:
-                # Age at return, not capture-call duration plus sensor age.
-                # Adding wait_for_frames time would count acquisition twice.
-                return time.time() * 1000.0 - frame_ts
             hw_latency_ms = t_received - frame_ts
             return hw_latency_ms + process_ms
         return None

@@ -6,8 +6,6 @@ clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
 object_xy_offset="${HOLOSOMA_MJ_OBJECT_XY_OFFSET:-0,-0.0}"
 object_mass="${HOLOSOMA_MJ_OBJECT_MASS:-2.0}"
-camera_config="${HOLOSOMA_MJ_CAMERA_CONFIG:-single_d435i_depth}"
-image_server_config="${HOLOSOMA_MJ_IMAGE_SERVER_CONFIG:-mujoco_d435i}"
 explicit_motion_mode=0
 clip_arg_seen=0
 if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
@@ -76,11 +74,8 @@ export HOLOSOMA_MJ_OBJECT_XY_OFFSET="$object_xy_offset"
 export HOLOSOMA_MJ_OBJECT_MASS="$object_mass"
 export HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND="${HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND:-$motion_init}"
 export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${HOLOSOMA_POLICY_COMMAND_STATUS_PATH:-/tmp/holosoma_policy_command_status.json}"
-export HOLOSOMA_POLICY_COMMAND_CONTROL_PATH="${HOLOSOMA_POLICY_COMMAND_CONTROL_PATH:-/tmp/holosoma_policy_command_control.json}"
-export HOLOSOMA_ENABLE_MUJOCO_POLICY_BUTTON_COMMANDS="${HOLOSOMA_ENABLE_MUJOCO_POLICY_BUTTON_COMMANDS:-1}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 rm -f "$HOLOSOMA_POLICY_COMMAND_STATUS_PATH" 2>/dev/null || true
-rm -f "$HOLOSOMA_POLICY_COMMAND_CONTROL_PATH" 2>/dev/null || true
 
 robot_args=()
 if [[ -n "$object_urdf" ]]; then
@@ -121,8 +116,8 @@ fi
 PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
   python "${ROOT_DIR}/src/holosoma/holosoma/run_sim.py" \
     robot:g1-29dof-w-object \
-    "camera:${camera_config}" \
-    "image_server:${image_server_config}" \
+    camera:single_d435i_depth \
+    image_server:mujoco_d435i \
     --simulator.config.virtual-gantry.enabled=False \
     "${bridge_args[@]}" \
     "${robot_args[@]}" \

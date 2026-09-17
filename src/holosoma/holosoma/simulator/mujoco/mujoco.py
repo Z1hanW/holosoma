@@ -334,25 +334,6 @@ class MuJoCo(BaseSimulator):
         self._policy_command_status_command: tuple[float, float, float] | None = None
         self._policy_command_status_payload: dict[str, object] | None = None
         self._policy_command_status_next_read = 0.0
-        policy_command_control_path = os.environ.get(
-            "HOLOSOMA_POLICY_COMMAND_CONTROL_PATH",
-            "/tmp/holosoma_policy_command_control.json",
-        ).strip()
-        self._policy_command_control_path: Path | None = (
-            Path(policy_command_control_path) if policy_command_control_path else None
-        )
-        self._policy_button_commands_enabled = os.environ.get(
-            "HOLOSOMA_ENABLE_MUJOCO_POLICY_BUTTON_COMMANDS",
-            "",
-        ).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._policy_command_control_drop_button: float | None = None
-        self._policy_command_control_manual_offset: list[float] | None = None
-        self._policy_command_control_values: dict[str, object] = {}
         self._text_overlay_last_text: str | None = None
 
         # Command system for keyboard/joystick controls
@@ -2232,6 +2213,8 @@ class MuJoCo(BaseSimulator):
     def _policy_command_source(payload: dict) -> str:
         if payload.get("force_zero_sparse_root_command"):
             return "zero"
+        if not payload.get("external_sparse_root_command_mode"):
+            return "motion"
 
         def has_nonzero(values: object) -> bool:
             if not isinstance(values, list):
@@ -2243,14 +2226,6 @@ class MuJoCo(BaseSimulator):
 
         manual = has_nonzero(payload.get("manual_offset"))
         joystick = has_nonzero(payload.get("joystick_offset"))
-        if not payload.get("external_sparse_root_command_mode"):
-            if manual and joystick:
-                return "motion+manual+joystick"
-            if joystick:
-                return "motion+joystick"
-            if manual:
-                return "motion+manual"
-            return "motion"
         if manual and joystick:
             return "manual+joystick"
         if joystick:
@@ -2258,100 +2233,6 @@ class MuJoCo(BaseSimulator):
         if manual:
             return "manual"
         return "external-zero"
-
-    def _write_policy_command_control(self, updates: dict[str, object]) -> bool:
-        if self._policy_command_control_path is None:
-            return False
-        self._policy_command_control_values.update(updates)
-        payload = {"timestamp": time.time(), **self._policy_command_control_values}
-        try:
-            self._policy_command_control_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._policy_command_control_path.with_name(f".{self._policy_command_control_path.name}.tmp")
-            tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-            tmp_path.replace(self._policy_command_control_path)
-        except OSError as exc:
-            logger.warning("Failed to write policy command control file: {}", exc)
-            return False
-        return True
-
-    def _toggle_policy_drop_button_from_viewer(self) -> bool:
-        if not self._policy_button_commands_enabled:
-            return False
-
-        payload = self._policy_command_status_payload if isinstance(self._policy_command_status_payload, dict) else {}
-        current = 0.0
-        if "drop_button" in payload:
-            try:
-                current = float(payload["drop_button"])
-            except (TypeError, ValueError):
-                current = 0.0
-        elif self._policy_command_control_drop_button is not None:
-            current = self._policy_command_control_drop_button
-
-        next_value = 0.0 if current >= 0.5 else 1.0
-        if not self._write_policy_command_control({"drop_button": next_value}):
-            return False
-        self._policy_command_control_drop_button = next_value
-
-        if isinstance(self._policy_command_status_payload, dict):
-            self._policy_command_status_payload["drop_button"] = next_value
-            self._policy_command_status_text = self._policy_command_status_text.replace(
-                f" drop={current:.0f}",
-                f" drop={next_value:.0f}",
-            )
-        logger.info("MuJoCo viewer policy drop_button command: {:.0f}", next_value)
-        self._policy_command_status_next_read = 0.0
-        self._update_text_overlay()
-        return True
-
-    def _current_policy_manual_offset(self) -> list[float]:
-        payload = self._policy_command_status_payload if isinstance(self._policy_command_status_payload, dict) else {}
-        manual_offset = payload.get("manual_offset")
-        if isinstance(manual_offset, list) and len(manual_offset) >= 3:
-            try:
-                offset = [float(manual_offset[0]), float(manual_offset[1]), float(manual_offset[2])]
-                self._policy_command_control_manual_offset = offset
-                return offset
-            except (TypeError, ValueError):
-                pass
-        if self._policy_command_control_manual_offset is not None:
-            return list(self._policy_command_control_manual_offset)
-        return [0.0, 0.0, 0.0]
-
-    def _adjust_policy_sparse_root_from_viewer(self, keycode: int) -> bool:
-        if not self._policy_button_commands_enabled:
-            return False
-
-        step = 0.025
-        forward_command = 0.15
-        offset = self._current_policy_manual_offset()
-        if keycode == 87:  # W
-            offset[0] = forward_command
-        elif keycode == 83:  # S
-            offset[0] -= step
-        elif keycode == 65:  # A
-            offset[1] += step
-        elif keycode == 68:  # D
-            offset[1] -= step
-        elif keycode == 81:  # Q
-            offset[2] -= step
-        elif keycode == 69:  # E
-            offset[2] += step
-        elif keycode == 90:  # Z
-            offset = [0.0, 0.0, 0.0]
-        else:
-            return False
-
-        self._policy_command_control_manual_offset = offset
-        if not self._write_policy_command_control({"manual_offset": offset}):
-            return False
-
-        if isinstance(self._policy_command_status_payload, dict):
-            self._policy_command_status_payload["manual_offset"] = list(offset)
-        logger.info("MuJoCo viewer sparse-root offset: x={:.2f}, y={:.2f}, yaw={:.2f}", *offset)
-        self._policy_command_status_next_read = 0.0
-        self._update_text_overlay()
-        return True
 
     def _robot_root_xy_yaw_for_policy_viz(self) -> tuple[np.ndarray, float] | None:
         if self.root_data is None:
@@ -2424,21 +2305,10 @@ class MuJoCo(BaseSimulator):
         camera_status = "ON" if self.simulator_config.viewer.enable_tracking else "OFF"
         policy_command_text = self._policy_command_overlay_text()
         policy_command_prefix = f"{policy_command_text} \n" if policy_command_text else ""
-        policy_key_text = (
-            "Policy command: W/A/S/D xy, Q/E yaw, Z zero, G drop \n"
-            if self._policy_button_commands_enabled
-            else ""
-        )
-        overlay_toggle_text = (
-            "Press 'g' to toggle policy drop \n"
-            if self._policy_button_commands_enabled
-            else "Press 'g' to hide this menu"
-        )
 
         # Build text overlay content
         text = (
             f"{policy_command_prefix}"
-            f"{policy_key_text}"
             f"Virtual gantry is {gantry_status} \n"
             "Press '7' to raise it \n"
             "Press '8' to lower it \n"
@@ -2446,7 +2316,7 @@ class MuJoCo(BaseSimulator):
             f"Camera tracking: {camera_status} \n"
             "Press 'y' to toggle camera tracking \n"
             "Press backspace to reset the environment \n"
-            f"{overlay_toggle_text}"
+            "Press 'g' to hide this menu"
         )
 
         # Use default font and position (None values will use MuJoCo defaults)
@@ -2468,8 +2338,6 @@ class MuJoCo(BaseSimulator):
         # Handle text overlay toggle
         # G key (71): Toggle text overlay visibility
         if keycode == 71:  # 'G' key
-            if self._toggle_policy_drop_button_from_viewer():
-                return
             self.show_text_overlay = not self.show_text_overlay
             status = "ON" if self.show_text_overlay else "OFF"
             logger.info(f"Text overlay: {status}")
@@ -2492,9 +2360,6 @@ class MuJoCo(BaseSimulator):
 
         if keycode == 259:  # BACKSPACE
             self._reset_requested = True
-            return
-
-        if self._adjust_policy_sparse_root_from_viewer(keycode):
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)

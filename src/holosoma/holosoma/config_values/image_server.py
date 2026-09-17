@@ -95,17 +95,8 @@ real_d435i = dataclasses.replace(
     visualize_images=False,
     camera_type="realsense",
     enable_rgb=False,
-    # Training sampled 3-4 frames back at 30 Hz (~100-133 ms). The D435i
-    # frames already arrive ~39 ms old, so 2-3 additional frames reproduce
-    # the trained effective age instead of adding the hardware delay twice.
-    latency_frame=(2, 3),
-    buffer_len=6,
-)
-
-real_d435i_urdf = dataclasses.replace(
-    real_d435i,
-    latency_frame=(3, 4),
-    buffer_len=6,
+    latency_frame=(3, 3),  # 80-100ms RealSense latency, training uses (7,8)*20ms
+    buffer_len=4,
 )
 
 # Debug-friendly D435i profile with visualization and both depth sources enabled.
@@ -205,7 +196,6 @@ DEFAULTS = {
     "real_enable_gum": real_enable_gum,
     "real_depth_gum": real_depth_gum,
     "real_d435i": real_d435i,
-    "real_d435i_urdf": real_d435i_urdf,
     "real_verbose_d435i": real_verbose_d435i,
     "real_enable_gum_d435i": real_enable_gum_d435i,
     "real_depth_gum_d435i": real_depth_gum_d435i,

@@ -2,27 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-default_model_path="${ROOT_DIR}/_ckps/34qv1qqp_model_40000.onnx"
-if [[ ! -f "$default_model_path" ]]; then
-  default_model_path="wandb://zihanw22/carry-any/34qv1qqp/latest"
-fi
 clip="${1:-${HOLOSOMA_MJ_MOTION:-box_75}}"
-model_path="${2:-${HOLOSOMA_MJ_MODEL_PATH:-$default_model_path}}"
-model_run_id="${HOLOSOMA_MJ_MODEL_RUN_ID:-34qv1qqp}"
+model_path="${2:-${HOLOSOMA_MJ_MODEL_PATH:-_ckps/gjiefd3c_model_06500.onnx}}"
+model_run_id="${HOLOSOMA_MJ_MODEL_RUN_ID:-gjiefd3c}"
 model_base="$(basename "$model_path")"
 if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
   model_run_id="${BASH_REMATCH[1]}"
 elif [[ "$model_path" == wandb://* || "$model_path" == https://wandb.ai/* ]]; then
-  model_path_has_checkpoint=0
-  if [[ "$model_path" == */files/* ]]; then
-    model_path_has_checkpoint=1
-  elif [[ "$model_path" == wandb://* ]]; then
-    IFS='/' read -r -a model_path_parts <<< "${model_path#wandb://}"
-    if [[ "${#model_path_parts[@]}" -ge 4 ]]; then
-      model_path_has_checkpoint=1
-    fi
-  fi
-
   model_run_path="${model_path#wandb://}"
   model_run_path="${model_run_path#https://wandb.ai/}"
   model_run_path="${model_run_path%%\?*}"
@@ -32,9 +18,6 @@ elif [[ "$model_path" == wandb://* || "$model_path" == https://wandb.ai/* ]]; th
   IFS='/' read -r -a model_run_parts <<< "$model_run_path"
   if [[ "${#model_run_parts[@]}" -ge 3 ]]; then
     model_run_id="${model_run_parts[2]}"
-    if [[ "$model_path_has_checkpoint" != "1" ]]; then
-      model_path="wandb://${model_run_parts[0]}/${model_run_parts[1]}/${model_run_parts[2]}/latest"
-    fi
   fi
 fi
 run_id="$model_run_id"
@@ -53,10 +36,7 @@ if [[ -z "$inference_config" ]]; then
     36k1vwdf|zzv6vtkk)
       inference_config="g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1"
       ;;
-    0mcqao8k)
-      inference_config="g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf"
-      ;;
-    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|34qv1qqp|6urn4jvc|xm0hda83)
+    a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x)
       inference_config="g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1"
       ;;
     1j98x3g1|6c7exbeq)
@@ -99,7 +79,6 @@ export HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND="$force_zero_sparse"
 export HOLOSOMA_POLICY_PICKUP_BUTTON="${HOLOSOMA_POLICY_PICKUP_BUTTON:-1}"
 export HOLOSOMA_POLICY_DROP_BUTTON="${HOLOSOMA_POLICY_DROP_BUTTON:-0}"
 export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${HOLOSOMA_POLICY_COMMAND_STATUS_PATH:-/tmp/holosoma_policy_command_status.json}"
-export HOLOSOMA_POLICY_COMMAND_CONTROL_PATH="${HOLOSOMA_POLICY_COMMAND_CONTROL_PATH:-/tmp/holosoma_policy_command_control.json}"
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ "$(basename "$clip" .npz)" == "box_75" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
@@ -110,8 +89,6 @@ fi
 export PYTHONPATH="${ROOT_DIR}/src/holosoma_inference:${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 if [[ -n "${HOLOSOMA_INFERENCE_PYTHON:-}" ]]; then
   python_bin="$HOLOSOMA_INFERENCE_PYTHON"
-elif [[ -x "/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/bin/python3" ]]; then
-  python_bin="/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/bin/python3"
 elif [[ -x "/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3" ]]; then
   python_bin="/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3"
 else
@@ -130,7 +107,7 @@ run_args=(
 
 external_root_pos_run=0
 case "$model_run_id" in
-  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|9ez2ivr4|34qv1qqp|6urn4jvc|xm0hda83|0mcqao8k|36k1vwdf|zzv6vtkk)
+  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|gjiefd3c|qihvpyqg|swl41n4x|36k1vwdf|zzv6vtkk)
     external_root_pos_run=1
     ;;
 esac

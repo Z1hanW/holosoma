@@ -124,50 +124,6 @@ g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1 = InferenceConfig(
     camera=camera.single_d435i_depth,
 )
 
-g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf = InferenceConfig(
-    robot=g1_wbt_distillation.robot,
-    observation=observation.wbt_object_perception_contact_aware_drop_button_actions_no_linvel_h1_g1,
-    task=task.wbt_distillation,
-    camera=camera.single_d435i_urdf_depth,
-)
-
-# Unitree's suspended L2+A diagnostic position is the G1 zero-joint posture.
-# Hold the straight/high standing body with the established WBT stiff gains.
-# Policy and motion activation are locked out by task.stiff_hold_only.
-g1_debug_diagnostic = replace(
-    g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1,
-    camera=camera.single_d435i_urdf_depth,
-    robot=replace(
-        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.robot,
-        stiff_startup_pos=(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left leg
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right leg
-            0.0, 0.0, 0.0,  # waist
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left arm
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right arm
-        ),
-        stiff_startup_kp=(
-            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # left leg
-            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # right leg
-            200.0, 200.0, 200.0,  # waist
-            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # left arm
-            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # right arm
-        ),
-        stiff_startup_kd=(
-            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # left leg
-            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # right leg
-            5.0, 5.0, 5.0,  # waist
-            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # left arm
-            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # right arm
-        ),
-    ),
-    task=replace(
-        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1.task,
-        stiff_hold_only=True,
-        stiff_hold_blend_seconds=5.0,
-    ),
-)
-
 g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1 = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1,
@@ -240,10 +196,6 @@ DEFAULTS = {
     "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1
     ),
-    "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1-d435i-urdf": (
-        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1_d435i_urdf
-    ),
-    "g1-debug-diagnostic": g1_debug_diagnostic,
     "g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1": (
         g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1
     ),

@@ -110,7 +110,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_ref_pos_xyz_0 = None
         self._depth_img_shm = None
         self._depth_img_array = None
-        self._training_depth_profile = None
         self._motion_root_pos_w = None
         self._motion_root_quat_wxyz = None
         self._motion_root_command_origin_xy = None
@@ -133,13 +132,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._policy_command_status_next_time = 0.0
         self._policy_command_status_period = 0.05
         self._logged_policy_command_status_error = False
-        policy_command_control_path = os.environ.get(
-            "HOLOSOMA_POLICY_COMMAND_CONTROL_PATH",
-            "/tmp/holosoma_policy_command_control.json",
-        ).strip()
-        self._policy_command_control_path = Path(policy_command_control_path) if policy_command_control_path else None
-        self._policy_command_control_mtime_ns: int | None = None
-        self._logged_policy_command_control_error = False
         try:
             self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "200") or "200")
         except ValueError:
@@ -192,13 +184,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_sim_time = config.task.use_sim_time
 
         self._stiff_hold_active = True
-        self._stiff_hold_only = bool(config.task.stiff_hold_only)
-        self._stiff_hold_blend_steps = max(
-            0,
-            int(round(float(config.task.stiff_hold_blend_seconds) * float(config.task.rl_rate))),
-        )
-        self._stiff_hold_blend_count = 0
-        self._stiff_hold_start_q: np.ndarray | None = None
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -228,14 +213,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self._stiff_hold_q.shape[1] != self.num_dofs:
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
-        if self._stiff_hold_only:
-            logger.warning(
-                colored(
-                    "STIFF-HOLD-ONLY mode: policy and motion activation are disabled.",
-                    "yellow",
-                    attrs=["bold"],
-                )
-            )
 
         # Prompt user before entering stiff mode (only if stdin is available)
         def _show_warning():
@@ -363,11 +340,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return self._get_ref_body_pose_in_world(robot_state_data)[1]
 
     def setup_policy(self, model_path):
-        depth_profile_path = os.environ.get("HOLOSOMA_TRAINING_DEPTH_PROFILE")
-        if depth_profile_path:
-            from holosoma.sensors.training_depth import load_training_depth_profile
-
-            self._training_depth_profile = load_training_depth_profile(depth_profile_path, model_path)
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
@@ -703,7 +675,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_clock_reading = None
         self._last_policy_inference_clock_ms = None
         self._stiff_hold_active = True
-        self._reset_stiff_hold_blend()
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -722,7 +693,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         current_obs_buffer_dict = {}
         required_terms = {term for terms in self.obs_dict.values() for term in terms}
-        self._apply_policy_command_control(required_terms)
 
         if "motion_command" in required_terms:
             current_obs_buffer_dict["motion_command"] = self.motion_command_t
@@ -742,7 +712,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     current_obs_buffer_dict["sparse_target_root_trajectory_command_contact_aware"] = (
                         self._get_sparse_target_root_trajectory_command_contact_aware(sparse_root_command)
                     )
-            self._write_sparse_root_command_status(current_obs_buffer_dict, robot_state_data)
+            self._write_sparse_root_command_status(current_obs_buffer_dict)
 
         if "motion_ref_ori_b" in required_terms:
             motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
@@ -799,70 +769,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         return current_obs_buffer_dict
 
-    def _apply_policy_command_control(self, required_terms: set[str]) -> None:
-        if self._policy_command_control_path is None:
-            return
-        try:
-            stat = self._policy_command_control_path.stat()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            if not self._logged_policy_command_control_error:
-                logger.warning("Failed to stat policy command control file: {}", exc)
-                self._logged_policy_command_control_error = True
-            return
-
-        if self._policy_command_control_mtime_ns == stat.st_mtime_ns:
-            return
-
-        try:
-            payload = json.loads(self._policy_command_control_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            if not self._logged_policy_command_control_error:
-                logger.warning("Failed to read policy command control file: {}", exc)
-                self._logged_policy_command_control_error = True
-            return
-
-        self._policy_command_control_mtime_ns = stat.st_mtime_ns
-        if not isinstance(payload, dict):
-            return
-
-        if "pickup_button" in payload and "pickup_button" in required_terms:
-            try:
-                self._pickup_button_command = float(payload["pickup_button"])
-                self.logger.info(colored(f"Pickup button command: {self._pickup_button_command:.0f}", "blue"))
-            except (TypeError, ValueError):
-                pass
-        if "drop_button" in payload and "drop_button" in required_terms:
-            try:
-                self._drop_button_command = float(payload["drop_button"])
-                self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
-            except (TypeError, ValueError):
-                pass
-        manual_offset = payload.get("manual_offset")
-        if manual_offset is not None:
-            try:
-                manual_offset_array = np.asarray(manual_offset, dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError):
-                manual_offset_array = np.asarray([], dtype=np.float32)
-            if manual_offset_array.size >= 3:
-                self._manual_sparse_root_command_offset[0, :3] = manual_offset_array[:3]
-                self.logger.info(
-                    colored(
-                        "Sparse root command offset: x={:.2f}, y={:.2f}, yaw={:.2f}".format(
-                            float(self._manual_sparse_root_command_offset[0, 0]),
-                            float(self._manual_sparse_root_command_offset[0, 1]),
-                            float(self._manual_sparse_root_command_offset[0, 2]),
-                        ),
-                        "blue",
-                    )
-                )
-
-    def _write_sparse_root_command_status(
-        self,
-        current_obs_buffer_dict: dict[str, np.ndarray],
-        robot_state_data: np.ndarray,
-    ) -> None:
+    def _write_sparse_root_command_status(self, current_obs_buffer_dict: dict[str, np.ndarray]) -> None:
         if self._policy_command_status_path is None:
             return
 
@@ -890,22 +797,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "force_zero_sparse_root_command": bool(self._force_zero_sparse_root_command),
             "motion_clip_progressing": bool(self.motion_clip_progressing),
             "motion_timestep": int(self.motion_timestep),
-            # This status file is also the low-overhead data source for the
-            # real-robot Viser process.  ``cmd_q`` is the last command sent to
-            # the robot, so it intentionally trails the observation by one
-            # control step instead of adding another telemetry write after
-            # inference.
-            "dof_names": list(self.dof_names),
-            "q_actual": np.asarray(
-                robot_state_data[0, 7 : 7 + self.num_dofs], dtype=np.float32
-            ).astype(float).tolist(),
-            "q_target": np.asarray(self.cmd_q, dtype=np.float32).astype(float).tolist(),
-            "base_position": np.asarray(robot_state_data[0, :3], dtype=np.float32).astype(float).tolist(),
-            "base_wxyz": np.asarray(robot_state_data[0, 3:7], dtype=np.float32).astype(float).tolist(),
-            "use_policy_action": bool(self.use_policy_action),
-            "get_ready_state": bool(self.get_ready_state),
-            "stiff_hold_active": bool(self._stiff_hold_active),
-            "stiff_hold_only": bool(self._stiff_hold_only),
         }
         if "pickup_button" in self.obs_dims:
             payload["pickup_button"] = float(self._pickup_button_command)
@@ -923,7 +814,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._logged_policy_command_status_error = True
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data) -> np.ndarray:
-        if self._force_zero_sparse_root_command or self._drop_button_active():
+        if self._force_zero_sparse_root_command:
             if not self._logged_zero_sparse_root_command:
                 logger.info("Using zero sparse root command.")
                 self._logged_zero_sparse_root_command = True
@@ -960,8 +851,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         delta_y_body = s * delta_xy_world[:, 0] + c * delta_xy_world[:, 1]
         yaw_error = (target_yaw - robot_yaw + np.pi) % (2 * np.pi) - np.pi
 
-        base_command = np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
-        return (base_command + external_sparse_command).astype(np.float32, copy=False)
+        return np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
 
     def _get_sparse_target_root_trajectory_command_contact_aware(self, base_command: np.ndarray) -> np.ndarray:
         if self._motion_object_pos_w is None or self._motion_root_pos_w is None:
@@ -1108,24 +998,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
 
         if self._depth_img_array is None:
-            shm_name = os.environ.get("HOLOSOMA_DEPTH_SHM_NAME", "depth_img_shm")
             try:
-                self._depth_img_shm = shared_memory.SharedMemory(name=shm_name)
+                self._depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
             except FileNotFoundError as exc:
                 raise RuntimeError(
-                    f"perception_obs requires shared memory {shm_name!r}. Start the matching depth server first."
+                    "perception_obs requires shared memory 'depth_img_shm'. Start the MuJoCo image server first."
                 ) from exc
             self._depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self._depth_img_shm.buf)
             logger.info("[WBT] Depth shared memory attached: shape={}", expected_shape)
 
-        if getattr(self, "_training_depth_profile", None) is not None:
-            from holosoma.sensors.training_depth import read_bound_depth
-
-            image = read_bound_depth(self._depth_img_array, os.environ["HOLOSOMA_DEPTH_STATUS_PATH"],
-                                     self._training_depth_profile, os.environ["HOLOSOMA_DEPTH_SHM_NAME"])
-        else:
-            image = self._depth_img_array.copy()
-        flattened = image.reshape(1, -1).astype(np.float32, copy=False)
+        flattened = self._depth_img_array.copy().reshape(1, -1).astype(np.float32, copy=False)
         expected_dim = self.obs_dims["cam_depth"]
         if flattened.shape[1] != expected_dim:
             raise ValueError(
@@ -1286,43 +1168,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
         if not self._stiff_hold_active:
             return None
-        q_target = self._stiff_hold_q.copy()
-        if self._stiff_hold_blend_steps > 0:
-            if self._stiff_hold_start_q is None:
-                self._stiff_hold_start_q = robot_state_data[:, 7 : 7 + self.num_dofs].copy()
-            blend_t = min(self._stiff_hold_blend_count / self._stiff_hold_blend_steps, 1.0)
-            blend_alpha = blend_t * blend_t * (3.0 - 2.0 * blend_t)
-            q_target = (1.0 - blend_alpha) * self._stiff_hold_start_q + blend_alpha * self._stiff_hold_q
-            self._stiff_hold_blend_count = min(self._stiff_hold_blend_count + 1, self._stiff_hold_blend_steps)
         return {
-            "q": q_target,
+            "q": self._stiff_hold_q.copy(),
             "kp": self._stiff_hold_kp,
             "kd": self._stiff_hold_kd,
         }
 
-    def _reset_stiff_hold_blend(self) -> None:
-        self._stiff_hold_blend_count = 0
-        self._stiff_hold_start_q = None
-
     def _handle_start_policy(self):
-        if self._stiff_hold_only:
-            self.use_policy_action = False
-            self.get_ready_state = False
-            self._stiff_hold_active = True
-            if hasattr(self.interface, "no_action"):
-                self.interface.no_action = 0
-            self.logger.warning("Policy activation ignored: stiff-hold-only mode is active")
-            return
         super()._handle_start_policy()
         self._stiff_hold_active = False
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
-
-    def _handle_init_state(self):
-        if self._stiff_hold_only:
-            self.logger.info("Already holding the configured stiff debug pose")
-            return
-        super()._handle_init_state()
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
@@ -1366,7 +1222,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
-        self._reset_stiff_hold_blend()
         self.logger.info("Actions set to stiff startup command")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
@@ -1383,9 +1238,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
-        if self._stiff_hold_only:
-            self.logger.warning("Motion activation ignored: stiff-hold-only mode is active")
-            return
         self.clock_sub.reset_origin()
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
@@ -1397,9 +1249,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _handle_sparse_root_keyboard_command(self, keycode: str) -> bool:
         step = 0.025
-        forward_command = 0.15
         if keycode == "w":
-            self._manual_sparse_root_command_offset[0, 0] = forward_command
+            self._manual_sparse_root_command_offset[0, 0] += step
         elif keycode == "s":
             self._manual_sparse_root_command_offset[0, 0] -= step
         elif keycode == "a":
@@ -1451,7 +1302,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return True
 
         self._drop_button_key_down = True
-        self._toggle_drop_button_command()
+        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
+        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
         return True
 
     def _handle_drop_button_joystick_command(self, cur_key: str) -> bool:
@@ -1463,18 +1315,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._logged_missing_drop_button_key = True
             return True
 
-        self._toggle_drop_button_command()
-        return True
-
-    def _drop_button_active(self) -> bool:
-        return "drop_button" in self.obs_dims and self._drop_button_command >= 0.5
-
-    def _toggle_drop_button_command(self) -> None:
-        self._drop_button_command = 0.0 if self._drop_button_active() else 1.0
-        if self._drop_button_active():
-            self._manual_sparse_root_command_offset.fill(0.0)
-            self._joystick_sparse_root_command_offset.fill(0.0)
+        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
         self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+        return True
 
     def handle_keyboard_release(self, keycode):
         if keycode == "f":
@@ -1484,10 +1327,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super().handle_keyboard_release(keycode)
 
     def _update_sparse_root_joystick_command(self) -> None:
-        if self._drop_button_active():
-            self._joystick_sparse_root_command_offset.fill(0.0)
-            return
-
         wc_msg = self.interface.get_joystick_msg()
         if wc_msg is None:
             self._joystick_sparse_root_command_offset.fill(0.0)
@@ -1497,20 +1336,18 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        forward_threshold = 0.02
-        forward_command = 0.11
-        lateral_scale = 0.1
+        xy_scale = 0.1
         yaw_scale = 0.1
 
         def apply_deadband(value: float) -> float:
             return value if abs(value) > deadband else 0.0
 
         lx = apply_deadband(float(getattr(wc_msg, "lx", 0.0)))
-        ly = float(getattr(wc_msg, "ly", 0.0))
+        ly = apply_deadband(float(getattr(wc_msg, "ly", 0.0)))
         rx = apply_deadband(float(getattr(wc_msg, "rx", 0.0)))
 
-        self._joystick_sparse_root_command_offset[0, 0] = forward_command if ly > forward_threshold else 0.0
-        self._joystick_sparse_root_command_offset[0, 1] = -lx * lateral_scale
+        self._joystick_sparse_root_command_offset[0, 0] = ly * xy_scale
+        self._joystick_sparse_root_command_offset[0, 1] = -lx * xy_scale
         self._joystick_sparse_root_command_offset[0, 2] = -rx * yaw_scale
 
     def process_joystick_input(self):

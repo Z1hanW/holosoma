@@ -1,7 +1,0 @@
-[real_drop] log_dir=/home/unitree/FAR/holosoma/logs/real_drop_20260917_161812
-[real_drop] model_path=/home/unitree/FAR/holosoma/_ckps/izz2f2df_model_11000.onnx
-[command_window] skipping: no DISPLAY/WAYLAND_DISPLAY
-[camera_profile] izz2f2df: D435 37.0 deg down raw=106x60 policy=87x58 position=[0.009999999776482582, 0.009999999776482582, 0.4399999976158142] metadata=perception_observation_contract
-[real_drop] resolved_model_path=/home/unitree/FAR/holosoma/_ckps/izz2f2df_model_11000.onnx
-[real_drop] MuJoCo sim GT started pid=6569 log=/home/unitree/FAR/holosoma/logs/real_drop_20260917_161812/sim_gt_depth.log
-[real_viser] started pid=6570

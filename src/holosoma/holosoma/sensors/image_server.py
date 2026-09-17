@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import time
-import os
 import threading
 import random
 from queue import Queue
@@ -11,22 +8,23 @@ from pathlib import Path
 from typing import TypedDict
 import cv2
 import numpy as np
+import torch
 from multiprocessing import shared_memory
 import tyro
 from typing_extensions import Annotated, NotRequired
 import holosoma.config_values.image_server
+from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
 from holosoma.utils.rate import RateLimiter
 from datetime import datetime
+from holosoma.models.gum.infer import GUM
 from holosoma.config_types.image_server import (
     ImageSaverConfig,
     ImageServerConfig,
     ImageVisualizerConfig,
 )
+from holosoma.sensors.zed import ZedCamerasConfig, ZedCamerasWrapper
 from holosoma.sensors.realsense import RealSenseCameraConfig, RealSenseCamerasConfig, RealSenseCamerasWrapper
 from holosoma.sensors.utils import _prepare_depth_for_visualization
-from holosoma.sensors.training_depth import (
-    TimestampedDepthBuffer, load_training_depth_profile, preprocess_real_depth, write_depth_status,
-)
 
 
 class FrameBundle(TypedDict):
@@ -372,33 +370,17 @@ class ImageVisualizer:
 
 
 class ImageServer:
-    def __init__(self, camera_wrapper: object, cfg: ImageServerConfig):
+    def __init__(self, camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper, cfg: ImageServerConfig):
         self.cfg: ImageServerConfig = cfg
-        self.training_depth_profile = None
-        if cfg.training_depth_profile is not None:
-            self.training_depth_profile = load_training_depth_profile(cfg.training_depth_profile)
-            if cfg.camera_type != "realsense" or cfg.depth_source != "depth" or cfg.enable_gum_depth_prediction:
-                raise ValueError("Training-bound depth requires native RealSense depth")
-            if cfg.shared_memory_name == "depth_img_shm" or not cfg.depth_status_path:
-                raise ValueError("Training-bound depth requires an isolated shared memory and status path")
-            if (cfg.resized_height, cfg.resized_width, cfg.frame_rate) != (58, 87, 30):
-                raise ValueError("Depth output size/rate conflicts with the ONNX contract")
-            self.timestamped_depth = TimestampedDepthBuffer(self.training_depth_profile)
 
         # Initialize camera wrapper
-        self.camera_wrapper = camera_wrapper
+        self.camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
 
         # Initialize shared memory
         self._init_shared_memory()
 
         # Initialize depth prediction models
-        if self.cfg.enable_gum_depth_prediction:
-            import torch
-            from holosoma.models.gum.infer import GUM
-
-            self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16)
-        else:
-            self.gum = None
+        self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16) if self.cfg.enable_gum_depth_prediction else None
         
         # Latency buffer config (matches old sim2sim ring-buffer approach)
         if isinstance(self.cfg.latency_frame, (tuple, list)) and len(self.cfg.latency_frame) == 2:
@@ -466,7 +448,7 @@ class ImageServer:
         self.image_saver.save_calibration(calibration_by_camera)
     
     def _init_shared_memory(self):
-        img_shm_name = self.cfg.shared_memory_name
+        img_shm_name = "depth_img_shm"
 
         # Initialize shared memory
         expected_shape = [self.camera_wrapper.num_cameras, 1, self.cfg.resized_height, self.cfg.resized_width]
@@ -479,8 +461,6 @@ class ImageServer:
                 self.image_shm = shared_memory.SharedMemory(create=True, size=memory_size, name=img_shm_name)
                 print(f"[Image Server] Created new shared memory: {img_shm_name}")
             except FileExistsError:
-                if self.training_depth_profile is not None:
-                    raise RuntimeError("Training-bound depth shared memory already has an owner")
                 self.image_shm = shared_memory.SharedMemory(name=img_shm_name)
                 print(f"[Image Server] Connected to existing shared memory: {img_shm_name}")
             
@@ -493,25 +473,6 @@ class ImageServer:
         print("ImageServer initialized")
 
     def _resize_clip_expand_transpose(self, frame):
-        if getattr(self, "training_depth_profile", None) is not None:
-            return preprocess_real_depth(frame, self.training_depth_profile)
-        # RealSense uses a finite zero for a missing return. Training never
-        # represented a miss with zero: Warp ray misses and every synthetic
-        # dropout/hole were written as max depth. Translate the sensor-specific
-        # sentinel before applying the training clamp so missing returns become
-        # +0.5 (far/empty), not -0.5 (a near-plane obstacle).
-        frame = np.where(frame == 0.0, self.cfg.far_clip, frame)
-
-        # Match the training snapshot's _clamp_camera_depth_to_sensor_range for
-        # all remaining samples: non-finite and over-range values become far,
-        # while finite nonzero under-range measurements clamp near.
-        frame = np.where(
-            np.isfinite(frame) & (frame <= self.cfg.far_clip),
-            frame,
-            self.cfg.far_clip,
-        )
-        frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
-
         # crop
         if any(v is not None for v in (self.cfg.crop_y_start, self.cfg.crop_y_end,
                                         self.cfg.crop_x_start, self.cfg.crop_x_end)):
@@ -519,8 +480,7 @@ class ImageServer:
                           self.cfg.crop_x_start:self.cfg.crop_x_end]
 
         # resize
-        frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height),
-                           interpolation=cv2.INTER_CUBIC)
+        frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height), cv2.INTER_CUBIC)
 
         # Match distillation: clamp first, then apply the optional min-valid-depth mask.
         frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
@@ -561,15 +521,11 @@ class ImageServer:
             # 0. grab frames from cameras
             with self.capture_profiler.measure():
                 all_frames: FrameBundle = dict(self.camera_wrapper.get_frames())
-            captured_at = time.monotonic()
 
             # Record hardware latency if available
             total_latency_ms = all_frames.pop("total_latency_ms", None)
             if total_latency_ms is not None:
                 self.hw_latency_profiler.record(total_latency_ms)
-                captured_at -= float(total_latency_ms) / 1000.0
-            elif self.training_depth_profile is not None:
-                raise RuntimeError("Training-bound depth requires measured RealSense global-time latency")
 
             # Strip RGB frames when RGB is disabled to avoid downstream use
             if not self.cfg.enable_rgb:
@@ -596,34 +552,11 @@ class ImageServer:
                 current_latency = self.latency_frame
             delayed_image = self._frame_buffer[-1 - current_latency]
 
-            if self.training_depth_profile is not None:
-                now = time.monotonic()
-                self.timestamped_depth.append(full_depth_for_policy, captured_at, now)
-                selection = self.timestamped_depth.select(now, random.choice((3, 4)))
-                if selection is None:
-                    rate_limiter.sleep()
-                    continue
-                captured_at, delayed_image = selection
-                status = {
-                    "sequence": 2 * step_count + 1,
-                    "checkpoint_sha256": self.training_depth_profile["checkpoint"]["sha256"],
-                    "depth_contract_sha256": self.training_depth_profile["training_depth_contract_sha256"],
-                    "shm_name": self.cfg.shared_memory_name, "shape": list(delayed_image.shape),
-                    "captured_at_monotonic": captured_at, "published_at_monotonic": now,
-                    "producer_pid": os.getpid(),
-                }
-                write_depth_status(self.cfg.depth_status_path, status)
-
             # 3. copy to shared memory for policy
             try:
                 # print(f"[Image Server] Current step count: {step_count}, delayed step count: {delayed_step_count}")
                 np.copyto(self.img_array, delayed_image)
-                if self.training_depth_profile is not None:
-                    status["sequence"] += 1
-                    write_depth_status(self.cfg.depth_status_path, status)
             except Exception as e:
-                if self.training_depth_profile is not None:
-                    raise
                 print(f"[Image Server] Failed to copy to shared memory: {e}")
                 continue
                 
@@ -663,10 +596,6 @@ if __name__ == "__main__":
     # Parse command line arguments using subcommand presets from config_values.image_server.
     cfg = tyro.cli(ImageServerCliConfig, default=holosoma.config_values.image_server.real)
 
-    if cfg.training_depth_profile is not None:
-        # Validate metadata before opening any hardware.
-        load_training_depth_profile(cfg.training_depth_profile)
-
     if cfg.camera_type == "realsense":
         # Enable IR stereo streams when GUM depth prediction is requested;
         # GUM requires stereo image pairs and stereo calibration.
@@ -674,14 +603,11 @@ if __name__ == "__main__":
             rs_cam_cfg = RealSenseCameraConfig(enable_ir_stereo=True)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         else:
-            rs_cam_cfg = RealSenseCameraConfig(enable_rgb=cfg.enable_rgb,
-                                              require_global_time=cfg.training_depth_profile is not None)
+            rs_cam_cfg = RealSenseCameraConfig(enable_rgb=cfg.enable_rgb)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
     else:
         # Default: ZED cameras
-        from holosoma.sensors.zed import ZedCamerasConfig, ZedCamerasWrapper
-
         depth_mode = "NEURAL" if cfg.enable_camera_depth_prediction else "NONE"
         zed_cfg = ZedCamerasConfig(
             terms={
@@ -693,16 +619,7 @@ if __name__ == "__main__":
 
     # Create image server with parsed config
     image_server = ImageServer(camera_wrapper, cfg)
-    if cfg.training_depth_profile is not None:
-        try:
-            image_server.send_process()
-        finally:
-            for camera in camera_wrapper.cameras.values():
-                camera.release()
-            image_server.image_shm.close()
-            image_server.image_shm.unlink()
-    else:
-        thread = threading.Thread(target=image_server.send_process)
-        thread.start()
-        time.sleep(2)
-        thread.join()
+    thread = threading.Thread(target=image_server.send_process)
+    thread.start()
+    time.sleep(2)
+    thread.join()
