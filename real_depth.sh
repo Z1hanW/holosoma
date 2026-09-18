@@ -9,6 +9,7 @@ mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/depth.log") 2>&1
 
 echo "[real_depth] log_dir=${log_dir}"
-source scripts/source_mujoco_setup.sh
+source scripts/source_inference_setup.sh
+PYTHONPATH=src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python src/holosoma/holosoma/sensors/image_server.py real_d435i \
   --image-saver-config.image-root-dir "${log_dir}/depth_images"

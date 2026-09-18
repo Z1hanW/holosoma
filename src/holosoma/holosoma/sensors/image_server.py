@@ -8,15 +8,12 @@ from pathlib import Path
 from typing import TypedDict
 import cv2
 import numpy as np
-import torch
 from multiprocessing import shared_memory
 import tyro
 from typing_extensions import Annotated, NotRequired
 import holosoma.config_values.image_server
-from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
 from holosoma.utils.rate import RateLimiter
 from datetime import datetime
-from holosoma.models.gum.infer import GUM
 from holosoma.config_types.image_server import (
     ImageSaverConfig,
     ImageServerConfig,
@@ -370,17 +367,23 @@ class ImageVisualizer:
 
 
 class ImageServer:
-    def __init__(self, camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper, cfg: ImageServerConfig):
+    def __init__(self, camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper, cfg: ImageServerConfig):
         self.cfg: ImageServerConfig = cfg
 
         # Initialize camera wrapper
-        self.camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
+        self.camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
 
         # Initialize shared memory
         self._init_shared_memory()
 
-        # Initialize depth prediction models
-        self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16) if self.cfg.enable_gum_depth_prediction else None
+        # GUM is optional and is not needed by the RealSense depth server.
+        if self.cfg.enable_gum_depth_prediction:
+            import torch
+            from holosoma.models.gum.infer import GUM
+
+            self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16)
+        else:
+            self.gum = None
         
         # Latency buffer config (matches old sim2sim ring-buffer approach)
         if isinstance(self.cfg.latency_frame, (tuple, list)) and len(self.cfg.latency_frame) == 2:
