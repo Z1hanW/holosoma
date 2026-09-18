@@ -35,6 +35,11 @@ formal. Each node directly fetches the same pushed Git commit into a clean
 checkout. Only explicit manifest-listed non-code assets are synchronized.
 CPU initializer/ONNX parity and real eight-rank two-update PT+ONNX canary
 acceptance precede formal launch. Canary weights are never formal inputs.
+Each job uses the existing single-node CPU/Gloo gradient reduction path;
+multi-node hierarchical reduction is explicitly disabled. Before creating
+formal tmux, the worker repeats initializer/ONNX parity with the exact full
+formal CLI and immutable run identity, without starting W&B or allocating
+training GPUs.
 
 The campaign JSON, per-arm immutable run contracts, Git verification,
 initializer proof, checkpoint-pair checks, independent ONNX parity, and

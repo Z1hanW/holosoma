@@ -167,8 +167,8 @@ def worker_environment(campaign, arm, mode, work, verification):
         "TORCH_DIST_BACKEND": "gloo", "TORCH_DIST_TIMEOUT_SEC": "1800", "GLOO_SOCKET_IFNAME": "lo", "NCCL_SOCKET_IFNAME": "lo",
         "NCCL_IB_DISABLE": "1", "NCCL_DEBUG": "WARN", "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
         "TORCH_NCCL_ENABLE_MONITORING": "1", "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "300",
-        "HOLOSOMA_GLOO_GRAD_REDUCE": "0", "HOLOSOMA_GLOO_BARRIER": "1", "HOLOSOMA_GLOO_SMALL_COLLECTIVES": "1",
-        "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE": "1", "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE_CPU_LEADER": "1",
+        "HOLOSOMA_GLOO_GRAD_REDUCE": "1", "HOLOSOMA_GLOO_BARRIER": "1", "HOLOSOMA_GLOO_SMALL_COLLECTIVES": "1",
+        "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE": "0", "HOLOSOMA_HIERARCHICAL_GRAD_REDUCE_CPU_LEADER": "0",
         "HOLOSOMA_HIERARCHICAL_PG_TIMEOUT_SEC": "300", "HOLOSOMA_HIERARCHICAL_SMALL_COLLECTIVES": "0",
         "HOLOSOMA_RANK_VISIBLE_DEVICES": "1", "HOLOSOMA_RANK_LOCAL_CPU_AFFINITY": "1",
         "HOLOSOMA_SYNC_BEFORE_GRAD_ALLREDUCE": "1", "HOLOSOMA_SYNC_AFTER_GRAD_ALLREDUCE": "0",
@@ -207,6 +207,7 @@ def worker_environment(campaign, arm, mode, work, verification):
 
 
 def worker(campaign_path, arm, mode):
+    formal = mode in {"formal", "formal-preflight"}
     campaign = json.loads(Path(campaign_path).read_text())
     if campaign["definitions"][arm] != json_sha(definition(arm)):
         raise ValueError("Git-bound experiment definition drift")
@@ -227,11 +228,11 @@ def worker(campaign_path, arm, mode):
         path = Path(item["path"])
         if not path.is_file() or sha(path) != item["sha256"]:
             raise ValueError(f"Missing or changed asset: {path}")
-    env = worker_environment(campaign, arm, "canary" if mode == "preflight" else mode, work, verification)
+    env = worker_environment(campaign, arm, "formal" if formal else "canary", work, verification)
     run([PYTHON, ROOT / "scripts/verify_python_runtime_overlay.py", "--site-packages", RUNTIME,
          "--manifest-sha256", RUNTIME_SHA, "--require-distribution-closure", "--require-current-runtime-binding"], env=env)
     run_id = None
-    if mode == "formal":
+    if formal:
         acceptance = json.loads((Path(campaign["persist"]) / arm / "canary_acceptance.json").read_text())
         contract = json.loads((Path(campaign["persist"]) / arm / "run_contract.json").read_text())
         if acceptance.get("accepted") is not True or acceptance["commit"] != campaign["source"]["commit"] or acceptance["definition_sha256"] != campaign["definitions"][arm]:
@@ -241,8 +242,8 @@ def worker(campaign_path, arm, mode):
         if contract["campaign_sha256"] != sha(campaign_path):
             raise ValueError("Campaign identity changed")
         run_id = contract["run_id"]
-    cli = training_args(arm, "formal" if mode == "formal" else "canary", campaign["persist"], run_id)
-    if mode == "formal" and contract["cli"] != cli:
+    cli = training_args(arm, "formal" if formal else "canary", campaign["persist"], run_id)
+    if formal and contract["cli"] != cli:
         raise ValueError("Final CLI differs from immutable formal contract")
     save(work / "training_cli.json", cli)
     run([PYTHON, ROOT / "scripts/validate_train_cli.py", "--expected-motion-end-mode", "episodic", "--", *cli], env=env)
@@ -257,7 +258,7 @@ def worker(campaign_path, arm, mode):
     provenance["factorial_experiment"] = {"arm": arm, "definition_sha256": campaign["definitions"][arm],
         "campaign_sha256": sha(campaign_path), "source": campaign["source"], "node_git_verification": json.loads(verification.read_text()),
         "offline_producer": "ch2ckwzw/model_13000.pt", "online_teacher": "ch2ckwzw/model_40000.pt" if mix else None}
-    if mode == "formal":
+    if formal:
         provenance["factorial_experiment"]["formal_contract_sha256"] = sha(Path(campaign["persist"]) / arm / "run_contract.json")
     env["HOLOSOMA_TRAINING_PROVENANCE"] = json.dumps(provenance, sort_keys=True, separators=(",", ":"))
     save(work / "provenance.json", provenance)
@@ -266,7 +267,7 @@ def worker(campaign_path, arm, mode):
         preflight += ["--allow-distillation"]
     run([*preflight, "--", *cli], env=env)
     print(f"[INFO] factorial_preflight_passed arm={arm} mode={mode} ws=8 envs_per_gpu=2048", flush=True)
-    if mode == "preflight":
+    if mode in {"preflight", "formal-preflight"}:
         return
     gpu_health()
     os.chdir(ROOT)
@@ -277,7 +278,7 @@ def worker(campaign_path, arm, mode):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "canary", "formal"))
+    parser.add_argument("mode", choices=("preflight", "canary", "formal-preflight", "formal"))
     parser.add_argument("--campaign", type=Path, required=True)
     parser.add_argument("--arm", choices=ARMS, required=True)
     args = parser.parse_args()

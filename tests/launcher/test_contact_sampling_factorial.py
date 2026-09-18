@@ -67,6 +67,19 @@ def test_formal_requires_identity():
         EXP.training_args("bad-arm", "canary", "/canonical")
 
 
+def test_single_node_communication(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "mkdir", lambda *args, **kwargs: None)
+    arm = EXP.ARMS[0]
+    campaign = {"nodes": {arm: {"port": 12345}}, "source": {"manifest": "m", "commit": "c", "tree": "t"},
+                "dataset": {"single_slot_source_digest": "s", "single_slot_view_digest": "v", "shard_digest": "d", "shard_root": "/shards"}}
+    env = EXP.worker_environment(campaign, arm, "canary", tmp_path, tmp_path / "git.json")
+    assert env["NNODES"] == "1" and env["NPROC"] == "8"
+    assert env["TORCH_DIST_BACKEND"] == "gloo"
+    assert env["HOLOSOMA_GLOO_GRAD_REDUCE"] == "1"
+    assert env["HOLOSOMA_HIERARCHICAL_GRAD_REDUCE"] == "0"
+    assert env["HOLOSOMA_HIERARCHICAL_GRAD_REDUCE_CPU_LEADER"] == "0"
+
+
 @pytest.mark.parametrize("arm", EXP.ARMS)
 def test_canary_and_formal_scientific_validation(arm):
     spec = importlib.util.spec_from_file_location("cli_validator", ROOT / "scripts/validate_train_cli.py")

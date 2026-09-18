@@ -149,6 +149,8 @@ def launch(root, campaign, arm, mode):
             raise ValueError("Formal launch requires accepted exact-source canary")
         if contract["cli"] != exp.training_args(arm, "formal", root, contract["run_id"]):
             raise ValueError("Formal CLI drift")
+        output = ssh(campaign["nodes"][arm]["ip"], worker_command(root, campaign, arm, "formal-preflight"), timeout=1800)
+        exp.save(root / arm / "formal_preflight_result.json", {"output": output, "contract_sha256": exp.sha(root / arm / "run_contract.json")})
     host = campaign["nodes"][arm]["ip"]
     session = "factorial_" + arm.replace("+", "_") + "_" + mode
     log = root / arm / (mode + ".log")
