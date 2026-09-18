@@ -96,8 +96,9 @@ def training_args(arm, mode, persist, run_id=None):
         "adaptive-sampling-contact-interval-root": CONTACT,
         "contact-interval-runtime-prepend-compensation": True,
         "uniform-t1-window-sampling-enabled": False,
-        "start-at-timestep-zero-prob-end-iter": 39999,
-        "freeze-at-timestep-zero-prob-end-iter": 39999,
+        "start-at-timestep-zero-prob-end": 1.0 if mode == "formal" else 1.0 / 39999,
+        "start-at-timestep-zero-prob-end-iter": 39999 if mode == "formal" else 1,
+        "freeze-at-timestep-zero-prob-end-iter": 39999 if mode == "formal" else 1,
     }
     overrides.update({MOTION_PREFIX + k: v for k, v in motion.items()})
     if mix:

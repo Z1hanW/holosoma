@@ -17,7 +17,7 @@ NODES = [
     ("zzzihanw-26", "10.99.0.18"), ("zzzihanw-27", "10.99.0.227"),
     ("zzzihanw-34", "10.99.0.167"), ("zzzihanw-35", "10.99.0.77"),
     ("zzzihanw-39", "10.99.0.39"), ("zzzihanw-45", "10.99.0.183"),
-    ("zzzihanw-47", "10.99.0.24"), ("zzzihanw-65", "10.99.0.201"),
+    ("zzzihanw-72", "10.99.1.89"), ("zzzihanw-f", "10.99.1.122"),
 ]
 
 
@@ -88,7 +88,7 @@ def prepare(root):
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "source": source, "checkout": "/data/holosoma_git/contact_sampling_" + commit[:12], "persist": str(root),
         "definitions": {arm: exp.json_sha(exp.definition(arm)) for arm in exp.ARMS},
-        "nodes": {arm: {"alias": alias, "ip": ip, "az": "ap-northeast-2a", "port": 36820 + index}
+        "nodes": {arm: {"alias": alias, "ip": ip, "az": "ap-northeast-2b" if ip.startswith("10.99.1.") else "ap-northeast-2a", "port": 36820 + index}
                   for index, (arm, (alias, ip)) in enumerate(zip(exp.ARMS, NODES, strict=True))},
         "dataset": {"bank": exp.BANK, "contact_root": exp.CONTACT, "clip_count": 137,
                     "single_slot_source_digest": "42903c7e443ccd836af133700058b0772545efcbc5af11d3193b60f0ec72dddd",

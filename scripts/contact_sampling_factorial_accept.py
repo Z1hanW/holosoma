@@ -87,7 +87,7 @@ def accept(root, arm):
     require(motion["zero_root_command_when_drop_active"], "Drop is not exclusive")
     require(motion["use_adaptive_timesteps_sampler"] == adaptive, "Within-clip sampler drift")
     require(motion["clip_weighting_strategy"] == "uniform_clip" and not motion["uniform_t1_window_sampling_enabled"], "Other sampling drift")
-    require(motion["start_at_timestep_zero_prob_end_iter"] == 39999, "Canary changed curriculum")
+    require(motion["start_at_timestep_zero_prob_end_iter"] == 1 and motion["start_at_timestep_zero_prob_end"] == 1.0 / 39999, "Canary must preserve first two formal probabilities")
     reward = cfg["reward"]["terms"]["offline_contact_guidance"]
     require(reward["weight"] == float(contact), "Contact outer weight drift")
     require(reward["params"]["contact_weight"] == reward["params"]["wrist_weight"] == 1., "Contact inner weight drift")

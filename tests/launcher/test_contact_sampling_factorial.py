@@ -65,3 +65,18 @@ def test_formal_requires_identity():
         EXP.training_args(EXP.ARMS[0], "formal", "/canonical")
     with pytest.raises(ValueError, match="Unknown arm"):
         EXP.training_args("bad-arm", "canary", "/canonical")
+
+
+@pytest.mark.parametrize("arm", EXP.ARMS)
+def test_canary_and_formal_scientific_validation(arm):
+    spec = importlib.util.spec_from_file_location("cli_validator", ROOT / "scripts/validate_train_cli.py")
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    for mode in ("canary", "formal"):
+        validator.parse_and_validate_train_cli(EXP.training_args(arm, mode, "/canonical", "abcdefgh" if mode == "formal" else None))
+    short, full = options(arm), options(arm, "formal")
+    prefix = EXP.MOTION_PREFIX + "start-at-timestep-zero-prob-"
+    for iteration in (0, 1):
+        short_p = float(short[prefix + "end"]) * iteration / int(short[prefix + "end-iter"])
+        full_p = float(full[prefix + "end"]) * iteration / int(full[prefix + "end-iter"])
+        assert short_p == full_p
