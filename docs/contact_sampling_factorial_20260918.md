@@ -68,3 +68,68 @@ training GPUs.
 The campaign JSON, per-arm immutable run contracts, Git verification,
 initializer proof, checkpoint-pair checks, independent ONNX parity, and
 per-rank logs are retained under the caller-specified audit root.
+
+## September 18 replacement generation
+
+Execution commit: `76df1abfbb6404f06aeb2321147b450c4ea00d4c`.
+Execution tree: `3d7ac77a34048ab460c786084a441c5f50f463d6`.
+All eight nodes fetched this commit directly from `origin/main` and passed
+clean-checkout/submodule verification. Subsequent documentation commits do
+not change the running source.
+
+Audit root:
+`/data/holosoma_training_audits/contact_sampling_latest40k_swdepth_ws8x8_20260918`.
+
+| Arm | Node | New Run | Superseded Run |
+| --- | --- | --- | --- |
+| rl-nocontact+uniform | zzzihanw-26 | [aulhhzxm](https://wandb.ai/zihanw22/carry-any/runs/aulhhzxm) | wh9cbn82 |
+| rl-nocontact+adaptive | zzzihanw-27 | [fgwvovxy](https://wandb.ai/zihanw22/carry-any/runs/fgwvovxy) | v21wabn6 |
+| rl-contact+uniform | zzzihanw-34 | [5zmbxh3t](https://wandb.ai/zihanw22/carry-any/runs/5zmbxh3t) | oky97w4s |
+| rl-contact+adaptive | zzzihanw-35 | [legiadml](https://wandb.ai/zihanw22/carry-any/runs/legiadml) | jdzbcq4p |
+| mix-nocontact+uniform | zzzihanw-39 | [xfn7ydac](https://wandb.ai/zihanw22/carry-any/runs/xfn7ydac) | e17vgbqb |
+| mix-nocontact+adaptive | zzzihanw-45 | [fw3009av](https://wandb.ai/zihanw22/carry-any/runs/fw3009av) | e078w1cx |
+| mix-contact+uniform | zzzihanw-72 | [4kocpixa](https://wandb.ai/zihanw22/carry-any/runs/4kocpixa) | kj4h1y1c |
+| mix-contact+adaptive | zzzihanw-f | [4u4fo0dq](https://wandb.ai/zihanw22/carry-any/runs/4u4fo0dq) | km2wgymr |
+
+The eight old torchrun parents were individually authenticated against their
+original CLI, Git checkout, W&B identity and eight GPU workers before SIGINT.
+Their files were preserved. Their W&B `failed` states reflect the intentional
+exit-code-130 replacement, not a numerical training failure; lifecycle summary
+and tags identify the reason. No unrelated training was stopped.
+
+Focused regression validation: 125 tests passed. All eight two-update canaries
+exited zero with all-rank state and valid same-iteration PT+ONNX pairs. Each
+passed full ONNX checking, ORT loading and an independent 14-row actor probe;
+maximum absolute differences ranged from 3.81e-6 to 6.44e-6, within the fixed
+`rtol=1e-3, atol=2e-6` elementwise acceptance rule. These are startup/export
+checks, not evidence of task success or improved learning.
+
+`depth_and_height_audit.json` independently binds all 29 selected files to the
+historical Git blobs. The full 137-clip bank includes `prism_cf_bin_m1_v10`,
+whose smoothed world-z range is only 0.000536227 m and whose maximum rise above
+its initial height is zero. This anomaly was reported; no clip was filtered
+and no replacement lift/contact label was fabricated.
+
+The new generation is fresh actor-only initialization from box/23K, not resume
+of the superseded jobs. Critic, optimizers, iteration and run identity are
+fresh. Formal startup acceptance is recorded separately in
+`formal_start_acceptance.json`; a launch request alone is not acceptance.
+
+All eight formal jobs passed independent live acceptance at
+2026-09-18 21:02:48 UTC. In table order, completed updates were
+114 / 81 / 89 / 63 / 69 / 52 / 47 / 29. Fresh W&B state was `running` for all
+eight, with finite loss/reward, correct PPO/BC weights, eight distinct GPU
+workers per job, zero volatile uncorrected ECC, clean exact-commit source,
+and no fatal rank-log entries. All non-factor scientific settings matched
+across arms; each old/new comparison permitted only the declared data/contact
+paths, three depth meshes and explicit initializer migration identity.
+
+Acceptance SHA256:
+`8b2bb42932b6c205e9fe1e9d02bb1ef1b9466a687126b3aa4c04d144ef2c9707`.
+The controller-only audit was corrected to respect the existing pure-RL
+provenance schema: offline producer identity is bound through the immutable
+campaign and data manifests, not the distillation-only top-level generator
+field. Worker environment, producer SHA and both bank manifests were also
+verified. No live code/configuration was changed for this correction.
+The first formal 500-update upload boundary had not yet been reached; this
+acceptance is not a claim of its remote upload or of learning quality.
