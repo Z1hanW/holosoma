@@ -23,8 +23,11 @@ INIT_SHA = "e9de2954556f7f39c98cc5e90de2e28550dad4ba656c986280918c929af1256d"
 TEACHER_SHA = "14e644323b8e6a7b769dbf641d9f625bee895742b7064368b55afd0710a0d665"
 INIT = f"/data/holosoma_checkpoint_cache/zihanw22_boxer_d9m3z369-recovered/by-sha256/{INIT_SHA}.pt"
 TEACHER = f"/data/holosoma_checkpoint_cache/zihanw22_carry-any_ch2ckwzw/by-sha256/{TEACHER_SHA}.pt"
-BANK = "/data/holosoma_inputs/ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1/by-source/95e5a54bb1e429874af7a93bfb6bb902b5fc9bd7564eab481d3bce5cd01c0303"
-CONTACT = "/data/holosoma_inputs/ch2ckwzw_model13000_rollout137_contact_sidecars_20260828/by-source/506050566c020febc0308048d819a411b1b5263cbfab9ef3c73cd8d0c7d3aab4"
+BANK = "/data/holosoma_inputs/ch2ckwzw_model40000_rollout137_precomputed_turn_forward_v1/by-source/7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc"
+BANK_MANIFEST_SHA = "1047c5c3a2aba297127683054d9d0cea33fda43ea171b964e7ab9cb6c5b150e7"
+BANK_SOURCE_DIGEST = "39826c72c99c0d5544b5a434484c9beee302e9e681736cfc8daabb1ffbdf1d26"
+CONTACT = "/data/holosoma_inputs/ch2ckwzw_model40000_rollout137_contact_sidecars_20260918/by-source/d30629f57051d22c1dd0ead6578992743e098d1e1534c0a6808e9c4328ddc5e1"
+CONTACT_MANIFEST_SHA = "3ec7cb432e67365097e45902739656fa4d878f3f4803df2bf98de42fe506496b"
 REGIONS = ["left_wrist", "right_wrist", "left_elbow", "right_elbow", "left_wrist_roll", "right_wrist_roll", "left_wrist_pitch", "right_wrist_pitch", "torso"]
 ARMS = tuple(f"{regime}-{contact}+{sampling}" for regime in ("rl", "mix")
              for contact in ("nocontact", "contact") for sampling in ("uniform", "adaptive"))
@@ -72,7 +75,7 @@ def training_args(arm, mode, persist, run_id=None):
     overrides = {
         "training.name": arm,
         "training.num-envs": 8 * 2048,
-        "training.policy-init-actor-contract-migration": "box_tracking_to_precomputed_peak_height_drop_exclusive_v1",
+        "training.policy-init-actor-contract-migration": "box_tracking_to_precomputed_peak_height_sw_depth_mesh_v1",
         "algo.config.distill.enabled": mix,
         "algo.config.num-learning-iterations": 40000 if mode == "formal" else 2,
         "algo.config.save-interval": 500 if mode == "formal" else 2,
@@ -126,7 +129,7 @@ def training_args(arm, mode, persist, run_id=None):
 def definition(arm):
     args = training_args(arm, "canary", "/canonical")
     return {"arm": arm, "cli": args, "initializer_sha256": INIT_SHA,
-            "offline_producer": "ch2ckwzw/model_13000.pt", "label_teacher_sha256": TEACHER_SHA if arm_flags(arm)[0] else None}
+            "offline_producer": "ch2ckwzw/model_40000.pt", "label_teacher_sha256": TEACHER_SHA if arm_flags(arm)[0] else None}
 
 
 def gpu_health():
@@ -197,7 +200,7 @@ def worker_environment(campaign, arm, mode, work, verification):
         "HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES": "True", "HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH": "1",
         "CONTACT_EXPORT_ROOT": CONTACT, "CONTACT_SIDECAR_MODE": "runtime-intervals",
         "REQUIRE_MOTION_GENERATOR_TEACHER_MATCH": "0",
-        "HOLOSOMA_EXTERNAL_AS_MOTION_GENERATOR_TEACHER_SHA256": "78bd1ad6143edf93a50e2f58a366c64729bc575d8364a25c78af76e933e7f1f4",
+        "HOLOSOMA_EXTERNAL_AS_MOTION_GENERATOR_TEACHER_SHA256": TEACHER_SHA,
         "WANDB_DIR": str(work / "wandb"), "WANDB_ENTITY": "zihanw22", "WANDB_CONSOLE": "off",
         "WANDB_MODE": "online" if mode == "formal" else "disabled", "HOLOSOMA_REQUIRE_WANDB_RUN": "1" if mode == "formal" else "0",
     })
@@ -257,7 +260,8 @@ def worker(campaign_path, arm, mode):
     provenance = json.loads(run(provenance_args, env=env))
     provenance["factorial_experiment"] = {"arm": arm, "definition_sha256": campaign["definitions"][arm],
         "campaign_sha256": sha(campaign_path), "source": campaign["source"], "node_git_verification": json.loads(verification.read_text()),
-        "offline_producer": "ch2ckwzw/model_13000.pt", "online_teacher": "ch2ckwzw/model_40000.pt" if mix else None}
+        "offline_producer": "ch2ckwzw/model_40000.pt", "online_teacher": "ch2ckwzw/model_40000.pt" if mix else None,
+        "depth_mesh_reference_git": "df701cff64bd698e130d9533ceb47a3825d87e14"}
     if formal:
         provenance["factorial_experiment"]["formal_contract_sha256"] = sha(Path(campaign["persist"]) / arm / "run_contract.json")
     env["HOLOSOMA_TRAINING_PROVENANCE"] = json.dumps(provenance, sort_keys=True, separators=(",", ":"))

@@ -1,5 +1,6 @@
 """Factor isolation and launch identity for the eight independent experiments."""
 import importlib.util
+import ast
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,15 @@ def test_exact_experiment_contract(arm):
     assert args[EXP.MOTION_PREFIX + "uniform-t1-window-sampling-enabled"] == "False"
     assert args[EXP.MOTION_PREFIX + "clip-weighting-strategy"] == "uniform_clip"
     assert args[EXP.MOTION_PREFIX + "contact-aware-button-window-mode"] == "peak_height"
+    assert args["training.policy-init-actor-contract-migration"] == "box_tracking_to_precomputed_peak_height_sw_depth_mesh_v1"
+    meshes = ast.literal_eval(args["perception.camera-mesh-file-map"])
+    assert meshes["pelvis"] == "pelvis.STL"
+    assert meshes["left_wrist_yaw_link"] == "combined_left_wrist_rubberhand.STL"
+    assert meshes["right_wrist_yaw_link"] == "combined_right_wrist_rubberhand.STL"
+    assert len(meshes) == 29
+    assert "ch2ckwzw_model40000_rollout137_precomputed" in args[EXP.MOTION_PREFIX + "motion-file"]
+    assert "ch2ckwzw_model40000_rollout137_contact" in args["reward.terms.offline-contact-guidance.params.contact-export-root"]
+    assert args[EXP.MOTION_PREFIX + "contact-aware-sparse-root-command-mode"] == "precomputed_turn_then_forward"
     if mix:
         assert args["algo.config.distill.policy-to-clone"] == EXP.TEACHER
         assert args["algo.config.distill.ppo-start-coeff"] == "0.01"
@@ -78,6 +88,7 @@ def test_single_node_communication(monkeypatch, tmp_path):
     assert env["HOLOSOMA_GLOO_GRAD_REDUCE"] == "1"
     assert env["HOLOSOMA_HIERARCHICAL_GRAD_REDUCE"] == "0"
     assert env["HOLOSOMA_HIERARCHICAL_GRAD_REDUCE_CPU_LEADER"] == "0"
+    assert env["HOLOSOMA_EXTERNAL_AS_MOTION_GENERATOR_TEACHER_SHA256"] == EXP.TEACHER_SHA
 
 
 @pytest.mark.parametrize("arm", EXP.ARMS)

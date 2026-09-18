@@ -16,6 +16,7 @@ import yaml
 
 import contact_sampling_factorial as exp
 from holosoma.agents.modules.modules import FarTrackingDepthSmallEncoder
+from holosoma.config_values.perception import WARP_SENSORS_G1_D435_MESH_FILE_MAP
 from holosoma.utils.checkpoint_validation import load_verified_torch_checkpoint
 
 
@@ -96,6 +97,7 @@ def accept(root, arm):
     require(perception["sensor_offset"] == [.01, .01, .44] and perception["camera_pitch_deg"] == 10., "Camera drift")
     require(perception["camera_mount_quat"] == [.00644801, .23350163, .00644801, .97231365], "Mount drift")
     require(perception["camera_warp_latency_frame"] == [3, 4], "Depth latency drift")
+    require(perception["camera_mesh_file_map"] == WARP_SENSORS_G1_D435_MESH_FILE_MAP, "SW depth mesh drift")
     initializer = json.loads((artifacts / "initializer_preflight.json").read_text())
     require(initializer["accepted"] and initializer["checkpoint_sha256"] == exp.INIT_SHA, "Invalid init preflight")
     require(initializer["source_vs_target_actor_max_abs_error"] == 0 and initializer["depth_encoder_trainable"], "Initializer is not exact")

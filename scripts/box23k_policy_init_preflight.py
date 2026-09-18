@@ -69,15 +69,19 @@ def main() -> None:
     manifest_bytes = (asset_root / "manifest.json").read_bytes()
     if hashlib.sha256(manifest_bytes).hexdigest() != binding["manifest_sha256"]:
         raise ValueError("Robot asset manifest SHA mismatch.")
-    for record in json.loads(manifest_bytes)["files"]:
+    asset_records = {record["path"]: record for record in json.loads(manifest_bytes)["files"]}
+    for record in asset_records.values():
         path = asset_root / record["path"]
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"Missing regular robot asset: {path}")
         if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
             raise ValueError(f"Robot asset changed: {path}")
-    for name in config.perception.camera_mesh_file_map.values():
-        if not (asset_root / "g1" / "meshes" / name).is_file():
+    depth_meshes = {}
+    for link, name in config.perception.camera_mesh_file_map.items():
+        relative = "g1/meshes/" + name
+        if relative not in asset_records or not (asset_root / relative).is_file():
             raise ValueError(f"Missing exact camera mesh; remapping is forbidden: {name}")
+        depth_meshes[link] = {"file": name, "sha256": asset_records[relative]["sha256"]}
 
     actor_cfg = config.algo.config.module_dict.actor
     dims = dict(zip(actor_cfg.input_dim, [3, 1, 90], strict=True))
@@ -124,6 +128,7 @@ def main() -> None:
         "checkpoint_sha256": checkpoint_sha, "source_vs_target_actor_max_abs_error": 0.0,
         "depth_encoder_trainable": True, "onnx_validation": parity,
         "robot_asset_binding": binding, "per_rank_config": config.to_serializable_dict(),
+        "effective_depth_meshes": depth_meshes,
     }
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(f"[INFO] box23k_initialization_preflight_ok checkpoint={checkpoint_sha} report={args.output}")

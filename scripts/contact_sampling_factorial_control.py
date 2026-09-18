@@ -32,8 +32,25 @@ def prepare(root):
     if (root / "campaign.json").exists():
         raise ValueError("Refusing to replace an existing campaign")
     bank, object_map = Path(exp.BANK), Path(exp.BANK) / "_clip_object_urdf_map.json"
-    if exp.sha(bank / "manifest.json") != "f162e31fa38a63ac679158184d8a9f4864e17ae83dd1f8e7aa001b9e64619487":
+    if exp.sha(bank / "manifest.json") != exp.BANK_MANIFEST_SHA:
         raise ValueError("Unexpected source command bank")
+    bank_manifest = json.loads((bank / "manifest.json").read_text())
+    contact_manifest_path = Path(exp.CONTACT) / "manifest.json"
+    if exp.sha(contact_manifest_path) != exp.CONTACT_MANIFEST_SHA:
+        raise ValueError("Unexpected contact generation")
+    contact_manifest = json.loads(contact_manifest_path.read_text())
+    if (contact_manifest["producer_checkpoint_sha256"] != exp.TEACHER_SHA
+            or contact_manifest["command_manifest_sha256"] != exp.BANK_MANIFEST_SHA
+            or bank_manifest["source_view_digest"] != exp.BANK_SOURCE_DIGEST):
+        raise ValueError("Contact, command and teacher producer identities differ")
+    for record in bank_manifest["generated_records"]:
+        path = bank / record["path"]
+        if exp.sha(path) != record["sha256"]:
+            raise ValueError(f"Command bank payload changed: {path}")
+    for record in contact_manifest["records"]:
+        path = Path(exp.CONTACT) / record["path"]
+        if exp.sha(path) != record["sha256"]:
+            raise ValueError(f"Contact payload changed: {path}")
     teacher_source = Path("/data/holosoma_training_audits/ch2_40k_rollout137_20260908/checkpoint/model_40000.pt")
     if exp.sha(teacher_source) != exp.TEACHER_SHA:
         raise ValueError("Teacher checksum mismatch")
@@ -91,10 +108,12 @@ def prepare(root):
         "nodes": {arm: {"alias": alias, "ip": ip, "az": "ap-northeast-2b" if ip.startswith("10.99.1.") else "ap-northeast-2a", "port": 36820 + index}
                   for index, (arm, (alias, ip)) in enumerate(zip(exp.ARMS, NODES, strict=True))},
         "dataset": {"bank": exp.BANK, "contact_root": exp.CONTACT, "clip_count": 137,
-                    "single_slot_source_digest": "42903c7e443ccd836af133700058b0772545efcbc5af11d3193b60f0ec72dddd",
+                    "single_slot_source_digest": exp.BANK_SOURCE_DIGEST,
                     "single_slot_view_digest": Path(exp.BANK).name, "shard_digest": shard_digest,
                     "shard_root": str(shard_root), "shard_manifest_sha256": exp.sha(shard_root / "manifest.json"),
-                    "rank_clip_counts": [s["clip_count"] for s in shard["shards"]]},
+                    "rank_clip_counts": [s["clip_count"] for s in shard["shards"]],
+                    "bank_manifest_sha256": exp.BANK_MANIFEST_SHA, "contact_manifest_sha256": exp.CONTACT_MANIFEST_SHA,
+                    "producer_checkpoint_sha256": exp.TEACHER_SHA, "command_mode": "precomputed_turn_then_forward"},
         "assets": assets,
     }
     exp.save(root / "campaign.json", campaign)

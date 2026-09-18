@@ -14,6 +14,7 @@ import torch
 from holosoma.utils.policy_init_preflight import (
     BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
     BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+    BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION,
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
     PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
@@ -885,6 +886,60 @@ def test_box_to_peak_height_migration_requires_new_profile(tmp_path):
     motion["contact_aware_peak_height_alpha"] = 0.8
     with pytest.raises(ValueError, match="residual actor semantic drift"):
         validate_policy_init_checkpoint(checkpoint, current)
+
+
+def _box_to_sw_depth_config_pair():
+    saved, current = _box_to_rollout_command_config_pair()
+    saved["perception"]["camera_mesh_file_map"] = {
+        "pelvis": "combined_pelvis.STL",
+        "left_wrist_yaw_link": "combined_left_wrist_spherehand.STL",
+        "right_wrist_yaw_link": "combined_right_wrist_spherehand.STL",
+        "left_knee_link": "left_knee_link.STL",
+    }
+    current["perception"]["camera_mesh_file_map"] = {
+        "pelvis": "pelvis.STL",
+        "left_wrist_yaw_link": "combined_left_wrist_rubberhand.STL",
+        "right_wrist_yaw_link": "combined_right_wrist_rubberhand.STL",
+        "left_knee_link": "left_knee_link.STL",
+    }
+    current["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]["contact_aware_button_window_mode"] = "peak_height"
+    current["training"]["policy_init_actor_contract_migration"] = BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION
+    return saved, current
+
+
+def test_box_to_sw_depth_requires_explicit_profile_and_keeps_weights(tmp_path):
+    saved, current = _box_to_sw_depth_config_pair()
+    checkpoint = _save(tmp_path, saved)
+    before = checkpoint.read_bytes()
+    validate_policy_init_checkpoint(checkpoint, current)
+    assert checkpoint.read_bytes() == before
+    current["training"]["policy_init_actor_contract_migration"] = BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION
+    with pytest.raises(ValueError, match="residual actor semantic drift"):
+        validate_policy_init_checkpoint(checkpoint, current)
+    current["training"].pop("policy_init_actor_contract_migration")
+    with pytest.raises(ValueError, match="actor semantic contract mismatch"):
+        validate_policy_init_checkpoint(checkpoint, current)
+
+
+@pytest.mark.parametrize("drift", ["wrong_source", "partial_switch", "missing_target", "other_mesh", "camera", "latency", "button"])
+def test_box_to_sw_depth_rejects_undeclared_drift(tmp_path, drift):
+    saved, current = _box_to_sw_depth_config_pair()
+    if drift == "wrong_source":
+        saved["perception"]["camera_mesh_file_map"]["pelvis"] = "pelvis.STL"
+    elif drift == "partial_switch":
+        current["perception"]["camera_mesh_file_map"]["left_wrist_yaw_link"] = "combined_left_wrist_spherehand.STL"
+    elif drift == "missing_target":
+        current["perception"]["camera_mesh_file_map"].pop("pelvis")
+    elif drift == "other_mesh":
+        current["perception"]["camera_mesh_file_map"]["left_knee_link"] = "replacement.STL"
+    elif drift == "camera":
+        current["perception"]["camera_pitch_deg"] = 47.6
+    elif drift == "latency":
+        current["perception"]["camera_warp_latency_frame"] = [0, 1]
+    else:
+        current["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]["contact_aware_button_window_mode"] = "kinematic_lift"
+    with pytest.raises(ValueError):
+        validate_policy_init_checkpoint(_save(tmp_path, saved), current)
 
 
 @pytest.mark.parametrize("drift", ["camera", "source_window", "target_window", "drop"])

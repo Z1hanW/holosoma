@@ -4,11 +4,24 @@ Eight independent one-node/eight-L40S jobs, 2048 environments per GPU:
 `rl-nocontact+uniform`, `rl-contact+uniform`, `rl-nocontact+adaptive`,
 `rl-contact+adaptive`, and the corresponding four `mix-` jobs.
 
-The shared baseline uses the ch2ckwzw/13K-generated 137-motion bank,
+The corrected shared baseline uses the ch2ckwzw/40K-generated 137-motion bank,
 box d9m3z369/23K actor initialization, a strict [512,256,128] actor and
 trainable native depth CNN, legacy torso camera mount plus 10 degrees,
 precomputed turn-then-forward commands and restored SW peak-height buttons.
-Drop zeros the root command. Existing jobs are not changed.
+Drop zeros the root command. This is a new experiment generation, not a hot
+change or exact resume of the initial 13K-data jobs.
+
+The user requested SW's May training robot depth geometry. The factorial
+launcher now explicitly selects `pelvis.STL` and
+`combined_{left,right}_wrist_rubberhand.STL`, while leaving the other 26 depth
+meshes and the entire robot physics asset package unchanged. All 29 selected
+mesh files were SHA256-compared with Git `df701cff64bd698e130d9533ceb47a3825d87e14`
+and matched. A new actor-init migration permits only these three mappings in
+addition to the already declared command/button/native-CNN metadata changes.
+It does not permit different camera extrinsics, preprocessing, latency, other
+meshes, actor topology, or robot control. No fallback is added. Current camera
+pose DR is deliberately unchanged; this is not complete historical observation
+distribution equivalence. Existing box profiles retain their old contracts.
 
 Positive contact guidance outer weight is 0 or 1. Its contact and wrist
 component weights are both 1. Collision penalties stay unchanged. Missing
@@ -22,8 +35,19 @@ Mix uses strict ch2ckwzw/model_40000.pt labels on student-controlled states,
 not teacher-controlled rollouts. PPO starts at 0.01, BC at 0.99; the existing
 nine-tier interpolation changes every 700 iterations and reaches 0.9/0.1
 at iteration 6300 (increments are 0.89/9, not exactly 0.1). The offline
-motion producer remains ch2/13K and is separately identified from the online
-ch2/40K label teacher. Pure RL never loads or calls the label teacher.
+motion producer and online label teacher are now both ch2/40K. Pure RL never
+loads or calls the label teacher. Contact points/intervals are from that exact
+40K collection, not the old 13K sidecars. The publication verifies all 137
+rollout-reference hashes and preserves all ten motion arrays while adding the
+precomputed command; all clips remain present, including failed rollouts.
+
+Command bank digest:
+`7a7433fe27a16f8bdb59276e62895692b4297e793466d1b2f871dd6c238d37dc`.
+Contact bank digest:
+`d30629f57051d22c1dd0ead6578992743e098d1e1534c0a6808e9c4328ddc5e1`.
+The 49183 command frames contain 16745 zero, 27230 forward and 5208 yaw phases;
+dy is zero and forward/yaw never overlap. Runtime pickup latch and drop-zero
+gating remain; commands are not recomputed from live robot tracking error.
 
 All arms target 40000 updates, saving and uploading atomic PT+ONNX pairs
 every 500 updates. No replay/video upload is a launch prerequisite.

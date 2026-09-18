@@ -49,6 +49,14 @@ BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION = (
 BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION = (
     "box_tracking_to_precomputed_peak_height_drop_exclusive_v1"
 )
+BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION = (
+    "box_tracking_to_precomputed_peak_height_sw_depth_mesh_v1"
+)
+_BOX_TO_SW_DEPTH_MESH_CHANGES = {
+    "pelvis": ("combined_pelvis.STL", "pelvis.STL"),
+    "left_wrist_yaw_link": ("combined_left_wrist_spherehand.STL", "combined_left_wrist_rubberhand.STL"),
+    "right_wrist_yaw_link": ("combined_right_wrist_spherehand.STL", "combined_right_wrist_rubberhand.STL"),
+}
 PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION = (
     "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
 )
@@ -810,6 +818,7 @@ def _actor_contract_migration_profile(
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
         BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
         BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION,
         *_PRECOMPUTED_TO_HMI_MIGRATIONS,
     }:
         raise ValueError(
@@ -825,7 +834,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
     *,
     profile: str,
 ) -> None:
-    """Accept one narrowly scoped, user-requested command-input migration.
+    """Accept one narrowly scoped, user-requested actor-input migration.
 
     The initialized actor keeps the exact tensor layout, observation producer,
     perception preprocessing, robot/action contract, and normalization.  Only
@@ -833,7 +842,9 @@ def _apply_explicit_policy_init_actor_contract_migration(
     tracking error to the immutable precomputed turn/forward schedule, while
     drop becomes exclusive. The explicit box profile also selects the kinematic
     pickup cue and corrects inert native-CNN metadata without changing weights
-    or trainability. Any additional drift remains fail-closed.
+    or trainability. The separately named SW-depth profile also changes exactly
+    three robot depth-mesh mappings; it is not observation equivalence or resume.
+    Any additional drift remains fail-closed.
     """
 
     if profile in _PRECOMPUTED_TO_HMI_MIGRATIONS:
@@ -847,6 +858,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
         BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
         BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION,
     }:
         raise AssertionError(f"Unhandled actor-contract migration profile: {profile!r}")
     saved_command = saved_contract.get("command_observation_semantics")
@@ -866,6 +878,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
     is_box_migration = profile in {
         BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
         BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION,
     }
     if is_box_migration:
         # Each explicit profile fixes one cue for every clip, never a fallback.
@@ -875,7 +888,10 @@ def _apply_explicit_policy_init_actor_contract_migration(
         )
         expected_target.update(
             contact_aware_button_window_mode=(
-                "peak_height" if profile == BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION
+                "peak_height" if profile in {
+                    BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+                    BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION,
+                }
                 else "kinematic_lift"
             ),
             contact_aware_carry_window_mode="peak_height",
@@ -916,6 +932,16 @@ def _apply_explicit_policy_init_actor_contract_migration(
                 if source.get(field) is not True or target.get(field) is not False:
                     raise ValueError(f"Box rollout migration requires native CNN {field}: true->false.")
                 corrected[field] = False
+    if profile == BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION:
+        source_meshes = _require_mapping(saved_contract["perception"].get("camera_mesh_file_map"), "source camera_mesh_file_map")
+        target_meshes = _require_mapping(current_contract["perception"].get("camera_mesh_file_map"), "target camera_mesh_file_map")
+        for link, (source_name, target_name) in _BOX_TO_SW_DEPTH_MESH_CHANGES.items():
+            if source_meshes.get(link) != source_name or target_meshes.get(link) != target_name:
+                raise ValueError(
+                    f"SW depth-mesh migration requires {link}: {source_name!r}->{target_name!r}; "
+                    f"got {source_meshes.get(link)!r}->{target_meshes.get(link)!r}."
+                )
+            migrated["perception"]["camera_mesh_file_map"][link] = target_name
     residual_differences = _diff(migrated, current_contract)
     if residual_differences:
         preview = "\n  - ".join(residual_differences[:30])
@@ -926,7 +952,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
         )
         raise ValueError(
             f"Policy-init migration {profile!r} permits only the declared root-command "
-            "mode, declared button/drop changes and native-CNN metadata correction; "
+            "mode, declared button/drop/depth-mesh changes and native-CNN metadata correction; "
             "residual actor semantic drift:\n  - "
             + preview
             + suffix
@@ -937,7 +963,8 @@ def _apply_explicit_policy_init_actor_contract_migration(
         "source_mode=tracking_error target_mode=precomputed_turn_then_forward "
         "source_drop_exclusive=false target_drop_exclusive=true "
         f"source_button_window={saved_command.get('contact_aware_button_window_mode')} "
-        f"target_button_window={current_command.get('contact_aware_button_window_mode')}",
+        f"target_button_window={current_command.get('contact_aware_button_window_mode')} "
+        f"sw_depth_mesh_migration={profile == BOX_TRACKING_TO_PEAK_SW_DEPTH_MIGRATION}",
         flush=True,
     )
 
