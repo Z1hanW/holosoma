@@ -241,6 +241,8 @@ def run_policy(config: InferenceConfig):
             sys.exit(1)
         finally:
             restore_terminal_settings()
+            if hasattr(policy, "close_deployment_audit"):
+                policy.close_deployment_audit()
     logger.info("Policy execution completed!")
 
 

@@ -2,6 +2,57 @@
 
 Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
+## Real-Robot Evidence Recording (2026-09-18)
+
+`real_drop.sh` and `real_depth.sh` now save
+bounded diagnostic evidence under each launch's `logs/.../evidence/` directory.
+This changes logging only: no camera/command/gain/action transformation is changed.
+It neither launches hardware automatically nor affects an already running process.
+The [May-versus-September review](docs/sim2real_may28_vs_sept17.md) distinguishes
+confirmed differences from hypotheses using only successful live-input attempts.
+The restored launcher had an undefined `checkpoint` log variable; that is now
+also the exact model argument, with `HOLOSOMA_REAL_MODEL_PATH` as an explicit
+override. Its historical default was not replaced. For CORL use
+`HOLOSOMA_REAL_MODEL_PATH=_ckps/swl41n4x_model_15500.onnx bash real_drop.sh`
+after separately starting the matching depth server and checking robot safety.
+
+- Policy: exact ONNX inputs, actions, requested joint targets, robot state, commands,
+  resolved gain levels and timestamps, every inference, at most6000 records (120s at50Hz).
+- Camera: lossless raw metric depth, current processed image and published delayed
+  image, intrinsics, frame number/timestamp domain and sensor age; every6 captures,
+  at most1800 records (5Hz for6min at30Hz). Start the camera shortly before testing.
+- `session.json` binds Git identity/dirty status, package versions, effective config
+  and ONNX SHA256/metadata; `model.onnx` preserves the exact checkpoint. `manifest.json` records written/dropped counts, limits
+  and errors. NPZ files contain numeric arrays, not lossy visualization PNGs.
+- Disk compression runs on a bounded background queue. Overflow/write errors are
+  explicit **incomplete evidence**, never an input fallback or a reason to change
+  robot commands. An unclosed manifest, including hard termination, is not a
+  complete recording. A record limit bounds the sampled window, not the whole run.
+- Recording uses extra CPU/disk; monitor RL FPS. To disable only diagnostic recording,
+  set `HOLOSOMA_DEPLOYMENT_AUDIT=0`. Sampling/limits are controlled by
+  `HOLOSOMA_AUDIT_{POLICY,DEPTH}_{EVERY,LIMIT}`. No W&B/video upload is involved.
+
+Offline comparison of a successful CORL attempt (no hardware interfaces are opened):
+
+```bash
+PYTHONPATH=src/holosoma python scripts/compare_real_depth_evidence.py \
+  --policy-evidence logs/real_drop_TIMESTAMP/evidence/policy_SESSION \
+  --depth-evidence logs/real_depth_TIMESTAMP/evidence/depth_SESSION \
+  --model _ckps/swl41n4x_model_15500.onnx --recorded-preprocess may28 \
+  --output outputs/depth_ablation.json
+```
+
+This requires same-checkpoint replay parity and exact matched, fresh raw frames.
+It excludes drop1/inactive rows and rejects unsupported depth profiles, wrong
+weights, stale/ambiguous matches or failed parity. The variants isolate May28,
+pre-Sept17 and current preprocessing. Reported action sensitivity is **not** a
+closed-loop success rate. Use `may28` for the restored branch, `pre_sept17` for
+pre-interpolation-change recordings, or `current` for the reviewed Sept17 path.
+This comparator targets legacy `real_d435i`, not the two-stage training-bound path.
+The remote rollback `1d9776bb` was preserved; removed launchers and newer depth
+behavior are not reintroduced by this logging patch.
+Physical torso-camera pose remains unverified by software logging.
+
 ## Features
 
 - **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)

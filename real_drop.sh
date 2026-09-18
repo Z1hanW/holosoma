@@ -5,9 +5,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
+checkpoint="${HOLOSOMA_REAL_MODEL_PATH:-_ckps/gjiefd3c_model_06500.onnx}"
 
 log_dir="${ROOT_DIR}/logs/real_drop_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
+if [[ "${HOLOSOMA_DEPLOYMENT_AUDIT:-1}" == "1" ]]; then
+  export HOLOSOMA_DEPLOYMENT_AUDIT_DIR="${log_dir}/evidence"
+else
+  unset HOLOSOMA_DEPLOYMENT_AUDIT_DIR
+fi
 exec > >(tee -a "${log_dir}/run.log") 2>&1
 
 echo "[real_drop] log_dir=${log_dir}"
@@ -24,7 +30,7 @@ HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-100000}"
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   inference:g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1 \
-  --task.model-path _ckps/gjiefd3c_model_06500.onnx \
+  --task.model-path "$checkpoint" \
   --task.use-joystick \
   --task.rl-rate 50 \
   --task.interface eth0

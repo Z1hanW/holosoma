@@ -1,4 +1,5 @@
 import time
+import os
 import threading
 import random
 from queue import Queue
@@ -372,6 +373,17 @@ class ImageServer:
 
         # Initialize camera wrapper
         self.camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
+        self._deployment_audit = None
+        if os.environ.get("HOLOSOMA_DEPLOYMENT_AUDIT_DIR") and cfg.camera_type == "realsense":
+            from holosoma.utils.deployment_audit import create_deployment_audit
+
+            self._deployment_audit = create_deployment_audit("depth", {
+                "image_server_config": cfg,
+                "cameras": {name: {"config": camera.config, "calibration": camera.calibration,
+                                    "depth_scale": camera.depth_scale}
+                            for name, camera in camera_wrapper.cameras.items()},
+                "training_depth_profile": None,
+            })
 
         # Initialize shared memory
         self._init_shared_memory()
@@ -559,10 +571,25 @@ class ImageServer:
             try:
                 # print(f"[Image Server] Current step count: {step_count}, delayed step count: {delayed_step_count}")
                 np.copyto(self.img_array, delayed_image)
+                published_at = time.monotonic()
             except Exception as e:
                 print(f"[Image Server] Failed to copy to shared memory: {e}")
                 continue
-                
+
+            if self._deployment_audit is not None:
+                self._deployment_audit.record(lambda: {
+                    "raw_depth": np.stack(list(all_frames[self.cfg.depth_source].values())),
+                    "processed_depth": full_depth_for_policy,
+                    "published_depth": delayed_image,
+                }, {
+                    "capture_step": step_count, "published_at_monotonic": published_at,
+                    "sampled_additional_delay_frames": current_latency,
+                    "legacy_total_latency_ms": total_latency_ms,
+                    "depth_shm_name": "depth_img_shm",
+                    "capture": {name: camera.last_capture_metadata
+                                for name, camera in self.camera_wrapper.cameras.items()},
+                })
+
             # 4. save and visualize images
             if self.cfg.save_images:
                 self.image_saver.save(
@@ -622,7 +649,15 @@ if __name__ == "__main__":
 
     # Create image server with parsed config
     image_server = ImageServer(camera_wrapper, cfg)
-    thread = threading.Thread(target=image_server.send_process)
+
+    def send_with_audit():
+        try:
+            image_server.send_process()
+        finally:
+            if image_server._deployment_audit is not None:
+                image_server._deployment_audit.close()
+
+    thread = threading.Thread(target=send_with_audit)
     thread.start()
     time.sleep(2)
     thread.join()

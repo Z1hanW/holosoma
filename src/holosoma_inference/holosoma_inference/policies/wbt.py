@@ -351,6 +351,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
         for prop in onnx_model.metadata_props:
             metadata[prop.key] = json.loads(prop.value)
 
+        self._deployment_audit = None
+        if os.environ.get("HOLOSOMA_DEPLOYMENT_AUDIT_DIR"):
+            from holosoma.utils.deployment_audit import create_deployment_audit, sha256_file
+
+            self._deployment_audit = create_deployment_audit("policy", {
+                "model_path": str(model_path), "model_sha256": sha256_file(model_path),
+                "onnx_input_names": self.onnx_input_names,
+                "onnx_output_names": self.onnx_output_names,
+                "onnx_metadata": metadata, "robot_config": self.config.robot,
+                "observation_config": self.config.observation, "camera_config": self.config.camera,
+                "task_config": self.config.task,
+                "semantics": "successful_inference_inputs_not_proof_of_task_success",
+            })
+
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
         self.pinocchio_robot = PinocchioRobot(self.config.robot, metadata["robot_urdf"])
@@ -1007,6 +1021,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self._depth_img_shm.buf)
             logger.info("[WBT] Depth shared memory attached: shape={}", expected_shape)
 
+        if getattr(self, "_deployment_audit", None) is not None:
+            self._audit_depth_read_monotonic = time.monotonic()
         flattened = self._depth_img_array.copy().reshape(1, -1).astype(np.float32, copy=False)
         expected_dim = self.obs_dims["cam_depth"]
         if flattened.shape[1] != expected_dim:
@@ -1048,6 +1064,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 return self.scaled_policy_action
             self._last_policy_inference_clock_ms = current_clock
 
+        audit = getattr(self, "_deployment_audit", None)
+        audit_started = time.monotonic() if audit is not None else None
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {}
         for name in self.onnx_input_names:
@@ -1075,6 +1093,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 logger.info("Using motion .npz joint_pos directly as MuJoCo q_target for diagnostic rollout.")
                 self._logged_motion_data_q_target = True
         self._write_policy_debug(input_feed, obs, policy_action, self.scaled_policy_action, robot_state_data)
+        if audit is not None:
+            self._record_deployment_evidence(input_feed, policy_action, robot_state_data, audit_started)
 
         # update motion timestep
         if self.motion_clip_progressing:
@@ -1083,6 +1103,35 @@ class WholeBodyTrackingPolicy(BasePolicy):
             else:
                 self.motion_timestep += 1
         return self.scaled_policy_action
+
+    def _record_deployment_evidence(self, input_feed, policy_action, robot_state_data, started):
+        # This is the requested policy target, not an acknowledgement from a motor.
+        # Logging never clips actions, clears buttons, or changes the depth path.
+        self._deployment_audit.record({
+            **{f"input__{name}": value for name, value in input_feed.items()},
+            "policy_action": policy_action, "scaled_policy_action": self.scaled_policy_action,
+            "requested_q_target": self.scaled_policy_action + self.default_dof_angles,
+            "robot_state": robot_state_data, "action_scales": self.policy_action_scales,
+            "motor_kp": np.asarray(self.robot_config.motor_kp) * self.interface.kp_level,
+            "motor_kd": np.asarray(self.robot_config.motor_kd) * self.interface.kd_level,
+            "manual_command": self._manual_sparse_root_command_offset,
+            "joystick_command": self._joystick_sparse_root_command_offset,
+        }, {
+            "inference_started_monotonic": started,
+            "inference_finished_monotonic": time.monotonic(),
+            "depth_read_monotonic": getattr(self, "_audit_depth_read_monotonic", None),
+            "drop_button": self._drop_button_command,
+            "use_policy_action": self.use_policy_action, "get_ready_state": self.get_ready_state,
+            "motion_clip_progressing": self.motion_clip_progressing,
+            "motion_frame_index": self._motion_frame_index(),
+            "depth_shm_name": "depth_img_shm",
+            "training_depth_profile": None,
+        })
+
+    def close_deployment_audit(self):
+        audit = getattr(self, "_deployment_audit", None)
+        if audit is not None:
+            audit.close()
 
     @staticmethod
     def _array_stats(value: np.ndarray) -> dict:
