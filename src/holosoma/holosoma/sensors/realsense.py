@@ -5,6 +5,7 @@ interchangeably with ImageServer.
 """
 
 import time
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -63,6 +64,7 @@ class RealSenseCamera:
 
         self.rs = rs
         self.config = config
+        self._audit_capture_timestamps = bool(os.environ.get("HOLOSOMA_DEPLOYMENT_AUDIT_DIR"))
         self._init_camera()
 
     def _init_camera(self):
@@ -233,13 +235,14 @@ class RealSenseCamera:
         frame_ts = depth_frame_raw.get_timestamp() if depth_frame_raw else None
         ts_domain = depth_frame_raw.get_frame_timestamp_domain() if depth_frame_raw else None
         # Observational only: do not enable timestamps or change camera options.
-        self.last_capture_metadata = {
-            "frame_number": depth_frame_raw.get_frame_number() if depth_frame_raw else None,
-            "sensor_timestamp_ms": frame_ts, "timestamp_domain": str(ts_domain),
-            "received_unix_ms": t_received, "received_monotonic": time.monotonic(),
-            "sensor_age_at_receive_ms": t_received - frame_ts
-            if frame_ts is not None and ts_domain == self.rs.timestamp_domain.global_time else None,
-        }
+        if self._audit_capture_timestamps:
+            self.last_capture_metadata = {
+                "frame_number": depth_frame_raw.get_frame_number() if depth_frame_raw else None,
+                "sensor_timestamp_ms": frame_ts, "timestamp_domain": str(ts_domain),
+                "received_unix_ms": t_received, "received_monotonic": time.monotonic(),
+                "sensor_age_at_receive_ms": t_received - frame_ts
+                if frame_ts is not None and ts_domain == self.rs.timestamp_domain.global_time else None,
+            }
 
         if self.align is not None:
             frames = self.align.process(frames)

@@ -571,7 +571,8 @@ class ImageServer:
             try:
                 # print(f"[Image Server] Current step count: {step_count}, delayed step count: {delayed_step_count}")
                 np.copyto(self.img_array, delayed_image)
-                published_at = time.monotonic()
+                if self._deployment_audit is not None:
+                    published_at = time.monotonic()
             except Exception as e:
                 print(f"[Image Server] Failed to copy to shared memory: {e}")
                 continue

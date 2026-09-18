@@ -1,5 +1,25 @@
 # CORL deployment review: May 28 versus September 17, 2026
 
+## User-Verified Baseline Update (September 18)
+
+The user reports that running SW with `c416c75a` restores good behavior. This is
+direct evidence of a deployment-version dependency and supersedes treating the
+old/new difference as merely a suspicion. It does not isolate which individual
+change caused the regression. Use the working revision as the compatibility
+target first; do not require more logs before honoring that result.
+
+The remote source had already been restored by `1d9776bb`. The follow-up fixes
+the remaining launcher mismatch (default gjiefd3c -> Git's SW/15500), disables
+the newly added high-frequency evidence recording by default, and locks actual
+depth/command/config behavior to c416 with regression tests. The diagnostic
+recorder and comparator remain explicitly available. No robot process is changed.
+The 32 native-depth probes through the real SW/15500 ONNX have exact equality
+of processed pixels and resulting actions against c416 in both hssim and
+hsinference. Camera/observation/robot/base-control/Unitree configuration files
+are byte-identical; command, drop and preprocessing methods have identical ASTs.
+This verifies the tested software behavior, not the physical setup or historical
+package versions. The import-only hsinference camera fix from adf2b0f7 is retained.
+
 ## Scope
 
 Historical baseline is `c416c75ac5bd09c3449336ba3de4b466874ff728`, the last
@@ -75,7 +95,7 @@ SW; all selected `real_d435i`. This mismatch is an identity/audit weakness, not
 proof that different physical extrinsics were applied: the real camera's mount
 is physical and the legacy pixel preset is the same for these models.
 
-## Hypothesis and limits
+## Historical Hypothesis Before User Feedback
 
 Highest-priority controlled test: same exact SW15500 weights + same recorded
 proprioception + same physical raw frame, changing only the historical/current

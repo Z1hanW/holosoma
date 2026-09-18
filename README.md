@@ -2,9 +2,33 @@
 
 Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
-## Real-Robot Evidence Recording (2026-09-18)
+## SW Known-Good Deployment (2026-09-18)
 
-`real_drop.sh` and `real_depth.sh` now save
+The user verified that SW performs well with commit
+`c416c75ac5bd09c3449336ba3de4b466874ff728`. That is now the behavior reference,
+not the September "training-aligned" depth changes. `real_drop.sh` defaults to
+that revision's `swl41n4x_model_15500.onnx`; an explicit `HOLOSOMA_REAL_MODEL_PATH`
+still selects another checkpoint, with no automatic substitution.
+
+Keep May's actual depth processing: native848x480, crop top16/left32/right32,
+effective bilinear resize to87x58, then clamp/normalize. Missing zero returns
+retain May's near-depth meaning. The extra queue is fixed3 frames, buffer4.
+Joystick, keyboard, drop handling, observations, gains and action mapping retain
+May behavior. Do not silently "fix" these operations for SW again. The camera
+preset remains torso XYZ [.01,.01,.44] and effective pitch36.9983 degrees.
+The recent optional-PyTorch import fix and hsinference camera environment remain;
+this is software behavior parity, not a claim that installed libraries/hardware
+are identical to the user's May deployment.
+
+The extra evidence recorder is now **off by default**, including its per-frame
+camera metadata. May's existing logs/image saver remain. Explicitly enable the
+recorder on both launchers only for a diagnostic capture. Regression tests in
+`tests/unit/test_sw_c416_compatibility.py` compare against the exact Git baseline
+and run the actual SW ONNX on equal depth/proprioception inputs.
+
+## Real-Robot Evidence Recording (Opt-In)
+
+With `HOLOSOMA_DEPLOYMENT_AUDIT=1`, `real_drop.sh` and `real_depth.sh` save
 bounded diagnostic evidence under each launch's `logs/.../evidence/` directory.
 This changes logging only: no camera/command/gain/action transformation is changed.
 It neither launches hardware automatically nor affects an already running process.
@@ -12,9 +36,8 @@ The [May-versus-September review](docs/sim2real_may28_vs_sept17.md) distinguishe
 confirmed differences from hypotheses using only successful live-input attempts.
 The restored launcher had an undefined `checkpoint` log variable; that is now
 also the exact model argument, with `HOLOSOMA_REAL_MODEL_PATH` as an explicit
-override. Its historical default was not replaced. For CORL use
-`HOLOSOMA_REAL_MODEL_PATH=_ckps/swl41n4x_model_15500.onnx bash real_drop.sh`
-after separately starting the matching depth server and checking robot safety.
+override. The default is now SW/15500 as described above. Start the matching
+depth server separately and check robot safety before activating the policy.
 
 - Policy: exact ONNX inputs, actions, requested joint targets, robot state, commands,
   resolved gain levels and timestamps, every inference, at most6000 records (120s at50Hz).
@@ -28,8 +51,8 @@ after separately starting the matching depth server and checking robot safety.
   explicit **incomplete evidence**, never an input fallback or a reason to change
   robot commands. An unclosed manifest, including hard termination, is not a
   complete recording. A record limit bounds the sampled window, not the whole run.
-- Recording uses extra CPU/disk; monitor RL FPS. To disable only diagnostic recording,
-  set `HOLOSOMA_DEPLOYMENT_AUDIT=0`. Sampling/limits are controlled by
+- Recording uses extra CPU/disk; monitor RL FPS. It is disabled by default;
+  set `HOLOSOMA_DEPLOYMENT_AUDIT=1` on both launchers to enable it. Sampling/limits are controlled by
   `HOLOSOMA_AUDIT_{POLICY,DEPTH}_{EVERY,LIMIT}`. No W&B/video upload is involved.
 
 Offline comparison of a successful CORL attempt (no hardware interfaces are opened):
