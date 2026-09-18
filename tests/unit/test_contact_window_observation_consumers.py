@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from holosoma.managers.command.terms.wbt import MotionCommand
 
 
@@ -30,10 +31,11 @@ def _command(*, root_mode: str, button_mode: str) -> MotionCommand:
     return command
 
 
-def test_precomputed_command_and_kinematic_buttons_do_not_consume_contact_windows() -> None:
+@pytest.mark.parametrize("button_mode", ["kinematic_lift", "peak_height"])
+def test_precomputed_command_and_height_buttons_do_not_consume_contact_windows(button_mode) -> None:
     command = _command(
         root_mode="precomputed_turn_then_forward",
-        button_mode="kinematic_lift",
+        button_mode=button_mode,
     )
     assert command._has_contact_window_observation_consumer() is False
 

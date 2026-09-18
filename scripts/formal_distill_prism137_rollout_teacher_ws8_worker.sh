@@ -317,7 +317,7 @@ sw_expected = {
     "uniform_t1_window_half_width_steps": 50,
     "uniform_t1_window_density_boost": 7.0,
     "command_mode": "precomputed_turn_then_forward",
-    "button_window_mode": "kinematic_lift",
+    "button_window_mode": "peak_height",
     "carry_window_mode": "peak_height",
 }
 for key, value in sw_expected.items():
@@ -371,7 +371,7 @@ export EXPORT_ONNX=True
 export RESUME_FROM_BOX=0 RESUME_FROM_PREVIOUS=0 WANDB_RESUME_SAME_RUN=0
 unset RESUME_TRAINING_CKPT RESUME_CHECKPOINT RESUME_CKPT POLICY_INIT_CKPT POLICY_INIT_CHECKPOINT
 export CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=precomputed_turn_then_forward
-export CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift
+export CONTACT_AWARE_BUTTON_WINDOW_MODE=peak_height
 export CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
 export ENABLE_DEFAULT_POSE_PREPEND=True DEFAULT_POSE_PREPEND_DURATION_S=0.2
 export ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0
@@ -472,7 +472,7 @@ fi
 if [[ ${MODE} == formal ]]; then EXTRA_ARGS+=(--logger.id="${RUN_ID}" --logger.resume=never); fi
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
-  echo "[INFO] worker_preflight_ok mode=${MODE} teacher_arm=${TEACHER_ARM} policy_profile=${POLICY_PROFILE} actor_hidden_dims=${STUDENT_ACTOR_HIDDEN_DIMS} critic_hidden_dims=${STUDENT_CRITIC_HIDDEN_DIMS} teacher=${TEACHER_SHA256} clips=137 encoder=${ENCODER_TYPE} actor_scalar=94 actor_total=126 ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward button=kinematic_lift sampling=uniform_clip_plus_uniform_t1_boost7_no_adaptive_failure_sampler contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
+  echo "[INFO] worker_preflight_ok mode=${MODE} teacher_arm=${TEACHER_ARM} policy_profile=${POLICY_PROFILE} actor_hidden_dims=${STUDENT_ACTOR_HIDDEN_DIMS} critic_hidden_dims=${STUDENT_CRITIC_HIDDEN_DIMS} teacher=${TEACHER_SHA256} clips=137 encoder=${ENCODER_TYPE} actor_scalar=94 actor_total=126 ppo=${PPO_START}->${PPO_TARGET} termination=${STUDENT_TERMINATION_PROFILE_VALUE} command=precomputed_turn_then_forward button=peak_height sampling=uniform_clip_plus_uniform_t1_boost7_no_adaptive_failure_sampler contact_profile=${CONTACT_PROFILE} positive_contact_reward=${POSITIVE_CONTACT_REWARD_VALUE} export_onnx=true"
   exit 0
 fi
 if [[ -n $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d') ]]; then

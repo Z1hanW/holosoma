@@ -233,11 +233,24 @@ def policy_uses_contact_window(metadata: Mapping[str, Any]) -> bool:
     groups = observation.get("groups") if isinstance(observation, Mapping) else None
     if not isinstance(actor_groups, (list, tuple)) or not isinstance(groups, Mapping):
         return False
+    motion_cfg = metadata.get("motion_config")
+    if not isinstance(motion_cfg, Mapping):
+        motion_cfg = experiment
+        for key in ("command", "setup_terms", "motion_command", "params", "motion_config"):
+            motion_cfg = motion_cfg.get(key, {}) if isinstance(motion_cfg, Mapping) else {}
+    if not isinstance(motion_cfg, Mapping):
+        motion_cfg = {}
     for group_name in actor_groups:
         group = groups.get(group_name)
         terms = group.get("terms") if isinstance(group, Mapping) else None
-        if isinstance(terms, Mapping) and CONTACT_WINDOW_OBSERVATION_TERMS.intersection(terms):
-            return True
+        if isinstance(terms, Mapping):
+            consumers = CONTACT_WINDOW_OBSERVATION_TERMS.intersection(terms)
+            if motion_cfg.get("contact_aware_button_window_mode") == "peak_height":
+                consumers -= {"pickup_button", "drop_button"}
+                if motion_cfg.get("contact_aware_sparse_root_command_mode") == "precomputed_turn_then_forward":
+                    consumers -= {"sparse_target_root_trajectory_command_contact_aware"}
+            if consumers:
+                return True
     return False
 
 

@@ -61,8 +61,8 @@ for wrapper in distill_as_dual_button.sh distill_as_dual_button_solid.sh; do
     TEACHER_OBS_KEYS=actor_obs_pickup_button \
     TEACHER_ACTOR_OBS_HISTORY_LENGTH=5 \
     /bin/bash "${wrapper}" >/dev/null
-  [[ "$(<"${capture}")" == kinematic_lift ]] ||
-    fail "${wrapper} did not force kinematic_lift"
+  [[ "$(<"${capture}")" == peak_height ]] ||
+    fail "${wrapper} did not force peak_height"
 
   mapfile -t captured_args <"${args_capture}"
   (( ${#captured_args[@]} >= ${#DUAL_HISTORY_GROUPS[@]} )) ||
@@ -88,7 +88,7 @@ for wrapper in distill_as_dual_button.sh distill_as_dual_button_solid.sh; do
   rm -f "${capture}"
   expect_failure \
     "${TMP_DIR}/${wrapper}.invalid.out" \
-    'requires CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift' \
+    'requires CONTACT_AWARE_BUTTON_WINDOW_MODE=peak_height' \
     env PATH="${TMP_DIR}/fake-bin:/usr/bin:/bin" BUTTON_MODE_CAPTURE="${capture}" \
       CONTACT_AWARE_BUTTON_WINDOW_MODE=contact_interval /bin/bash "${wrapper}"
   [[ ! -e "${capture}" ]] || fail "invalid ${wrapper} mode reached its parent"
@@ -132,7 +132,7 @@ chmod 700 "${TMP_DIR}/must-not-run"
 
 expect_failure \
   "${TMP_DIR}/invalid-env.out" \
-  'CONTACT_AWARE_BUTTON_WINDOW_MODE must be exactly contact_interval or kinematic_lift' \
+  'CONTACT_AWARE_BUTTON_WINDOW_MODE must be exactly contact_interval, kinematic_lift or peak_height' \
   env PYTHON_BIN="${TMP_DIR}/must-not-run" CONTACT_AWARE_BUTTON_WINDOW_MODE=KINEMATIC_LIFT \
     bash distill_box_perception.sh
 
@@ -147,9 +147,9 @@ expect_failure \
   '--command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode="${CONTACT_AWARE_BUTTON_WINDOW_MODE}"' \
   distill_box_perception.sh | wc -l)" == 1 ]] ||
   fail 'distill_box_perception.sh must emit exactly one button-window CLI value'
-grep -F 'CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-contact_interval}' \
+grep -F 'CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-peak_height}' \
   distill_box_perception.sh >/dev/null ||
-  fail 'distill_box_perception.sh lost the legacy contact_interval default'
+  fail 'distill_box_perception.sh lost the SW peak_height default'
 grep -F 'unset HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED' \
   distill_box_perception.sh >/dev/null ||
   fail 'distill_box_perception.sh must not leak its launcher-internal ownership marker to training'

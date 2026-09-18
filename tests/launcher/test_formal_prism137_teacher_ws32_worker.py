@@ -73,7 +73,7 @@ def test_box23k_preserves_initializer_and_legacy_camera(producer):
         "--perception.camera-warp-buffer-len=6",
         "--perception.camera-warp-hole-reference-batch-size=4096",
         "--perception.camera-apply-sensor-noise=False",
-        "--training.policy-init-actor-contract-migration=box_tracking_to_precomputed_kinematic_drop_exclusive_v1",
+        "--training.policy-init-actor-contract-migration=box_tracking_to_precomputed_peak_height_drop_exclusive_v1",
     ):
         assert flag in init_block
 
@@ -226,7 +226,7 @@ def test_worker_locks_formal_science_and_delivery_contract() -> None:
         "verify_formal_git_checkout.py",
         "ch2ckwzw_model13000_rollout137_precomputed_turn_forward_v1",
         "contact-aware-sparse-root-command-mode=precomputed_turn_then_forward",
-        "contact-aware-button-window-mode=kinematic_lift",
+        "contact-aware-button-window-mode=peak_height",
         "actor_obs_root_contact_aware",
         "actor_obs_drop_button",
         "actor_obs_proprio_with_actions_no_linvel",

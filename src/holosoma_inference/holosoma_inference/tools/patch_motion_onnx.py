@@ -26,9 +26,9 @@ from holosoma_inference.utils.contact_sidecar_contract import (
 from holosoma_inference.utils.button_window_contract import (
     EMBEDDED_BUTTON_WINDOW_CONTRACT_KEY,
     EMBEDDED_BUTTON_WINDOW_CONTRACT_SHA256_KEY,
-    build_kinematic_button_window_contract,
+    build_source_button_window_contract,
     embedded_button_window_contract_from_metadata,
-    kinematic_lift_window_from_rel_z_np,
+    height_button_window_from_motion_np,
     validated_contact_aware_button_window_mode,
 )
 from holosoma_inference.utils.embedded_motion_timeline import (
@@ -826,20 +826,20 @@ def patch_model(
     button_window_contract: dict[str, object] | None = None
     button_window_contract_sha256: str | None = None
     source_window: tuple[int, int] | None = None
-    if button_window_mode == "kinematic_lift":
+    if button_window_mode in {"kinematic_lift", "peak_height"}:
         if not motion_has_object:
             raise ValueError(
-                "Kinematic button-window mode requires an object trajectory in the "
+                "Height-derived button-window mode requires an object trajectory in the "
                 "selected motion; refusing to publish an artifact without a digest-bound "
                 "pickup/drop window."
             )
         object_pos_w = motion.get("object_pos_w")
         if object_pos_w is None:
             raise ValueError(
-                "Kinematic button-window mode requires object_pos_w in the selected motion."
+                "Height-derived button-window mode requires object_pos_w in the selected motion."
             )
-        source_window = kinematic_lift_window_from_rel_z_np(
-            np.asarray(object_pos_w[:, 2] - motion["root_pos_w"][:, 2], dtype=np.float32)
+        source_window = height_button_window_from_motion_np(
+            object_pos_w[:, 2], motion["root_pos_w"][:, 2], motion_cfg,
         )
     if apply_training_motion_transitions:
         _maybe_apply_training_motion_transitions(
@@ -853,14 +853,12 @@ def patch_model(
         applied_append_steps = append_steps if apply_training_motion_transitions else 0
         materialized_button_window: tuple[int, int] | None = None
         if str(transition_settings["source_semantics"]) == "single_clip_static":
-            materialized_button_window = kinematic_lift_window_from_rel_z_np(
-                np.asarray(
-                    motion["object_pos_w"][:, 2] - motion["root_pos_w"][:, 2],
-                    dtype=np.float32,
-                )
+            materialized_button_window = height_button_window_from_motion_np(
+                motion["object_pos_w"][:, 2], motion["root_pos_w"][:, 2], motion_cfg,
             )
         button_window_contract, button_window_contract_sha256 = (
-            build_kinematic_button_window_contract(
+            build_source_button_window_contract(
+                motion_config=motion_cfg,
                 clip_id=motion_path.stem,
                 source_motion_sha256=source_motion_sha256,
                 source_motion_size=len(motion_payload),

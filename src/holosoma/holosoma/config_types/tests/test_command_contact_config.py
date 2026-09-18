@@ -102,3 +102,15 @@ def test_drop_exclusive_root_command_is_explicit_and_legacy_safe():
 
     assert legacy.zero_root_command_when_drop_active is False
     assert enabled.zero_root_command_when_drop_active is True
+
+
+def test_new_object_training_presets_select_sw_peak_height_buttons():
+    from holosoma.config_values.wbt.g1 import command
+
+    for name, config in vars(command).items():
+        if name.startswith("motion_config_w_object") and isinstance(config, MotionConfig):
+            assert config.contact_aware_button_window_mode == "peak_height", name
+            assert config.contact_aware_peak_height_alpha == 0.91
+            assert config.contact_aware_peak_height_smoothing_steps == 5
+    # Missing fields in old serialized configurations retain their old meaning.
+    assert MotionConfig(**_BASE_MOTION_CONFIG).contact_aware_button_window_mode == "contact_interval"

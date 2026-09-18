@@ -5668,7 +5668,7 @@ class MotionCommand(CommandTermBase):
                         .lower()
                         .replace("-", "_")
                     )
-                    if button_mode == "kinematic_lift":
+                    if button_mode in {"kinematic_lift", "peak_height"}:
                         continue
                 return True
         return False
@@ -7931,15 +7931,15 @@ class MotionCommand(CommandTermBase):
             "contact_aware_button_window_mode",
             "contact_interval",
         )
-        if button_window_mode not in {"contact_interval", "kinematic_lift"}:
+        if button_window_mode not in {"contact_interval", "kinematic_lift", "peak_height"}:
             raise ValueError(
                 "Unsupported contact_aware_button_window_mode="
                 f"{button_window_mode!r}. Expected 'contact_interval' or "
-                "'kinematic_lift'."
+                "'kinematic_lift' or 'peak_height'."
             )
 
-        if button_window_mode == "kinematic_lift":
-            cache_name = "_contact_aware_button_window_by_clip_kinematic_lift_v1"
+        if button_window_mode in {"kinematic_lift", "peak_height"}:
+            cache_name = f"_contact_aware_button_window_by_clip_{button_window_mode}_v1"
             cached = getattr(self, cache_name, None)
             if cached is not None:
                 return cached
@@ -7961,17 +7961,29 @@ class MotionCommand(CommandTermBase):
                     if clip_length <= 0:
                         continue
                     clip_end = clip_start + clip_length
-                    rel_z = (
-                        object_pos_w[clip_start:clip_end, 2]
-                        - root_pos_w[clip_start:clip_end, 2]
-                    )
-                    lift_start, lift_end = _kinematic_lift_window_from_rel_z(
-                        rel_z,
-                        lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
-                        lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
-                        consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
-                        require_sustained_lift=True,
-                    )
+                    if button_window_mode == "peak_height":
+                        lift_start, lift_end = _contact_aware_carry_window_from_peak_height(
+                            object_pos_w[clip_start:clip_end, 2],
+                            peak_height_alpha=getattr(
+                                self.motion_cfg, "contact_aware_peak_height_alpha", 0.91
+                            ),
+                            smoothing_steps=getattr(
+                                self.motion_cfg, "contact_aware_peak_height_smoothing_steps", 5
+                            ),
+                            consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                        )
+                    else:
+                        rel_z = (
+                            object_pos_w[clip_start:clip_end, 2]
+                            - root_pos_w[clip_start:clip_end, 2]
+                        )
+                        lift_start, lift_end = _kinematic_lift_window_from_rel_z(
+                            rel_z,
+                            lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                            lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                            consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                            require_sustained_lift=True,
+                        )
                     result[clip_idx, 0] = lift_start
                     result[clip_idx, 1] = lift_end
             setattr(self, cache_name, result)
@@ -7997,11 +8009,11 @@ class MotionCommand(CommandTermBase):
             "contact_aware_button_window_mode",
             "contact_interval",
         )
-        if button_window_mode == "kinematic_lift" and not bool(
+        if button_window_mode in {"kinematic_lift", "peak_height"} and not bool(
             getattr(getattr(self, "motion", None), "has_object", False)
         ):
             raise ValueError(
-                "contact_aware_button_window_mode='kinematic_lift' requires a motion "
+                f"contact_aware_button_window_mode={button_window_mode!r} requires a motion "
                 "with an object trajectory; pickup/drop labels cannot be constant-zero fallbacks."
             )
 

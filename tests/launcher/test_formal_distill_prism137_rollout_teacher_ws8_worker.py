@@ -77,7 +77,7 @@ def test_worker_fixes_fair_student_and_no_contact_contract() -> None:
         "--allow-missing-offline-contact-targets",
         '--expected-valid-runtime-windows "${T1_VALID_WINDOW_CLIPS}"',
         "precomputed_turn_then_forward",
-        "CONTACT_AWARE_BUTTON_WINDOW_MODE=kinematic_lift",
+        "CONTACT_AWARE_BUTTON_WINDOW_MODE=peak_height",
         "CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height",
         "ENABLE_DEFAULT_POSE_PREPEND=True DEFAULT_POSE_PREPEND_DURATION_S=0.2",
         "ENABLE_DEFAULT_POSE_APPEND=True DEFAULT_POSE_APPEND_DURATION_S=2.0",

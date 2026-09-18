@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT / "src" / "holosoma"))
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--world-size", type=int, choices=(8, 32), default=32)
+    parser.add_argument("--allow-distillation", action="store_true")
     parser.add_argument("train_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     cli = args.train_args
@@ -39,12 +41,14 @@ def main() -> None:
 
     torch.set_num_threads(2)
     config = tyro.cli(AnnotatedExperimentConfig, args=cli, config=TYRO_CONIFG)
-    if config.training.num_envs != 32 * 2048:
-        raise ValueError("Box23K profile requires exactly 32 ranks x 2048 environments.")
+    if config.training.num_envs != args.world_size * 2048:
+        raise ValueError(f"Box23K profile requires exactly {args.world_size} ranks x 2048 environments.")
     config = dataclasses.replace(config, training=dataclasses.replace(config.training, num_envs=2048))
     config = apply_perception_overrides(apply_observation_overrides(config))
-    if not config.training.export_onnx or config.algo.config.distill.enabled:
-        raise ValueError("Box23K profile must be pure PPO with ONNX enabled.")
+    if not config.training.export_onnx:
+        raise ValueError("Box23K profile requires ONNX export.")
+    if config.algo.config.distill.enabled and not args.allow_distillation:
+        raise ValueError("Box23K distillation preflight requires explicit --allow-distillation.")
     if config.training.checkpoint is not None or config.training.stage4_init_checkpoint is not None:
         raise ValueError("Only actor initialization is permitted, not resume or actor-critic initialization.")
     # Match train_agent's pre-simulator asset closure, not the launch-time

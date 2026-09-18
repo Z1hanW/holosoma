@@ -46,6 +46,9 @@ TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION = (
 BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION = (
     "box_tracking_to_precomputed_kinematic_drop_exclusive_v1"
 )
+BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION = (
+    "box_tracking_to_precomputed_peak_height_drop_exclusive_v1"
+)
 PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION = (
     "precomputed_turn_then_forward_to_hmi_terminal_goal_unfreeze_native_depth_v1"
 )
@@ -328,14 +331,15 @@ def _contact_aware_command_contract(config: dict[str, Any], ordered_groups: list
         if not isinstance(button_window_mode, str) or button_window_mode not in {
             "contact_interval",
             "kinematic_lift",
+            "peak_height",
         }:
             raise ValueError(
                 "command.setup_terms.motion_command.params.motion_config."
                 "contact_aware_button_window_mode must be exactly "
-                f"'contact_interval' or 'kinematic_lift', got {button_window_mode!r}."
+                f"'contact_interval', 'kinematic_lift' or 'peak_height', got {button_window_mode!r}."
             )
         result["contact_aware_button_window_mode"] = button_window_mode
-    if carry_window_mode == "peak_height":
+    if carry_window_mode == "peak_height" or result.get("contact_aware_button_window_mode") == "peak_height":
         result["contact_aware_peak_height_alpha"] = _json_value(
             motion_config.get("contact_aware_peak_height_alpha", 0.91)
         )
@@ -805,6 +809,7 @@ def _actor_contract_migration_profile(
     if profile not in {
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
         BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
         *_PRECOMPUTED_TO_HMI_MIGRATIONS,
     }:
         raise ValueError(
@@ -841,6 +846,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
     if profile not in {
         TRACKING_TO_PRECOMPUTED_DROP_EXCLUSIVE_MIGRATION,
         BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
     }:
         raise AssertionError(f"Unhandled actor-contract migration profile: {profile!r}")
     saved_command = saved_contract.get("command_observation_semantics")
@@ -857,15 +863,21 @@ def _apply_explicit_policy_init_actor_contract_migration(
         "contact_aware_sparse_root_command_mode": "precomputed_turn_then_forward",
         "zero_root_command_when_drop_active": True,
     }
-    if profile == BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION:
-        # New rollout banks deliberately use the kinematic cue for every clip,
-        # not a per-clip fallback for absent physical-contact annotations.
+    is_box_migration = profile in {
+        BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
+        BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
+    }
+    if is_box_migration:
+        # Each explicit profile fixes one cue for every clip, never a fallback.
         expected_source.update(
             contact_aware_button_window_mode="contact_interval",
             contact_aware_carry_window_mode="peak_height",
         )
         expected_target.update(
-            contact_aware_button_window_mode="kinematic_lift",
+            contact_aware_button_window_mode=(
+                "peak_height" if profile == BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION
+                else "kinematic_lift"
+            ),
             contact_aware_carry_window_mode="peak_height",
         )
     for field, expected in expected_source.items():
@@ -885,7 +897,7 @@ def _apply_explicit_policy_init_actor_contract_migration(
     migrated_command = migrated["command_observation_semantics"]
     for field, value in expected_target.items():
         migrated_command[field] = value
-    if profile == BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION:
+    if is_box_migration:
         for contract in (saved_contract, current_contract):
             if contract["perception"].get("encoder_type") != "far_tracking_cnn_small":
                 raise ValueError("Box rollout migration requires the native small depth CNN.")

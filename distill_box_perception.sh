@@ -92,11 +92,11 @@ case "${ZERO_ROOT_COMMAND_WHEN_DROP_ACTIVE,,}" in
     ;;
 esac
 
-CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-contact_interval}
+CONTACT_AWARE_BUTTON_WINDOW_MODE=${CONTACT_AWARE_BUTTON_WINDOW_MODE:-peak_height}
 case "${CONTACT_AWARE_BUTTON_WINDOW_MODE}" in
-  contact_interval|kinematic_lift) ;;
+  contact_interval|kinematic_lift|peak_height) ;;
   *)
-    echo "[ERROR] CONTACT_AWARE_BUTTON_WINDOW_MODE must be exactly contact_interval or kinematic_lift. Got: ${CONTACT_AWARE_BUTTON_WINDOW_MODE}" >&2
+    echo "[ERROR] CONTACT_AWARE_BUTTON_WINDOW_MODE must be exactly contact_interval, kinematic_lift or peak_height. Got: ${CONTACT_AWARE_BUTTON_WINDOW_MODE}" >&2
     exit 2
     ;;
 esac

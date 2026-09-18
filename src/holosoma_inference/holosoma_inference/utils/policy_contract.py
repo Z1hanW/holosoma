@@ -58,10 +58,11 @@ def _validate_contact_aware_carry_window_metadata(motion_config: Mapping[str, An
     if not isinstance(button_mode, str) or button_mode not in {
         "contact_interval",
         "kinematic_lift",
+        "peak_height",
     }:
         raise PolicyContractError(
             f"Policy metadata field motion_config.{button_mode_key} must be exactly "
-            f"'contact_interval' or 'kinematic_lift', got {button_mode!r}."
+            f"'contact_interval', 'kinematic_lift' or 'peak_height', got {button_mode!r}."
         )
 
     mode_key = "contact_aware_carry_window_mode"

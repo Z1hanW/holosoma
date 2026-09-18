@@ -2,6 +2,32 @@
 
 Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
+## Pickup/Drop Labels For New Training (2026-09-18)
+
+New object-policy training uses the SW (`df701cff`) **world-height peak plateau**
+rule, selected explicitly by `contact_aware_button_window_mode=peak_height`.
+Do not substitute `contact_interval`: contact sidecars can override that mode.
+
+- Smooth source-motion object world-z with a centered, edge-padded 5-frame mean.
+- Threshold: `z_min + 0.91 * (z_max - z_min)` on the smoothed trace.
+- `t1` is the first sustained high interval; `t2` is the first sustained low
+  interval after the global height peak (5 consecutive frames, labeled at the
+  first frame). Pickup is 1 before `t1`; drop is 1 from `t2` onward.
+- This changes button labels only, not the root-command algorithm, rewards,
+  camera, data, or the manual drop override. Existing drop/root exclusivity
+  remains governed by the saved `zero_root_command_when_drop_active` setting.
+- Training, motion-patched ONNX artifacts, and native inference use the same
+  rule. Artifact contracts bind the mode, threshold, smoothing, source motion,
+  and prepend/append timeline. Sidecars cannot replace peak-height labels.
+- Never rewrite an existing checkpoint/run contract or hot-update a running
+  job. Explicit historical modes remain supported for reproduction; absent
+  fields in old serialized configs retain their legacy meaning. Changing a
+  checkpoint's button semantics is not an exact resume or automatic policy init.
+- Flat/no-lift source clips must be audited before a future launch, not silently
+  filtered or relabeled. `prism_cf_bin_m1_v10` in the ch2/40K rollout137 bank has
+  less than 1 mm of object-z variation; the historical rule labels its drop at
+  frame 1. This change does not modify that dataset or add a substitute rule.
+
 ## Features
 
 - **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)

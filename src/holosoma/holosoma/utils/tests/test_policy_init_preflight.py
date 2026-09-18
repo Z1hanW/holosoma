@@ -13,6 +13,7 @@ import torch
 
 from holosoma.utils.policy_init_preflight import (
     BOX_TRACKING_TO_KINEMATIC_PRECOMPUTED_MIGRATION,
+    BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION,
     ALLOW_LEGACY_UNVERIFIED_POLICY_LOAD_ENV,
     POLICY_INIT_REQUIRED_TERMINAL_TARGET_ENV,
     PRECOMPUTED_TO_HMI_TERMINAL_GOAL_MIGRATION,
@@ -867,6 +868,22 @@ def test_box_to_rollout_migration_is_explicit_and_preserves_actor_state(tmp_path
     assert checkpoint.read_bytes() == before
     current["training"].pop("policy_init_actor_contract_migration")
     with pytest.raises(ValueError, match="actor semantic contract mismatch"):
+        validate_policy_init_checkpoint(checkpoint, current)
+
+
+def test_box_to_peak_height_migration_requires_new_profile(tmp_path):
+    saved, current = _box_to_rollout_command_config_pair()
+    motion = current["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]
+    motion["contact_aware_button_window_mode"] = "peak_height"
+    checkpoint = _save(tmp_path, saved)
+    before = checkpoint.read_bytes()
+    with pytest.raises(ValueError, match="target contact_aware_button_window_mode"):
+        validate_policy_init_checkpoint(checkpoint, current)
+    current["training"]["policy_init_actor_contract_migration"] = BOX_TRACKING_TO_PEAK_PRECOMPUTED_MIGRATION
+    validate_policy_init_checkpoint(checkpoint, current)
+    assert checkpoint.read_bytes() == before
+    motion["contact_aware_peak_height_alpha"] = 0.8
+    with pytest.raises(ValueError, match="residual actor semantic drift"):
         validate_policy_init_checkpoint(checkpoint, current)
 
 

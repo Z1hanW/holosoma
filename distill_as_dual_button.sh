@@ -34,9 +34,9 @@ Examples:
   # this wrapper defaults to corl_128.
 
 Button convention:
-  t1/t2         = sustained kinematic-lift source window (object_z - root_z)
-  pickup_button = 1 before kinematic t1, 0 from t1 through clip end
-  drop_button   = 0 before kinematic t2, 1 from t2 through clip end
+  t1/t2         = SW object-world-height plateau (alpha=0.91, smoothing=5)
+  pickup_button = 1 before plateau t1, 0 from t1 through clip end
+  drop_button   = 0 before plateau t2, 1 from t2 through clip end
   Contact unions still drive adaptive sampling; root carry remains independent.
 
 Useful env vars:
@@ -206,7 +206,7 @@ export STUDENT_ACTOR_INPUTS
 export STUDENT_PROPRIO_HISTORY_LENGTH
 export CONTACT_AWARE_HISTORY AS_CONTACT_AWARE_HISTORY CONTACT_AWARE_HISTORY_LENGTH
 export HOLOSOMA_DUAL_BUTTON_HISTORY_CLI_OWNED
-readonly DUAL_BUTTON_WINDOW_MODE=kinematic_lift
+readonly DUAL_BUTTON_WINDOW_MODE=peak_height
 CONTACT_AWARE_BUTTON_WINDOW_MODE="${CONTACT_AWARE_BUTTON_WINDOW_MODE:-${DUAL_BUTTON_WINDOW_MODE}}"
 if [[ "${CONTACT_AWARE_BUTTON_WINDOW_MODE}" != "${DUAL_BUTTON_WINDOW_MODE}" ]]; then
   echo "[ERROR] Dual-button distillation requires CONTACT_AWARE_BUTTON_WINDOW_MODE=${DUAL_BUTTON_WINDOW_MODE}. Got: ${CONTACT_AWARE_BUTTON_WINDOW_MODE}" >&2
@@ -218,17 +218,17 @@ if [[ "${CORL_128}" == "1" ]]; then
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_corl128_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_corl128_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_corl128_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-CORL dual-button AS distill. Button t1/t2 are the sustained source-motion object_z-root_z kinematic-lift window: pickup is 1 before t1 and drop is 1 from t2. Independently, the all-region contact union reweights adaptive timestep sampling and the root carry window keeps its configured semantics (formal default peak_height). Start-at-zero is an explicit reset mixture; PPO starts at the configured iteration-0 coefficient.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-CORL dual-button AS distill. Button t1/t2 use the SW object-world-height peak plateau, independent of contact sidecars. Pickup is 1 before t1 and drop is 1 from t2. Contact unions remain adaptive-sampling data. Start-at-zero is an explicit reset mixture; PPO starts at the configured iteration-0 coefficient.}"
 elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use only the sustained source-motion object_z-root_z kinematic-lift window; contact unions remain adaptive-sampling data and the root carry window remains independently configured (formal default peak_height). Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use the SW object-world-height peak plateau, independent of contact sidecars. Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
 else
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_dual_button}"
   export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_dual_button_depth}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_sparse_root_ppo_first_contact_pickup_drop_button}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use only the sustained source-motion object_z-root_z kinematic-lift window; contact unions remain adaptive-sampling data and the root carry window remains independently configured (formal default peak_height). Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS perception distill with contact-aware sparse root plus pickup/drop inputs. Button t1/t2 use the SW object-world-height peak plateau, independent of contact sidecars. Data prep, camera randomization, and DAgger/PPO schedule are inherited from distill_as_button.sh.}"
 fi
 
 echo "[INFO] Launching AS/OMOMO dual-button perception distillation"

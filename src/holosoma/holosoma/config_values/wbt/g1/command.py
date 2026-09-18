@@ -53,6 +53,7 @@ motion_config_motion_tracking = replace(
 motion_config_w_object = replace(
     motion_config,
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
+    contact_aware_button_window_mode="peak_height",
 )
 
 motion_config_w_object_generalist = replace(

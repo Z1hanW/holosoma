@@ -479,7 +479,7 @@ def canonical_resume_manifest(
         motion_config.setdefault("contact_interval_runtime_prepend_compensation", False)
         # Missing is the exact legacy button-label contract.  Materializing
         # this default on both sides keeps old resumes valid while making any
-        # contact_interval -> kinematic_lift change a fail-closed semantic
+        # contact_interval -> kinematic_lift/peak_height change a fail-closed semantic
         # mismatch.
         motion_config.setdefault(
             "contact_aware_button_window_mode",

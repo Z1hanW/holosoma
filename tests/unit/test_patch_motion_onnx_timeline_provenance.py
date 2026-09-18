@@ -17,6 +17,7 @@ import scripts.compute_training_provenance as training_provenance_module
 from holosoma.managers.command.terms.wbt import (
     MotionCommand,
     MotionLoader,
+    _contact_aware_carry_window_from_peak_height,
     _kinematic_lift_window_from_rel_z,
 )
 from holosoma_inference.policies.base import BasePolicy
@@ -294,7 +295,7 @@ def fake_pinocchio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inference_wbt_module, "PinocchioRobot", _FakePinocchioRobot)
 
 
-def _native_training_static_button_window(motion_path: Path) -> tuple[int, int]:
+def _native_training_static_button_window(motion_path: Path, mode="kinematic_lift") -> tuple[int, int]:
     with np.load(motion_path, allow_pickle=False) as data:
         loader = object.__new__(MotionLoader)
         loader._joint_pos = torch.from_numpy(np.asarray(data["joint_pos"], dtype=np.float32))
@@ -314,6 +315,8 @@ def _native_training_static_button_window(motion_path: Path) -> tuple[int, int]:
     loader.clip_offsets = torch.tensor([0], dtype=torch.long)
     loader.clip_lengths = torch.tensor([loader._joint_pos.shape[0]], dtype=torch.long)
     loader.time_step_total = int(loader._joint_pos.shape[0])
+    loader._precomputed_root_command = None
+    loader._precomputed_root_command_phase = None
 
     command = object.__new__(MotionCommand)
     command.motion = loader
@@ -361,6 +364,8 @@ def _native_training_static_button_window(motion_path: Path) -> tuple[int, int]:
         dtype=torch.float32,
         device=torch.device("cpu"),
     )
+    if mode == "peak_height":
+        return _contact_aware_carry_window_from_peak_height(loader._object_pos_w[:, 2])
     return _kinematic_lift_window_from_rel_z(
         loader._object_pos_w[:, 2] - loader._body_pos_w[:, 0, 2]
     )
@@ -391,18 +396,23 @@ def test_patch_default_materializes_and_authenticates_effective_timeline(
     assert contract["effective_append_steps"] == 0
 
 
-def test_single_static_kinematic_button_contract_matches_native_training_and_inference(
+@pytest.mark.parametrize("mode", ["kinematic_lift", "peak_height"])
+def test_single_static_button_contract_matches_native_training_and_inference(
     tmp_path: Path,
     fake_pinocchio: None,
+    mode: str,
 ) -> None:
     source = tmp_path / "source.onnx"
     motion = tmp_path / "clip.npz"
     output = tmp_path / "patched.onnx"
     metadata = _single_static_kinematic_metadata()
+    metadata["experiment_config"]["command"]["setup_terms"]["motion_command"]["params"]["motion_config"][
+        "contact_aware_button_window_mode"
+    ] = mode
     _write_source_model(source, metadata)
     source_rel_z = _write_kinematic_object_motion(motion)
 
-    expected_training_window = _native_training_static_button_window(motion)
+    expected_training_window = _native_training_static_button_window(motion, mode)
     patch_model(source, motion, output)
 
     patched_metadata = _metadata(onnx.load(output))
@@ -412,8 +422,11 @@ def test_single_static_kinematic_button_contract_matches_native_training_and_inf
         required=True,
     )
     assert contract is not None
+    assert contract["mode"] == mode
     assert contract["source_window"] == list(
         _kinematic_lift_window_from_rel_z(torch.from_numpy(source_rel_z.copy()))
+        if mode == "kinematic_lift" else
+        _contact_aware_carry_window_from_peak_height(torch.from_numpy(1.0 + source_rel_z))
     )
     assert contract["materialized_window"] == list(expected_training_window)
     assert contract["effective_prepend_steps"] == 10
@@ -447,7 +460,7 @@ def test_single_static_kinematic_button_contract_matches_native_training_and_inf
     ]["motion_command"]["params"]["motion_config"]
     policy._onnx_metadata = patched_metadata
 
-    assert policy._load_kinematic_button_window() == expected_training_window
+    assert policy._load_contact_aware_button_window(output) == expected_training_window
 
 
 def test_kinematic_button_patcher_rejects_motion_without_object_trajectory(

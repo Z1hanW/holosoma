@@ -329,12 +329,16 @@ class MotionConfig:
     contact_aware_button_window_mode: Literal[
         "contact_interval",
         "kinematic_lift",
+        "peak_height",
     ] = "contact_interval"
     """How automatic pickup/drop button transition labels are derived.
 
     ``contact_interval`` preserves the legacy exported-sidecar behavior.
     ``kinematic_lift`` uses the source motion's object-to-root relative-height
     trace and is deliberately independent of the root-command carry window.
+    ``peak_height`` restores the SW world-height plateau rule, without contact
+    sidecar overrides. New object-training presets select this explicitly;
+    the schema default stays legacy-compatible for saved configurations.
     """
 
     contact_aware_carry_window_mode: Literal["rel_z", "peak_height"] = "rel_z"

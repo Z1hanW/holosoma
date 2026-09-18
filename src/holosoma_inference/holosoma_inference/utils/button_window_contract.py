@@ -20,8 +20,9 @@ EMBEDDED_BUTTON_WINDOW_CONTRACT_SHA256_KEY = (
 EMBEDDED_BUTTON_WINDOW_CONTRACT_VERSION = 1
 
 CONTACT_AWARE_BUTTON_WINDOW_MODES = frozenset(
-    {"contact_interval", "kinematic_lift"}
+    {"contact_interval", "kinematic_lift", "peak_height"}
 )
+PEAK_HEIGHT_ALGORITHM = "object_world_z_peak_height_v1"
 KINEMATIC_LIFT_ALGORITHM = "object_root_rel_z_v1"
 KINEMATIC_LIFT_HEIGHT_THRESHOLD = 0.10
 KINEMATIC_LIFT_RATIO_THRESHOLD = 0.35
@@ -42,9 +43,77 @@ def validated_contact_aware_button_window_mode(
     if not isinstance(raw_mode, str) or raw_mode not in CONTACT_AWARE_BUTTON_WINDOW_MODES:
         raise ValueError(
             "motion_config.contact_aware_button_window_mode must be exactly "
-            f"'contact_interval' or 'kinematic_lift', got {raw_mode!r}."
+            f"'contact_interval', 'kinematic_lift' or 'peak_height', got {raw_mode!r}."
         )
     return raw_mode
+
+
+def height_button_algorithm_contract(motion_config: Mapping[str, object]) -> dict[str, object]:
+    mode = validated_contact_aware_button_window_mode(motion_config)
+    if mode == "kinematic_lift":
+        return {
+            "mode": mode,
+            "algorithm": KINEMATIC_LIFT_ALGORITHM,
+            "lift_height_threshold": KINEMATIC_LIFT_HEIGHT_THRESHOLD,
+            "lift_ratio_threshold": KINEMATIC_LIFT_RATIO_THRESHOLD,
+            "consecutive_steps": KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+        }
+    if mode != "peak_height":
+        raise ValueError("Height-derived button contracts require peak_height or kinematic_lift.")
+    alpha = motion_config.get("contact_aware_peak_height_alpha", 0.91)
+    smoothing = motion_config.get("contact_aware_peak_height_smoothing_steps", 5)
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, Real)
+        or not math.isfinite(float(alpha))
+        or not 0 <= alpha <= 1
+    ):
+        raise ValueError("Peak-height alpha must be finite and in [0, 1].")
+    if isinstance(smoothing, bool) or not isinstance(smoothing, Integral) or not 1 <= smoothing <= 4096:
+        raise ValueError("Peak-height smoothing_steps must be an integer in [1, 4096].")
+    return {
+        "mode": mode,
+        "algorithm": PEAK_HEIGHT_ALGORITHM,
+        "peak_height_alpha": float(alpha),
+        "smoothing_steps": int(smoothing),
+        "consecutive_steps": KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+    }
+
+
+def height_button_window_from_motion_np(
+    object_height: np.ndarray,
+    root_height: np.ndarray,
+    motion_config: Mapping[str, object],
+) -> tuple[int, int]:
+    """Mirror the source-clock training rule; peak height never reads sidecars."""
+    params = height_button_algorithm_contract(motion_config)
+    if params["mode"] == "kinematic_lift":
+        return kinematic_lift_window_from_rel_z_np(
+            np.asarray(object_height, dtype=np.float32) - np.asarray(root_height, dtype=np.float32)
+        )
+    values = np.asarray(object_height, dtype=np.float32)
+    if values.ndim != 1 or not np.all(np.isfinite(values)):
+        raise ValueError("Peak-height object trace must be finite and rank 1.")
+    if values.size == 0:
+        return 0, 0
+    smoothing = int(params["smoothing_steps"])
+    padded = np.pad(values, (smoothing // 2, smoothing - 1 - smoothing // 2), mode="edge")
+    height = np.convolve(padded, np.full(smoothing, np.float32(1.0 / smoothing)), mode="valid")
+    threshold = np.float32(
+        height.min() + np.float32(height.max() - height.min()) * np.float32(params["peak_height_alpha"])
+    )
+    high = height >= threshold
+    start = _first_sustained_true_index(high, KINEMATIC_LIFT_CONSECUTIVE_STEPS)
+    if start is None:
+        # Retain the exact SW rule for short plateaus, including flat traces.
+        indices = np.flatnonzero(high)
+        start = int(indices[0]) if indices.size else int(np.argmax(height))
+    end = _first_sustained_true_index_from(
+        ~high,
+        KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+        start_idx=min(int(np.argmax(height)) + 1, values.size),
+    )
+    return int(start), max(int(start), values.size if end is None else int(end))
 
 
 def _first_sustained_true_index(mask: np.ndarray, consecutive_steps: int) -> int | None:
@@ -162,7 +231,7 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
-def build_kinematic_button_window_contract(
+def build_source_button_window_contract(
     *,
     clip_id: str,
     source_motion_sha256: str,
@@ -175,6 +244,7 @@ def build_kinematic_button_window_contract(
     effective_prepend_steps: int,
     effective_append_steps: int,
     materialized_window: tuple[int, int] | None = None,
+    motion_config: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], str]:
     """Build the immutable integer window contract embedded by the patcher."""
 
@@ -193,11 +263,11 @@ def build_kinematic_button_window_contract(
         )
     contract: dict[str, object] = {
         "version": EMBEDDED_BUTTON_WINDOW_CONTRACT_VERSION,
-        "mode": "kinematic_lift",
-        "algorithm": KINEMATIC_LIFT_ALGORITHM,
-        "lift_height_threshold": KINEMATIC_LIFT_HEIGHT_THRESHOLD,
-        "lift_ratio_threshold": KINEMATIC_LIFT_RATIO_THRESHOLD,
-        "consecutive_steps": KINEMATIC_LIFT_CONSECUTIVE_STEPS,
+        **height_button_algorithm_contract(
+            {"contact_aware_button_window_mode": "kinematic_lift"}
+            if motion_config is None
+            else motion_config
+        ),
         "clip_id": str(clip_id),
         "source_motion_sha256": str(source_motion_sha256),
         "source_motion_size": int(source_motion_size),
@@ -219,6 +289,10 @@ def build_kinematic_button_window_contract(
     return contract, _sha256(contract)
 
 
+# Preserve the historical builder API and byte-identical kinematic contracts.
+build_kinematic_button_window_contract = build_source_button_window_contract
+
+
 def _validate_window(
     value: object,
     *,
@@ -238,13 +312,16 @@ def _validate_window(
 
 
 def _validate_contract(contract: Mapping[str, object]) -> dict[str, object]:
+    mode = contract.get("mode")
+    algorithm_config = {"contact_aware_button_window_mode": mode}
+    if mode == "peak_height":
+        algorithm_config.update(
+            contact_aware_peak_height_alpha=contract.get("peak_height_alpha"),
+            contact_aware_peak_height_smoothing_steps=contract.get("smoothing_steps"),
+        )
+    algorithm = height_button_algorithm_contract(algorithm_config)
     expected_keys = {
         "version",
-        "mode",
-        "algorithm",
-        "lift_height_threshold",
-        "lift_ratio_threshold",
-        "consecutive_steps",
         "clip_id",
         "source_motion_sha256",
         "source_motion_size",
@@ -256,7 +333,7 @@ def _validate_contract(contract: Mapping[str, object]) -> dict[str, object]:
         "effective_prepend_steps",
         "effective_append_steps",
         "materialized_window",
-    }
+    } | set(algorithm)
     if set(contract) != expected_keys:
         raise ValueError(
             "Embedded button-window contract keys are not canonical: "
@@ -269,26 +346,13 @@ def _validate_contract(contract: Mapping[str, object]) -> dict[str, object]:
         or int(version) != EMBEDDED_BUTTON_WINDOW_CONTRACT_VERSION
     ):
         raise ValueError("Unsupported embedded button-window contract version.")
-    if contract["mode"] != "kinematic_lift":
-        raise ValueError("Embedded button-window contract mode must be 'kinematic_lift'.")
-    if contract["algorithm"] != KINEMATIC_LIFT_ALGORITHM:
+    if contract["algorithm"] != algorithm["algorithm"]:
         raise ValueError("Unsupported embedded button-window algorithm.")
-    height_threshold = contract["lift_height_threshold"]
-    if (
-        isinstance(height_threshold, bool)
-        or not isinstance(height_threshold, Real)
-        or not math.isfinite(float(height_threshold))
-        or float(height_threshold) != KINEMATIC_LIFT_HEIGHT_THRESHOLD
-    ):
-        raise ValueError("Embedded button-window lift-height threshold changed.")
-    ratio_threshold = contract["lift_ratio_threshold"]
-    if (
-        isinstance(ratio_threshold, bool)
-        or not isinstance(ratio_threshold, Real)
-        or not math.isfinite(float(ratio_threshold))
-        or float(ratio_threshold) != KINEMATIC_LIFT_RATIO_THRESHOLD
-    ):
-        raise ValueError("Embedded button-window lift-ratio threshold changed.")
+    if mode == "kinematic_lift":
+        for key in ("lift_height_threshold", "lift_ratio_threshold"):
+            value = contract[key]
+            if isinstance(value, bool) or not isinstance(value, Real) or value != algorithm[key]:
+                raise ValueError(f"Embedded button-window {key} changed.")
     consecutive_steps = contract["consecutive_steps"]
     if (
         isinstance(consecutive_steps, bool)

@@ -1121,7 +1121,8 @@ def test_resume_treats_missing_legacy_contact_compensation_as_false(tmp_path):
         )
 
 
-def test_resume_treats_missing_legacy_button_window_mode_as_contact_interval(tmp_path):
+@pytest.mark.parametrize("new_mode", ["kinematic_lift", "peak_height"])
+def test_resume_treats_missing_legacy_button_window_mode_as_contact_interval(tmp_path, new_mode):
     saved = _config()
     saved["command"] = {
         "setup_terms": {"motion_command": {"params": {"motion_config": {}}}}
@@ -1140,7 +1141,7 @@ def test_resume_treats_missing_legacy_button_window_mode_as_contact_interval(tmp
         allow_fresh_curriculum=False,
     )
 
-    motion_config["contact_aware_button_window_mode"] = "kinematic_lift"
+    motion_config["contact_aware_button_window_mode"] = new_mode
     with pytest.raises(ValueError, match="contact_aware_button_window_mode"):
         validate_resume_checkpoint(
             checkpoint,

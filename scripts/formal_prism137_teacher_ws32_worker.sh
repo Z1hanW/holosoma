@@ -636,7 +636,7 @@ TRAIN_ARGS=(
 if [[ ${POLICY_ARCH} == command_student_* ]]; then
   TRAIN_ARGS+=(
     --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode=precomputed_turn_then_forward
-    --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode=kinematic_lift
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-button-window-mode=peak_height
     --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode=peak_height
     --termination.terms.bad_tracking.params.bad-ref-pos-threshold=1.5
     --termination.terms.bad_tracking.params.bad-ref-ori-threshold=1.65
@@ -663,7 +663,7 @@ if [[ ${POLICY_ARCH} == command_student_box23k ]]; then
   # The explicit migration changes only command values in the existing slots.
   TRAIN_ARGS+=(
     --training.policy-init-checkpoint="${POLICY_INIT_PATH}"
-    --training.policy-init-actor-contract-migration=box_tracking_to_precomputed_kinematic_drop_exclusive_v1
+    --training.policy-init-actor-contract-migration=box_tracking_to_precomputed_peak_height_drop_exclusive_v1
     --perception.camera-body-name=torso_link
     --perception.camera-width=106
     --perception.camera-height=60
@@ -750,7 +750,7 @@ echo "[INFO] ablation_profile=${ABLATION_PROFILE} initial_dof_pos_noise_rad=${IN
 
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   if [[ ${POLICY_ARCH} == command_student_* ]]; then
-    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} sampling_profile=${SAMPLING_PROFILE} startzero=${START_AT_ZERO_PROB}->${START_AT_ZERO_PROB_END}@${CURRICULUM_END_ITER} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=kinematic_lift contact_reward=false max_episode_s=10 export_onnx=true"
+    echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} sampling_profile=${SAMPLING_PROFILE} startzero=${START_AT_ZERO_PROB}->${START_AT_ZERO_PROB_END}@${CURRICULUM_END_ITER} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor_scalar=94 actor_total=126 critic=377 pure_ppo=true command=precomputed_turn_then_forward button=peak_height contact_reward=false max_episode_s=10 export_onnx=true"
   else
     echo "[INFO] worker_preflight_ok mode=${MODE} policy_arch=${POLICY_ARCH} node_rank=${NODE_RANK} world_size=32 envs_per_rank=2048 global_envs=65536 clips=137 actor=178 critic=310 pure_ppo=true tracking_error=true contact=false max_episode_s=10 export_onnx=true"
   fi

@@ -26,7 +26,8 @@ from holosoma_inference.utils.button_window_contract import (
     KINEMATIC_LIFT_HEIGHT_THRESHOLD,
     KINEMATIC_LIFT_RATIO_THRESHOLD,
     embedded_button_window_contract_from_metadata,
-    kinematic_lift_window_from_rel_z_np,
+    height_button_algorithm_contract,
+    height_button_window_from_motion_np,
     validated_contact_aware_button_window_mode,
 )
 from holosoma_inference.utils.contact_sidecar_contract import (
@@ -2503,23 +2504,31 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return None
 
     def _load_kinematic_button_window(self) -> tuple[int, int]:
-        """Load and independently recompute the digest-bound kinematic window."""
+        return self._load_height_button_window("kinematic_lift")
+
+    def _load_height_button_window(self, mode: str) -> tuple[int, int]:
+        """Authenticate and recompute the selected source-height button rule."""
 
         metadata = getattr(self, "_onnx_metadata", {})
         contract = embedded_button_window_contract_from_metadata(metadata)
         if contract is None:
             raise RuntimeError(
-                "Kinematic-button policies require a digest-bound integer button-window "
+                "Height-button policies require a digest-bound integer button-window "
                 "contract; legacy/unpatched ONNX artifacts cannot authenticate the source "
                 "motion or pickup/drop transition frames. Re-run patch_motion_onnx."
             )
+        motion_cfg = dict(getattr(self, "_motion_cfg", None) or {})
+        motion_cfg["contact_aware_button_window_mode"] = mode
+        for key, expected in height_button_algorithm_contract(motion_cfg).items():
+            if contract.get(key) != expected:
+                raise RuntimeError(f"Embedded button-window {key} does not match active policy metadata.")
         if (
             self._motion_data is None
             or not self._motion_data.has_object
             or self._motion_data.object_pos_w is None
         ):
             raise RuntimeError(
-                "A digest-bound kinematic button-window contract requires an active "
+                "A digest-bound height button-window contract requires an active "
                 "motion with object_pos_w; the pickup/drop transitions cannot be verified."
             )
 
@@ -2539,12 +2548,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
             raise RuntimeError(
                 "Materialized inference timeline is too short for its declared source motion."
             )
-        source_rel_z = np.asarray(
-            motion_data.object_pos_w[source_offset:source_end, 2]
-            - motion_data.root_pos_w[source_offset:source_end, 2],
-            dtype=np.float32,
+        source_window = height_button_window_from_motion_np(
+            motion_data.object_pos_w[source_offset:source_end, 2],
+            motion_data.root_pos_w[source_offset:source_end, 2],
+            motion_cfg,
         )
-        source_window = kinematic_lift_window_from_rel_z_np(source_rel_z)
         materialized_append_steps = (
             int(motion_data.frame_count) - source_end
         )
@@ -2553,12 +2561,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "Materialized inference timeline has a negative append length."
             )
         if source_semantics == "single_clip_static":
-            materialized_rel_z = np.asarray(
-                motion_data.object_pos_w[:, 2] - motion_data.root_pos_w[:, 2],
-                dtype=np.float32,
-            )
-            materialized_window = kinematic_lift_window_from_rel_z_np(
-                materialized_rel_z
+            materialized_window = height_button_window_from_motion_np(
+                motion_data.object_pos_w[:, 2],
+                motion_data.root_pos_w[:, 2],
+                motion_cfg,
             )
         else:
             # Runtime-hold semantics keep the source t1 decision active over
@@ -2618,8 +2624,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "Embedded button-window materialized integers do not match runtime prepend mapping."
             )
         logger.info(
-            "Using digest-bound kinematic policy-button window: clip={} source=[{}, {}) "
+            "Using digest-bound {} policy-button window: clip={} source=[{}, {}) "
             "effective=[{}, {}) prepend_steps={}.",
+            mode,
             clip_id,
             source_window[0],
             source_window[1],
@@ -2644,7 +2651,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     "Legacy contact_interval metadata contains a stale kinematic button-window contract."
                 )
             return self._load_contact_interval_window(onnx_path)
-        return self._load_kinematic_button_window()
+        return self._load_height_button_window(mode)
 
     def setup_policy(self, model_path):
         self._perception_contract_sha256 = None

@@ -2,6 +2,28 @@
 
 仓库中较长的科学训练约束和实验交接记录位于 `agent.md`。涉及正式训练、resume、policy init、evaluation 或 W&B 生命周期时，先查阅其中对应章节，不得仅凭旧命令猜测实验契约。
 
+## 新训练固定使用 SW 高位平台 Button 标签
+
+2026-09-18 用户确认今后使用旧规则：新 object-policy 训练显式固定
+`contact_aware_button_window_mode=peak_height`，world-z 平滑5帧，
+`alpha=0.91`，连续5帧判定高位平台开始/结束；不得默认使用
+`kinematic_lift`，也不得用可被 contact sidecar 覆盖的 `contact_interval` 冒充旧规则。
+不改 root-command 算法、reward、camera 或数据，不热改运行任务。
+历史 checkpoint 的显式模式与缺省语义仍须原样复现；切换标签不属于 exact resume，
+不得绕过 policy-init/resume 契约检查。异常无抬升 clip 必须报告，不得静默过滤或 fallback。
+
+## 多机正式训练必须直接通过远端 Git 同步代码
+
+从 2026-08-18 起，任何新建、重启、resume 或迁移的多机 formal training 都必须让每个 node 从同一个远端 Git commit 获取执行代码；禁止再把 controller 当前 working tree（尤其是包含 uncommitted 或 untracked source 的目录）打包、rsync/scp 到其他 nodes 后作为训练 source：
+
+- 默认代码来源为 `origin/main`；若用户明确指定其他分支，则该分支也必须已经 push 到 `origin`。正式身份绑定的是不可移动的 full commit SHA，不得只绑定 `main`、branch name 或会继续移动的 tag。
+- 所需代码若尚未在远端，必须先 commit 并 push；在 commit 可由每个 node 独立 `git fetch origin` 获取之前，不得创建 W&B run、启动 tmux 或占用正式训练 GPU。
+- 每个 node 必须使用独立的 clean clone/worktree，执行 `git fetch` 后 checkout 同一 exact commit（推荐 detached HEAD）。启动前逐节点验证 `git rev-parse HEAD` 等于合同 SHA、commit 可从规定 remote ref 到达、tracked diff 为空、untracked source 为空；submodule 必须 checkout 到 Git 记录的 exact gitlink 且状态干净。任一节点不一致即 fail closed。
+- 禁止把 `SKIP_GIT_PULL=1`、无 `.git` 的 content-addressed snapshot，或 controller-local archive 当作未来多机训练的代码分发/执行机制。为了审计可以额外从 clean exact-commit checkout 生成 archive，但它只能作为证据；各训练 node 仍必须直接通过 Git 获取并验证代码。
+- Git 以外的数据、motion、URDF、mesh、teacher/checkpoint 等大资产继续使用各自 immutable digest/manifest；这些资产通道不得夹带或覆盖 Python、shell、config 等执行代码。
+- immutable run contract、W&B config、checkpoint pair manifest 和 completion marker 必须记录 remote URL、remote ref、full commit SHA、Git tree SHA、submodule SHAs，以及所有节点的逐机验证结果。不得把 W&B 自动记录的 `commit` 字段单独当成代码一致性证明。
+- 已经运行且由历史 local snapshot 启动的 run 不得热换代码；可按原 immutable contract 继续。但其任何后续 resume/restart/migration 都必须作为符合本规则的新 formal identity 处理。
+
 ## 正式训练启动不上传视频
 
 未来任何 formal training 的新建、重启、resume 或迁移都不得把 replay/video 录制、上传或远端 W&B media 验证作为启动门：
