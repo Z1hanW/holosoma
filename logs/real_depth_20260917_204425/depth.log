@@ -1,0 +1,22 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_204425
+[real_depth] behavior_reference=c416c75ac5bd09c3449336ba3de4b466874ff728
+Traceback (most recent call last):
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/image_server.py", line 639, in <module>
+    camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 342, in __init__
+    self.cameras = {
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 343, in <dictcomp>
+    name: RealSenseCamera(cfg) for name, cfg in config.terms.items()
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 68, in __init__
+    self._init_camera()
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 100, in _init_camera
+    profile = self.pipeline.start(rs_config)
+RuntimeError: 
+Failed to resolve the request: 
+	Format: Z16, width: 848, height: 480
+
+Into:
+	Formats: 
+	 Z16
+
+

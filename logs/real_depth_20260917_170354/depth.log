@@ -1,0 +1,25 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_170354
+[RealSense] IR emitter: off
+[RealSense] Intrinsics: fx=428.69, fy=428.69, cx=432.43, cy=245.91
+[RealSense] Initialized: serial=auto, resolution=848x480@30fps, depth_scale=0.001000
+[Image Server] Created new shared memory: depth_img_shm
+[Image Server] Shared memory: shape=[1, 1, 58, 87], dtype=<class 'numpy.float32'>
+ImageServer initialized
+[Image Saver] Initialized save images directory: /home/unitree/FAR/holosoma/logs/real_depth_20260917_170354/depth_images/20260917_170356
+[Image Saver] Saved calibration for cameras: ['d435i_depth']
+2026-09-17 17:03:56.927 | INFO     | holosoma.utils.rate:__init__:47 - Rate limiter initialized: 30 Hz (33.33 ms period)
+Exception in thread Thread-1 (send_process):
+Traceback (most recent call last):
+  File "/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+    self.run()
+  File "/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/lib/python3.10/threading.py", line 953, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/image_server.py", line 526, in send_process
+    all_frames: FrameBundle = dict(self.camera_wrapper.get_frames())
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 350, in get_frames
+    frame = camera.capture()
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/realsense.py", line 228, in capture
+    frames = self.pipeline.wait_for_frames()
+RuntimeError: Frame didn't arrive within 5000
+/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

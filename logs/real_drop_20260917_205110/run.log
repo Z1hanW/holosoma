@@ -1,0 +1,221 @@
+[real_drop] log_dir=/home/unitree/FAR/holosoma/logs/real_drop_20260917_205110
+[real_drop] checkpoint=_ckps/izz2f2df_model_11000.onnx
+[real_drop] behavior_reference=c416c75ac5bd09c3449336ba3de4b466874ff728
+[command_window] cannot open display: no display name and no $DISPLAY environment variable
+2026-09-17 20:51:14.309 | INFO     | __main__:run_policy:195 - Starting Policy with Tyro configuration...
+2026-09-17 20:51:14.309 | INFO     | __main__:run_policy:196 - Robot: g1_29dof
+2026-09-17 20:51:14.309 | INFO     | __main__:run_policy:197 - Observation groups: ['actor_obs_root_contact_aware', 'actor_obs_drop_button', 'actor_obs_proprio_with_actions_no_linvel', 'perception_obs']
+2026-09-17 20:51:14.309 | INFO     | __main__:run_policy:198 - RL Rate: 50.0 Hz
+2026-09-17 20:51:14.309 | INFO     | __main__:run_policy:199 - Model path: _ckps/izz2f2df_model_11000.onnx
+2026-09-17 20:51:14.310 | INFO     | __main__:run_policy:203 - Using WholeBodyTrackingPolicy
+2026-09-17 20:51:14.311 | INFO     | holosoma_inference.utils.clock:start:103 - Clock subscriber started, connecting to port 5555
+G1-HG type: 5
+UnitreeInterface initialized: G1-HG (29 motors, HG messages) on interface: eth0
+[DEBUG] LowCommandWriter - No motor command available!
+2026-09-17 20:51:14.460 | INFO     | holosoma_inference.policies.wbt:setup_policy:377 - Loaded KP/KD from ONNX metadata: izz2f2df_model_11000.onnx
+2026-09-17 20:51:14.461 | INFO     | holosoma_inference.policies.base:_set_policy_action_scales_from_metadata:478 - Using training-aligned per-joint action scales from ONNX metadata: base=0.25 final_min=0.074501 final_max=0.547547 final_mean=0.395021
+2026-09-17 20:51:14.461 | INFO     | holosoma_inference.policies.wbt:setup_policy:392 - Using external sparse-root command mode: command comes from zero/manual/joystick input; reference-motion outputs are not used.
+2026-09-17 20:51:14.462 | INFO     | holosoma_inference.policies.base:_resolve_control_gains:498 - Using KP/KD from config (override)
+2026-09-17 20:51:14.462 | INFO     | holosoma_inference.policies.base:_init_joystick_handler:345 - Using joystick
+2026-09-17 20:51:14.462 | INFO     | holosoma_inference.policies.wbt:__init__:230 - 
+⚠️  Ready to enter stiff hold mode
+2026-09-17 20:51:14.462 | INFO     | holosoma_inference.policies.wbt:__init__:231 - Press Enter to continue...
+self.interface_str: eth0
+2026-09-17 20:51:15.016 | INFO     | holosoma_inference.policies.wbt:__init__:234 - ✓ Entering stiff hold mode
+2026-09-17 20:51:15.016 | INFO     | __main__:run_policy:206 - Policy initialized successfully!
+2026-09-17 20:51:15.016 | INFO     | __main__:_print_control_guide:44 - ================================================================================
+2026-09-17 20:51:15.016 | INFO     | __main__:_print_control_guide:45 - POLICY CONTROLS
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:46 - ================================================================================
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:47 - 
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:50 - Using JOYSTICK control mode
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:51 - 
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:52 - General Controls:
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:53 -   A button       - Start the policy
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:54 -   B button       - Stop the policy
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:55 -   Y button       - Set robot to default pose
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:56 -   L1+R1 (LB+RB)  - Kill controller program
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:73 - 
+2026-09-17 20:51:15.017 | INFO     | __main__:_print_control_guide:74 - Whole-Body Tracking Controls:
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:75 -   Start button   - Start motion clip
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:77 -   X button       - Toggle drop button command
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:78 -   Left stick     - Relative sparse root XY command
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:79 -   Right stick X  - Relative sparse root yaw command
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:137 - 
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:138 - MuJoCo Simulator Controls (ONLY in MuJoCo window, NOT this terminal!):
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:139 -   7/8        - Decrease/increase elastic band length
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:140 -   9          - Toggle elastic band enable/disable
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:141 -   BACKSPACE  - Reset simulation
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:143 - 
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:144 - ================================================================================
+2026-09-17 20:51:15.018 | INFO     | __main__:_print_control_guide:145 - Press the appropriate button/key to begin!
+2026-09-17 20:51:15.019 | INFO     | __main__:_print_control_guide:146 - ================================================================================
+2026-09-17 20:51:15.019 | INFO     | __main__:_print_control_guide:147 - 
+2026-09-17 20:52:04.820 | INFO     | holosoma_inference.policies.base:_handle_start_policy:884 - Using policy actions
+2026-09-17 20:52:04.821 | INFO     | holosoma_inference.policies.wbt:_capture_robot_yaw_offset:1443 - Robot yaw offset captured at 118.5 deg
+2026-09-17 20:52:04.821 | INFO     | holosoma_inference.policies.wbt:_capture_motion_yaw_offset:1448 - Motion yaw offset captured at 0.0 deg
+2026-09-17 20:52:04.822 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:04.822 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:52:04.822 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:04.823 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:52:04.826 | INFO     | holosoma_inference.policies.wbt:_get_depth_image_obs:1022 - [WBT] Depth shared memory attached: shape=(1, 1, 58, 87)
+2026-09-17 20:52:05.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 49.72 | read_state: 0.191±0.041ms | preprocessing: 0.016±0.009ms | inference: 8.279±6.950ms | postprocessing: 0.029±0.006ms | action_pub: 0.288±0.083ms | total: 2.767±4.871ms
+2026-09-17 20:52:06.036 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.116±0.016ms | preprocessing: 0.002±0.000ms | inference: 4.376±0.549ms | postprocessing: 0.027±0.003ms | action_pub: 0.129±0.013ms | total: 4.921±0.588ms
+2026-09-17 20:52:07.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.116±0.016ms | preprocessing: 0.002±0.000ms | inference: 4.557±0.899ms | postprocessing: 0.028±0.003ms | action_pub: 0.129±0.013ms | total: 5.106±0.941ms
+2026-09-17 20:52:08.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.108±0.010ms | preprocessing: 0.002±0.000ms | inference: 4.594±0.463ms | postprocessing: 0.030±0.002ms | action_pub: 0.131±0.012ms | total: 5.118±0.478ms
+2026-09-17 20:52:09.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.118±0.017ms | preprocessing: 0.002±0.000ms | inference: 4.347±0.543ms | postprocessing: 0.028±0.002ms | action_pub: 0.130±0.018ms | total: 4.905±0.600ms
+2026-09-17 20:52:10.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.114±0.011ms | preprocessing: 0.001±0.000ms | inference: 4.271±0.460ms | postprocessing: 0.029±0.003ms | action_pub: 0.125±0.010ms | total: 4.808±0.487ms
+2026-09-17 20:52:11.007 | INFO     | holosoma_inference.policies.base:_handle_init_state:901 - Setting to init state
+2026-09-17 20:52:11.008 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:11.008 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:52:11.008 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:11.008 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:52:11.030 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.116±0.013ms | preprocessing: 0.005±0.017ms | inference: 4.410±0.531ms | postprocessing: 0.033±0.024ms | action_pub: 0.136±0.031ms | total: 4.827±0.937ms
+2026-09-17 20:52:12.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.206±0.023ms | preprocessing: 0.084±0.009ms | inference: 4.410±0.531ms | postprocessing: 0.033±0.004ms | action_pub: 0.232±0.033ms | total: 0.940±0.098ms
+2026-09-17 20:52:13.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.209±0.013ms | preprocessing: 0.085±0.005ms | inference: 4.410±0.531ms | postprocessing: 0.034±0.002ms | action_pub: 0.247±0.024ms | total: 0.987±0.070ms
+2026-09-17 20:52:14.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.218±0.009ms | preprocessing: 0.087±0.003ms | inference: 4.410±0.531ms | postprocessing: 0.035±0.002ms | action_pub: 0.255±0.018ms | total: 1.043±0.060ms
+2026-09-17 20:52:15.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.224±0.009ms | preprocessing: 0.090±0.003ms | inference: 4.410±0.531ms | postprocessing: 0.035±0.002ms | action_pub: 0.287±0.029ms | total: 1.098±0.066ms
+2026-09-17 20:52:16.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.220±0.011ms | preprocessing: 0.087±0.003ms | inference: 4.410±0.531ms | postprocessing: 0.034±0.002ms | action_pub: 0.261±0.023ms | total: 1.048±0.068ms
+2026-09-17 20:52:17.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.214±0.026ms | preprocessing: 0.087±0.008ms | inference: 4.410±0.531ms | postprocessing: 0.034±0.004ms | action_pub: 0.262±0.049ms | total: 1.034±0.133ms
+2026-09-17 20:52:18.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.222±0.009ms | preprocessing: 0.089±0.003ms | inference: 4.410±0.531ms | postprocessing: 0.036±0.002ms | action_pub: 0.275±0.032ms | total: 1.075±0.070ms
+2026-09-17 20:52:19.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.220±0.012ms | preprocessing: 0.090±0.007ms | inference: 4.410±0.531ms | postprocessing: 0.036±0.002ms | action_pub: 0.273±0.033ms | total: 1.065±0.084ms
+2026-09-17 20:52:20.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.220±0.011ms | preprocessing: 0.090±0.004ms | inference: 4.410±0.531ms | postprocessing: 0.036±0.002ms | action_pub: 0.264±0.024ms | total: 1.056±0.073ms
+2026-09-17 20:52:21.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.220±0.017ms | preprocessing: 0.090±0.007ms | inference: 4.410±0.531ms | postprocessing: 0.036±0.002ms | action_pub: 0.272±0.037ms | total: 1.069±0.096ms
+2026-09-17 20:52:22.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.213±0.027ms | preprocessing: 0.087±0.010ms | inference: 4.410±0.531ms | postprocessing: 0.035±0.004ms | action_pub: 0.253±0.048ms | total: 1.025±0.138ms
+2026-09-17 20:52:23.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.214±0.016ms | preprocessing: 0.086±0.006ms | inference: 4.410±0.531ms | postprocessing: 0.035±0.003ms | action_pub: 0.254±0.031ms | total: 1.020±0.087ms
+2026-09-17 20:52:24.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.208±0.014ms | preprocessing: 0.082±0.005ms | inference: 4.410±0.531ms | postprocessing: 0.033±0.002ms | action_pub: 0.241±0.011ms | total: 0.971±0.068ms
+2026-09-17 20:52:24.487 | INFO     | holosoma_inference.policies.wbt:_handle_stop_policy:1274 - Actions set to stiff startup command
+2026-09-17 20:52:24.488 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:24.489 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:52:24.489 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:52:24.489 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:20.587 | INFO     | holosoma_inference.policies.base:_handle_start_policy:884 - Using policy actions
+2026-09-17 20:54:20.589 | INFO     | holosoma_inference.policies.wbt:_capture_robot_yaw_offset:1443 - Robot yaw offset captured at 120.1 deg
+2026-09-17 20:54:20.590 | INFO     | holosoma_inference.policies.wbt:_capture_motion_yaw_offset:1448 - Motion yaw offset captured at 0.0 deg
+2026-09-17 20:54:20.590 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:20.590 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:20.591 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:20.591 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:21.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.174±0.050ms | preprocessing: 0.012±0.010ms | inference: 5.149±2.023ms | postprocessing: 0.032±0.021ms | action_pub: 0.218±0.085ms | total: 3.578±3.574ms
+2026-09-17 20:54:22.036 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.117±0.016ms | preprocessing: 0.001±0.000ms | inference: 4.876±1.143ms | postprocessing: 0.033±0.016ms | action_pub: 0.138±0.036ms | total: 5.446±1.167ms
+2026-09-17 20:54:23.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.106±0.010ms | preprocessing: 0.001±0.000ms | inference: 4.590±0.436ms | postprocessing: 0.030±0.002ms | action_pub: 0.129±0.007ms | total: 5.100±0.449ms
+2026-09-17 20:54:24.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.107±0.009ms | preprocessing: 0.001±0.000ms | inference: 4.620±0.465ms | postprocessing: 0.030±0.002ms | action_pub: 0.130±0.008ms | total: 5.133±0.491ms
+2026-09-17 20:54:25.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.108±0.011ms | preprocessing: 0.001±0.000ms | inference: 4.634±0.465ms | postprocessing: 0.030±0.002ms | action_pub: 0.130±0.008ms | total: 5.152±0.481ms
+2026-09-17 20:54:26.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.108±0.011ms | preprocessing: 0.001±0.000ms | inference: 4.628±0.447ms | postprocessing: 0.030±0.002ms | action_pub: 0.132±0.008ms | total: 5.152±0.465ms
+2026-09-17 20:54:26.807 | INFO     | holosoma_inference.policies.wbt:_handle_drop_button_joystick_command:1368 - Drop button command: 1
+2026-09-17 20:54:26.808 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:26.808 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:26.808 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:26.808 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:27.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.117±0.021ms | preprocessing: 0.002±0.000ms | inference: 4.957±0.843ms | postprocessing: 0.031±0.007ms | action_pub: 0.138±0.021ms | total: 5.527±0.893ms
+2026-09-17 20:54:27.547 | INFO     | holosoma_inference.policies.wbt:_handle_drop_button_joystick_command:1368 - Drop button command: 0
+2026-09-17 20:54:27.548 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:27.548 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:27.548 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:27.548 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:28.036 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.114±0.022ms | preprocessing: 0.001±0.000ms | inference: 4.749±0.602ms | postprocessing: 0.030±0.007ms | action_pub: 0.136±0.020ms | total: 5.298±0.647ms
+2026-09-17 20:54:28.447 | INFO     | holosoma_inference.policies.wbt:_handle_drop_button_joystick_command:1368 - Drop button command: 1
+2026-09-17 20:54:28.448 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:28.448 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:28.448 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:28.448 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:54:29.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.115±0.021ms | preprocessing: 0.001±0.000ms | inference: 4.682±0.460ms | postprocessing: 0.030±0.007ms | action_pub: 0.136±0.017ms | total: 5.238±0.530ms
+2026-09-17 20:54:30.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.114±0.017ms | preprocessing: 0.001±0.000ms | inference: 4.356±0.512ms | postprocessing: 0.027±0.002ms | action_pub: 0.127±0.011ms | total: 4.892±0.542ms
+2026-09-17 20:54:31.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.112±0.017ms | preprocessing: 0.001±0.000ms | inference: 4.377±0.663ms | postprocessing: 0.027±0.002ms | action_pub: 0.128±0.011ms | total: 4.908±0.675ms
+2026-09-17 20:54:32.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.111±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.368±0.524ms | postprocessing: 0.028±0.003ms | action_pub: 0.127±0.010ms | total: 4.899±0.546ms
+2026-09-17 20:54:33.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.112±0.016ms | preprocessing: 0.001±0.000ms | inference: 4.570±0.606ms | postprocessing: 0.029±0.003ms | action_pub: 0.133±0.018ms | total: 5.115±0.615ms
+2026-09-17 20:54:34.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.109±0.014ms | preprocessing: 0.001±0.000ms | inference: 4.679±0.437ms | postprocessing: 0.032±0.010ms | action_pub: 0.134±0.015ms | total: 5.209±0.449ms
+2026-09-17 20:54:35.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.110±0.014ms | preprocessing: 0.001±0.000ms | inference: 4.653±0.443ms | postprocessing: 0.032±0.011ms | action_pub: 0.137±0.021ms | total: 5.192±0.466ms
+2026-09-17 20:54:36.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.111±0.014ms | preprocessing: 0.001±0.000ms | inference: 4.625±0.458ms | postprocessing: 0.032±0.009ms | action_pub: 0.134±0.016ms | total: 5.163±0.485ms
+2026-09-17 20:54:37.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.112±0.014ms | preprocessing: 0.001±0.000ms | inference: 4.664±0.475ms | postprocessing: 0.033±0.011ms | action_pub: 0.134±0.015ms | total: 5.211±0.499ms
+2026-09-17 20:54:38.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.111±0.013ms | preprocessing: 0.001±0.000ms | inference: 4.605±0.438ms | postprocessing: 0.032±0.010ms | action_pub: 0.135±0.018ms | total: 5.146±0.462ms
+2026-09-17 20:54:39.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.110±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.643±0.467ms | postprocessing: 0.032±0.009ms | action_pub: 0.133±0.012ms | total: 5.177±0.496ms
+2026-09-17 20:54:40.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.109±0.014ms | preprocessing: 0.002±0.000ms | inference: 4.645±0.450ms | postprocessing: 0.031±0.007ms | action_pub: 0.133±0.011ms | total: 5.176±0.470ms
+2026-09-17 20:54:41.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.108±0.016ms | preprocessing: 0.001±0.000ms | inference: 4.552±0.453ms | postprocessing: 0.031±0.010ms | action_pub: 0.130±0.012ms | total: 5.072±0.489ms
+2026-09-17 20:54:42.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.110±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.616±0.477ms | postprocessing: 0.030±0.006ms | action_pub: 0.133±0.012ms | total: 5.149±0.510ms
+2026-09-17 20:54:43.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.111±0.016ms | preprocessing: 0.002±0.000ms | inference: 4.607±0.464ms | postprocessing: 0.030±0.008ms | action_pub: 0.130±0.010ms | total: 5.139±0.488ms
+2026-09-17 20:54:44.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.109±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.570±0.445ms | postprocessing: 0.030±0.005ms | action_pub: 0.130±0.010ms | total: 5.093±0.474ms
+2026-09-17 20:54:45.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.104±0.020ms | preprocessing: 0.001±0.000ms | inference: 4.494±0.498ms | postprocessing: 0.027±0.004ms | action_pub: 0.124±0.012ms | total: 4.988±0.549ms
+2026-09-17 20:54:46.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.103±0.022ms | preprocessing: 0.001±0.000ms | inference: 4.498±0.497ms | postprocessing: 0.026±0.002ms | action_pub: 0.124±0.013ms | total: 4.988±0.545ms
+2026-09-17 20:54:47.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.025ms | preprocessing: 0.001±0.000ms | inference: 4.572±0.546ms | postprocessing: 0.028±0.006ms | action_pub: 0.125±0.016ms | total: 5.101±0.617ms
+2026-09-17 20:54:48.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.023ms | preprocessing: 0.001±0.000ms | inference: 4.611±0.557ms | postprocessing: 0.026±0.004ms | action_pub: 0.126±0.018ms | total: 5.136±0.621ms
+2026-09-17 20:54:49.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.112±0.023ms | preprocessing: 0.001±0.000ms | inference: 4.611±0.594ms | postprocessing: 0.026±0.004ms | action_pub: 0.126±0.017ms | total: 5.133±0.655ms
+2026-09-17 20:54:50.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.023ms | preprocessing: 0.002±0.000ms | inference: 4.706±1.022ms | postprocessing: 0.027±0.006ms | action_pub: 0.127±0.020ms | total: 5.233±1.062ms
+2026-09-17 20:54:51.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.120±0.016ms | preprocessing: 0.002±0.000ms | inference: 4.459±0.552ms | postprocessing: 0.028±0.006ms | action_pub: 0.133±0.019ms | total: 5.025±0.598ms
+2026-09-17 20:54:52.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.112±0.011ms | preprocessing: 0.001±0.000ms | inference: 4.409±0.490ms | postprocessing: 0.027±0.002ms | action_pub: 0.127±0.009ms | total: 4.942±0.504ms
+2026-09-17 20:54:53.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.102±0.011ms | preprocessing: 0.001±0.000ms | inference: 4.542±0.441ms | postprocessing: 0.027±0.002ms | action_pub: 0.126±0.011ms | total: 5.036±0.465ms
+2026-09-17 20:54:54.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.089±0.008ms | preprocessing: 0.001±0.000ms | inference: 4.368±0.465ms | postprocessing: 0.025±0.003ms | action_pub: 0.121±0.010ms | total: 4.799±0.483ms
+2026-09-17 20:54:55.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.095±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.477±0.453ms | postprocessing: 0.026±0.002ms | action_pub: 0.123±0.011ms | total: 4.939±0.479ms
+2026-09-17 20:54:56.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.091±0.012ms | preprocessing: 0.001±0.000ms | inference: 4.385±0.421ms | postprocessing: 0.026±0.002ms | action_pub: 0.120±0.009ms | total: 4.822±0.441ms
+2026-09-17 20:54:56.947 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:56.948 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.99
+2026-09-17 20:54:56.948 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:56.948 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.99
+2026-09-17 20:54:57.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.107±0.013ms | preprocessing: 0.001±0.000ms | inference: 4.651±0.631ms | postprocessing: 0.027±0.002ms | action_pub: 0.129±0.009ms | total: 5.177±0.692ms
+2026-09-17 20:54:57.147 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.148 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.98
+2026-09-17 20:54:57.148 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.148 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.98
+2026-09-17 20:54:57.427 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.428 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.97
+2026-09-17 20:54:57.428 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.428 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.97
+2026-09-17 20:54:57.787 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.788 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.96
+2026-09-17 20:54:57.788 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:54:57.788 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.96
+2026-09-17 20:54:58.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.118±0.017ms | preprocessing: 0.002±0.000ms | inference: 4.633±0.423ms | postprocessing: 0.027±0.002ms | action_pub: 0.129±0.008ms | total: 5.185±0.520ms
+2026-09-17 20:54:59.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.111±0.017ms | preprocessing: 0.001±0.000ms | inference: 4.611±0.442ms | postprocessing: 0.027±0.003ms | action_pub: 0.130±0.011ms | total: 5.142±0.461ms
+2026-09-17 20:55:00.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.103±0.020ms | preprocessing: 0.001±0.000ms | inference: 4.540±0.488ms | postprocessing: 0.026±0.004ms | action_pub: 0.125±0.012ms | total: 5.032±0.530ms
+2026-09-17 20:55:01.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.104±0.019ms | preprocessing: 0.001±0.000ms | inference: 4.539±0.462ms | postprocessing: 0.026±0.003ms | action_pub: 0.128±0.012ms | total: 5.038±0.492ms
+2026-09-17 20:55:02.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.109±0.023ms | preprocessing: 0.002±0.000ms | inference: 4.564±0.477ms | postprocessing: 0.029±0.009ms | action_pub: 0.132±0.020ms | total: 5.087±0.518ms
+2026-09-17 20:55:03.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.024ms | preprocessing: 0.001±0.000ms | inference: 4.616±0.541ms | postprocessing: 0.029±0.009ms | action_pub: 0.134±0.019ms | total: 5.160±0.592ms
+2026-09-17 20:55:04.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.026ms | preprocessing: 0.001±0.000ms | inference: 4.557±0.473ms | postprocessing: 0.030±0.011ms | action_pub: 0.135±0.022ms | total: 5.098±0.514ms
+2026-09-17 20:55:04.447 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:04.448 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:55:04.448 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:04.448 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:55:05.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.117±0.023ms | preprocessing: 0.001±0.000ms | inference: 4.398±0.529ms | postprocessing: 0.029±0.008ms | action_pub: 0.131±0.016ms | total: 4.915±0.623ms
+2026-09-17 20:55:06.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.110±0.022ms | preprocessing: 0.002±0.000ms | inference: 4.260±0.529ms | postprocessing: 0.029±0.010ms | action_pub: 0.130±0.015ms | total: 4.784±0.573ms
+2026-09-17 20:55:07.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.021ms | preprocessing: 0.002±0.000ms | inference: 4.480±0.799ms | postprocessing: 0.036±0.035ms | action_pub: 0.135±0.016ms | total: 5.043±0.862ms
+2026-09-17 20:55:07.127 | INFO     | holosoma_inference.policies.base:_handle_init_state:901 - Setting to init state
+2026-09-17 20:55:07.128 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:07.128 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:55:07.128 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:07.128 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:55:08.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.202±0.035ms | preprocessing: 0.079±0.025ms | inference: 4.505±0.799ms | postprocessing: 0.034±0.006ms | action_pub: 0.237±0.055ms | total: 1.319±1.132ms
+2026-09-17 20:55:09.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.212±0.011ms | preprocessing: 0.086±0.005ms | inference: 4.505±0.799ms | postprocessing: 0.036±0.002ms | action_pub: 0.257±0.024ms | total: 1.008±0.067ms
+2026-09-17 20:55:09.087 | INFO     | holosoma_inference.policies.wbt:_handle_stop_policy:1274 - Actions set to stiff startup command
+2026-09-17 20:55:09.088 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:09.089 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:55:09.089 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:55:09.089 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:25.668 | INFO     | holosoma_inference.policies.base:_handle_start_policy:884 - Using policy actions
+2026-09-17 20:56:25.669 | INFO     | holosoma_inference.policies.wbt:_capture_robot_yaw_offset:1443 - Robot yaw offset captured at 118.4 deg
+2026-09-17 20:56:25.670 | INFO     | holosoma_inference.policies.wbt:_capture_motion_yaw_offset:1448 - Motion yaw offset captured at 0.0 deg
+2026-09-17 20:56:25.670 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:25.670 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:25.671 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:25.671 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:26.036 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.188±0.053ms | preprocessing: 0.014±0.010ms | inference: 4.696±0.825ms | postprocessing: 0.031±0.009ms | action_pub: 0.249±0.090ms | total: 2.754±2.370ms
+2026-09-17 20:56:27.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.113±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.613±0.449ms | postprocessing: 0.032±0.011ms | action_pub: 0.138±0.018ms | total: 5.166±0.474ms
+2026-09-17 20:56:28.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.114±0.016ms | preprocessing: 0.001±0.000ms | inference: 4.605±0.450ms | postprocessing: 0.032±0.013ms | action_pub: 0.135±0.017ms | total: 5.156±0.474ms
+2026-09-17 20:56:29.035 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.115±0.016ms | preprocessing: 0.001±0.000ms | inference: 4.612±0.465ms | postprocessing: 0.035±0.015ms | action_pub: 0.136±0.017ms | total: 5.170±0.497ms
+2026-09-17 20:56:30.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.115±0.015ms | preprocessing: 0.001±0.000ms | inference: 4.609±0.443ms | postprocessing: 0.032±0.013ms | action_pub: 0.135±0.017ms | total: 5.162±0.464ms
+2026-09-17 20:56:31.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.115±0.016ms | preprocessing: 0.002±0.000ms | inference: 4.626±0.457ms | postprocessing: 0.029±0.005ms | action_pub: 0.132±0.011ms | total: 5.173±0.479ms
+2026-09-17 20:56:31.647 | INFO     | holosoma_inference.policies.base:_handle_init_state:901 - Setting to init state
+2026-09-17 20:56:31.648 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:31.648 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:31.648 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:31.648 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:32.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.151±0.053ms | preprocessing: 0.036±0.044ms | inference: 4.621±0.453ms | postprocessing: 0.030±0.010ms | action_pub: 0.173±0.070ms | total: 3.483±2.109ms
+2026-09-17 20:56:32.687 | INFO     | holosoma_inference.policies.base:_handle_init_state:901 - Setting to init state
+2026-09-17 20:56:32.688 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:32.689 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:32.689 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:56:32.689 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 0.95
+2026-09-17 20:56:33.033 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.225±0.015ms | preprocessing: 0.091±0.007ms | inference: 4.621±0.453ms | postprocessing: 0.035±0.003ms | action_pub: 0.258±0.029ms | total: 1.091±0.306ms
+2026-09-17 20:56:34.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.223±0.006ms | preprocessing: 0.088±0.002ms | inference: 4.621±0.453ms | postprocessing: 0.035±0.001ms | action_pub: 0.264±0.022ms | total: 1.067±0.050ms
+2026-09-17 20:56:35.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.222±0.018ms | preprocessing: 0.089±0.007ms | inference: 4.621±0.453ms | postprocessing: 0.035±0.003ms | action_pub: 0.277±0.042ms | total: 1.082±0.099ms
+2026-09-17 20:56:36.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.228±0.007ms | preprocessing: 0.091±0.003ms | inference: 4.621±0.453ms | postprocessing: 0.036±0.001ms | action_pub: 0.289±0.027ms | total: 1.110±0.057ms
+2026-09-17 20:56:37.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.220±0.023ms | preprocessing: 0.089±0.009ms | inference: 4.621±0.453ms | postprocessing: 0.035±0.004ms | action_pub: 0.273±0.048ms | total: 1.079±0.118ms
+2026-09-17 20:56:38.034 | INFO     | holosoma_inference.policies.base:run:963 - RL FPS: 50.00 | read_state: 0.185±0.062ms | preprocessing: 0.070±0.013ms | inference: 4.621±0.453ms | postprocessing: 0.029±0.006ms | action_pub: 0.212±0.066ms | total: 0.868±0.187ms

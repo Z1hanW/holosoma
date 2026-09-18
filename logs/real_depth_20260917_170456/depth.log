@@ -1,0 +1,25 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_170456
+[RealSense] IR emitter: off
+[RealSense] Intrinsics: fx=428.69, fy=428.69, cx=432.43, cy=245.91
+[RealSense] Initialized: serial=auto, resolution=848x480@30fps, depth_scale=0.001000
+[Image Server] Created new shared memory: depth_img_shm
+[Image Server] Shared memory: shape=[1, 1, 58, 87], dtype=<class 'numpy.float32'>
+ImageServer initialized
+[Image Saver] Initialized save images directory: /home/unitree/FAR/holosoma/logs/real_depth_20260917_170456/depth_images/20260917_170459
+[Image Saver] Saved calibration for cameras: ['d435i_depth']
+2026-09-17 17:04:59.485 | INFO     | holosoma.utils.rate:__init__:47 - Rate limiter initialized: 30 Hz (33.33 ms period)
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 1, 'avg_ms': 75.49996899979305, 'min_ms': 75.49996899979305, 'max_ms': 75.49996899979305, 'total_ms': 75.49996899979305}
+[Image Server] hw total latency stats: {'count': 1, 'avg_ms': 93.52292414065596, 'min_ms': 93.52292414065596, 'max_ms': 93.52292414065596, 'total_ms': 93.52292414065596}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 51, 'avg_ms': 27.180981980456956, 'min_ms': 24.129319000167015, 'max_ms': 75.49996899979305, 'total_ms': 1386.2300810033048}
+[Image Server] hw total latency stats: {'count': 51, 'avg_ms': 25.885588622251532, 'min_ms': 15.763697140464501, 'max_ms': 93.52292414065596, 'total_ms': 1320.165019734828}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.2458613407252415, 'max_drift_ms': 0.7459553339685954, 'avg_drift_ms': 0.3208373343893202, 'drift_count': 7}
+[Image Server] capture stats: {'count': 101, 'avg_ms': 28.890702693131807, 'min_ms': 24.129319000167015, 'max_ms': 75.49996899979305, 'total_ms': 2917.9609720063127}
+[Image Server] hw total latency stats: {'count': 101, 'avg_ms': 27.876842364020206, 'min_ms': 15.763697140464501, 'max_ms': 93.52292414065596, 'total_ms': 2815.5610787660407}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 12.464915020700573, 'max_drift_ms': 1.2224750007590046, 'avg_drift_ms': 0.46166351928520644, 'drift_count': 27}
+[Image Server] capture stats: {'count': 151, 'avg_ms': 29.616022615933037, 'min_ms': 24.129319000167015, 'max_ms': 75.49996899979305, 'total_ms': 4472.019415005889}
+[Image Server] hw total latency stats: {'count': 151, 'avg_ms': 31.005258872825983, 'min_ms': 15.763697140464501, 'max_ms': 93.52292414065596, 'total_ms': 4681.794089796724}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.4573943347168097, 'max_drift_ms': 0.2697353338589892, 'avg_drift_ms': 0.22869716735840484, 'drift_count': 2}
+[Image Server] capture stats: {'count': 201, 'avg_ms': 29.741818970183317, 'min_ms': 24.129319000167015, 'max_ms': 75.49996899979305, 'total_ms': 5978.105613006846}
+[Image Server] hw total latency stats: {'count': 201, 'avg_ms': 32.905289886190104, 'min_ms': 15.763697140464501, 'max_ms': 93.52292414065596, 'total_ms': 6613.963267124211}

@@ -1,0 +1,66 @@
+[real_drop] log_dir=/home/unitree/FAR/holosoma/logs/real_drop_20260917_161219
+[real_drop] model_path=/home/unitree/FAR/holosoma/_ckps/izz2f2df_model_11000.onnx
+[command_window] skipping: no DISPLAY/WAYLAND_DISPLAY
+[camera_profile] izz2f2df: D435 37.0 deg down raw=106x60 policy=87x58 position=[0.009999999776482582, 0.009999999776482582, 0.4399999976158142] metadata=perception_observation_contract
+[real_drop] resolved_model_path=/home/unitree/FAR/holosoma/_ckps/izz2f2df_model_11000.onnx
+[real_drop] MuJoCo sim GT started pid=13934 log=/home/unitree/FAR/holosoma/logs/real_drop_20260917_161219/sim_gt_depth.log
+[real_viser] started pid=13935
+╭──────────────── viser ────────────────╮
+│             ╷                         │
+│   HTTP      │ http://127.0.0.1:8080   │
+│   Websocket │ ws://127.0.0.1:8080     │
+│             ╵                         │
+╰───────────────────────────────────────╯
+/home/unitree/FAR/holosoma/scripts/real_viser.py:369: DeprecationWarning: `control_layout` is deprecated; use `main_panel` placement instead, e.g. `server.gui.main_panel.dock_right()`. Both "collapsible" and "fixed" now dock the control panel to the right edge.
+  server.gui.configure_theme(dark_mode=True, control_layout="collapsible", control_width="medium")
+2026-09-17 16:12:24.333 | INFO     | __main__:run_policy:195 - Starting Policy with Tyro configuration...
+2026-09-17 16:12:24.334 | INFO     | __main__:run_policy:196 - Robot: g1_29dof
+2026-09-17 16:12:24.334 | INFO     | __main__:run_policy:197 - Observation groups: ['actor_obs_root_contact_aware', 'actor_obs_drop_button', 'actor_obs_proprio_with_actions_no_linvel', 'perception_obs']
+2026-09-17 16:12:24.334 | INFO     | __main__:run_policy:198 - RL Rate: 50.0 Hz
+2026-09-17 16:12:24.334 | INFO     | __main__:run_policy:199 - Model path: /home/unitree/FAR/holosoma/_ckps/izz2f2df_model_11000.onnx
+2026-09-17 16:12:24.334 | INFO     | __main__:run_policy:203 - Using WholeBodyTrackingPolicy
+2026-09-17 16:12:24.336 | INFO     | holosoma_inference.utils.clock:start:103 - Clock subscriber started, connecting to port 5555
+G1-HG type: 5
+UnitreeInterface initialized: G1-HG (29 motors, HG messages) on interface: eth0
+[DEBUG] LowCommandWriter - No motor command available!
+2026-09-17 16:12:24.487 | INFO     | holosoma_inference.policies.wbt:setup_policy:391 - Loaded KP/KD from ONNX metadata: izz2f2df_model_11000.onnx
+2026-09-17 16:12:24.488 | INFO     | holosoma_inference.policies.base:_set_policy_action_scales_from_metadata:478 - Using training-aligned per-joint action scales from ONNX metadata: base=0.25 final_min=0.074501 final_max=0.547547 final_mean=0.395021
+2026-09-17 16:12:24.488 | INFO     | holosoma_inference.policies.wbt:setup_policy:406 - Using external sparse-root command mode: command comes from zero/manual/joystick input; reference-motion outputs are not used.
+2026-09-17 16:12:24.489 | INFO     | holosoma_inference.policies.base:_resolve_control_gains:498 - Using KP/KD from config (override)
+2026-09-17 16:12:24.489 | INFO     | holosoma_inference.policies.base:_init_joystick_handler:345 - Using joystick
+2026-09-17 16:12:24.490 | INFO     | holosoma_inference.policies.wbt:__init__:253 - 
+⚠️  Ready to enter stiff hold mode
+2026-09-17 16:12:24.490 | INFO     | holosoma_inference.policies.wbt:__init__:254 - Press Enter to continue...
+self.interface_str: eth0
+2026-09-17 16:12:25.245 | INFO     | holosoma_inference.policies.wbt:__init__:257 - ✓ Entering stiff hold mode
+2026-09-17 16:12:25.245 | INFO     | __main__:run_policy:206 - Policy initialized successfully!
+2026-09-17 16:12:25.245 | INFO     | __main__:_print_control_guide:44 - ================================================================================
+2026-09-17 16:12:25.245 | INFO     | __main__:_print_control_guide:45 - POLICY CONTROLS
+2026-09-17 16:12:25.245 | INFO     | __main__:_print_control_guide:46 - ================================================================================
+2026-09-17 16:12:25.245 | INFO     | __main__:_print_control_guide:47 - 
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:50 - Using JOYSTICK control mode
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:51 - 
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:52 - General Controls:
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:53 -   A button       - Start the policy
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:54 -   B button       - Stop the policy
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:55 -   Y button       - Set robot to default pose
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:56 -   L1+R1 (LB+RB)  - Kill controller program
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:73 - 
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:74 - Whole-Body Tracking Controls:
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:75 -   Start button   - Start motion clip
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:77 -   X button       - Toggle drop button command
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:78 -   Left stick     - Relative sparse root XY command
+2026-09-17 16:12:25.246 | INFO     | __main__:_print_control_guide:79 -   Right stick X  - Relative sparse root yaw command
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:137 - 
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:138 - MuJoCo Simulator Controls (ONLY in MuJoCo window, NOT this terminal!):
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:139 -   7/8        - Decrease/increase elastic band length
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:140 -   9          - Toggle elastic band enable/disable
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:141 -   BACKSPACE  - Reset simulation
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:143 - 
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:144 - ================================================================================
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:145 - Press the appropriate button/key to begin!
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:146 - ================================================================================
+2026-09-17 16:12:25.247 | INFO     | __main__:_print_control_guide:147 - 
+[real_viser] live viewer: http://127.0.0.1:8080
+[real_viser] checkpoint camera: izz2f2df: D435 37.0 deg down position=[0.009999999776482582, 0.009999999776482582, 0.4399999976158142] rate=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz

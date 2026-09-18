@@ -1,0 +1,87 @@
+[real_drop] log_dir=/home/unitree/FAR/holosoma/logs/real_drop_20260917_204922
+[real_drop] checkpoint=_ckps/izz2f2df_model_11000.onnx
+[real_drop] behavior_reference=c416c75ac5bd09c3449336ba3de4b466874ff728
+[command_window] cannot open display: no display name and no $DISPLAY environment variable
+2026-09-17 20:49:26.987 | INFO     | __main__:run_policy:195 - Starting Policy with Tyro configuration...
+2026-09-17 20:49:26.987 | INFO     | __main__:run_policy:196 - Robot: g1_29dof
+2026-09-17 20:49:26.987 | INFO     | __main__:run_policy:197 - Observation groups: ['actor_obs_root_contact_aware', 'actor_obs_drop_button', 'actor_obs_proprio_with_actions_no_linvel', 'perception_obs']
+2026-09-17 20:49:26.987 | INFO     | __main__:run_policy:198 - RL Rate: 50.0 Hz
+2026-09-17 20:49:26.988 | INFO     | __main__:run_policy:199 - Model path: _ckps/izz2f2df_model_11000.onnx
+2026-09-17 20:49:26.988 | INFO     | __main__:run_policy:203 - Using WholeBodyTrackingPolicy
+2026-09-17 20:49:26.989 | INFO     | holosoma_inference.utils.clock:start:103 - Clock subscriber started, connecting to port 5555
+G1-HG type: 5
+UnitreeInterface initialized: G1-HG (29 motors, HG messages) on interface: eth0
+[DEBUG] LowCommandWriter - No motor command available!
+2026-09-17 20:49:27.143 | INFO     | holosoma_inference.policies.wbt:setup_policy:377 - Loaded KP/KD from ONNX metadata: izz2f2df_model_11000.onnx
+2026-09-17 20:49:27.144 | INFO     | holosoma_inference.policies.base:_set_policy_action_scales_from_metadata:478 - Using training-aligned per-joint action scales from ONNX metadata: base=0.25 final_min=0.074501 final_max=0.547547 final_mean=0.395021
+2026-09-17 20:49:27.144 | INFO     | holosoma_inference.policies.wbt:setup_policy:392 - Using external sparse-root command mode: command comes from zero/manual/joystick input; reference-motion outputs are not used.
+2026-09-17 20:49:27.145 | INFO     | holosoma_inference.policies.base:_resolve_control_gains:498 - Using KP/KD from config (override)
+2026-09-17 20:49:27.145 | INFO     | holosoma_inference.policies.base:_init_joystick_handler:345 - Using joystick
+2026-09-17 20:49:27.145 | INFO     | holosoma_inference.policies.wbt:__init__:230 - 
+⚠️  Ready to enter stiff hold mode
+2026-09-17 20:49:27.146 | INFO     | holosoma_inference.policies.wbt:__init__:231 - Press Enter to continue...
+self.interface_str: eth0
+2026-09-17 20:49:27.621 | INFO     | holosoma_inference.policies.wbt:__init__:234 - ✓ Entering stiff hold mode
+2026-09-17 20:49:27.621 | INFO     | __main__:run_policy:206 - Policy initialized successfully!
+2026-09-17 20:49:27.621 | INFO     | __main__:_print_control_guide:44 - ================================================================================
+2026-09-17 20:49:27.621 | INFO     | __main__:_print_control_guide:45 - POLICY CONTROLS
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:46 - ================================================================================
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:47 - 
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:50 - Using JOYSTICK control mode
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:51 - 
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:52 - General Controls:
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:53 -   A button       - Start the policy
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:54 -   B button       - Stop the policy
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:55 -   Y button       - Set robot to default pose
+2026-09-17 20:49:27.622 | INFO     | __main__:_print_control_guide:56 -   L1+R1 (LB+RB)  - Kill controller program
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:73 - 
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:74 - Whole-Body Tracking Controls:
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:75 -   Start button   - Start motion clip
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:77 -   X button       - Toggle drop button command
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:78 -   Left stick     - Relative sparse root XY command
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:79 -   Right stick X  - Relative sparse root yaw command
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:137 - 
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:138 - MuJoCo Simulator Controls (ONLY in MuJoCo window, NOT this terminal!):
+2026-09-17 20:49:27.623 | INFO     | __main__:_print_control_guide:139 -   7/8        - Decrease/increase elastic band length
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:140 -   9          - Toggle elastic band enable/disable
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:141 -   BACKSPACE  - Reset simulation
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:143 - 
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:144 - ================================================================================
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:145 - Press the appropriate button/key to begin!
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:146 - ================================================================================
+2026-09-17 20:49:27.624 | INFO     | __main__:_print_control_guide:147 - 
+2026-09-17 20:50:08.645 | INFO     | holosoma_inference.policies.base:_handle_start_policy:884 - Using policy actions
+2026-09-17 20:50:08.647 | INFO     | holosoma_inference.policies.wbt:_capture_robot_yaw_offset:1443 - Robot yaw offset captured at 122.9 deg
+2026-09-17 20:50:08.647 | INFO     | holosoma_inference.policies.wbt:_capture_motion_yaw_offset:1448 - Motion yaw offset captured at 0.0 deg
+2026-09-17 20:50:08.648 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:50:08.648 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:50:08.648 | INFO     | holosoma_inference.policies.base:_print_control_status:933 - ------------ Control Status ------------
+2026-09-17 20:50:08.649 | INFO     | holosoma_inference.policies.base:_print_control_status:940 - Active policy [1/1]: izz2f2df_model_11000.onnx Kp level 1.00
+2026-09-17 20:50:08.651 | ERROR    | __main__:run_policy:239 - Error running policy: perception_obs requires shared memory 'depth_img_shm'. Start the MuJoCo image server first.
+Traceback (most recent call last):
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/wbt.py", line 1016, in _get_depth_image_obs
+    self._depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+  File "/home/unitree/.holosoma_deps/miniconda3/envs/hsinference/lib/python3.10/multiprocessing/shared_memory.py", line 104, in __init__
+    self._fd = _posixshmem.shm_open(
+FileNotFoundError: [Errno 2] No such file or directory: '/depth_img_shm'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/run_policy.py", line 237, in run_policy
+    policy.run()
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/base.py", line 957, in run
+    self.policy_action()
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/base.py", line 747, in policy_action
+    scaled_policy_action = self.rl_inference(robot_state_data)
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/wbt.py", line 1069, in rl_inference
+    obs = self.prepare_obs_for_rl(robot_state_data)
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/wbt.py", line 1035, in prepare_obs_for_rl
+    group_outputs = self._prepare_group_observations(robot_state_data)
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/base.py", line 631, in _prepare_group_observations
+    current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/wbt.py", line 764, in get_current_obs_buffer_dict
+    current_obs_buffer_dict["cam_depth"] = self._get_depth_image_obs()
+  File "/home/unitree/FAR/holosoma/src/holosoma_inference/holosoma_inference/policies/wbt.py", line 1018, in _get_depth_image_obs
+    raise RuntimeError(
+RuntimeError: perception_obs requires shared memory 'depth_img_shm'. Start the MuJoCo image server first.

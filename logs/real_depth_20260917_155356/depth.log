@@ -1,0 +1,614 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_155356
+[real_depth] stopping lsvla-vision.service; it occupies the D435i
+[camera_profile] n94vaeq7: D435 37.0 deg down raw=106x60 policy=87x58 position=[0.057623498141765594, 0.01752999983727932, 0.42987000942230225] metadata=perception_observation_contract
+[real_depth] camera_model_path=/home/unitree/FAR/holosoma/_ckps/n94vaeq7_model_40000.onnx
+[real_depth] image_server_config=real_d435i
+[real_depth] realtime viewer started pid=4763 port=8081
+2026-09-17 15:54:01.827 | INFO     | holosoma.utils.rate:__init__:47 - Rate limiter initialized: 30 Hz (33.33 ms period)
+╭──────────────── viser ────────────────╮
+│             ╷                         │
+│   HTTP      │ http://127.0.0.1:8081   │
+│   Websocket │ ws://127.0.0.1:8081     │
+│             ╵                         │
+╰───────────────────────────────────────╯
+/home/unitree/FAR/holosoma/scripts/real_viser.py:369: DeprecationWarning: `control_layout` is deprecated; use `main_panel` placement instead, e.g. `server.gui.main_panel.dock_right()`. Both "collapsible" and "fixed" now dock the control panel to the right edge.
+  server.gui.configure_theme(dark_mode=True, control_layout="collapsible", control_width="medium")
+[real_viser] live viewer: http://127.0.0.1:8081
+[real_viser] checkpoint camera: n94vaeq7: D435 37.0 deg down position=[0.057623498141765594, 0.01752999983727932, 0.42987000942230225] rate=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+(viser) Connection opened (0, 1 total), 371 persistent messages
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[RealSense] IR emitter: off
+[RealSense] Intrinsics: fx=428.69, fy=428.69, cx=432.43, cy=245.91
+[RealSense] Initialized: serial=auto, resolution=848x480@30fps, depth_scale=0.001000
+[Image Server] Created new shared memory: depth_img_shm
+[Image Server] Shared memory: shape=[1, 1, 58, 87], dtype=<class 'numpy.float32'>
+ImageServer initialized
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 1, 'avg_ms': 77.1196160000045, 'min_ms': 77.1196160000045, 'max_ms': 77.1196160000045, 'total_ms': 77.1196160000045}
+[Image Server] hw total latency stats: {'count': 1, 'avg_ms': 94.57745887497003, 'min_ms': 94.57745887497003, 'max_ms': 94.57745887497003, 'total_ms': 94.57745887497003}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 51, 'avg_ms': 25.433631999996855, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 1297.1152319998396}
+[Image Server] hw total latency stats: {'count': 51, 'avg_ms': 23.55464258088539, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 1201.2867716251549}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.902503327424256, 'max_drift_ms': 1.55134466575646, 'avg_drift_ms': 0.5575004753463223, 'drift_count': 7}
+[Image Server] capture stats: {'count': 101, 'avg_ms': 25.714213722770943, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 2597.1355859998653}
+[Image Server] hw total latency stats: {'count': 101, 'avg_ms': 24.279775703592204, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 2452.2573460628128}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 15.236727656883886, 'max_drift_ms': 1.8847223327611573, 'avg_drift_ms': 0.9522954785552429, 'drift_count': 16}
+[Image Server] capture stats: {'count': 151, 'avg_ms': 25.867895675496253, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 3906.052246999934}
+[Image Server] hw total latency stats: {'count': 151, 'avg_ms': 26.96484107326382, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 4071.691002062837}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.64479465814793, 'max_drift_ms': 0.9215519990561916, 'avg_drift_ms': 0.18275496201643668, 'drift_count': 9}
+[Image Server] capture stats: {'count': 201, 'avg_ms': 25.99375527860635, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 5224.744810999877}
+[Image Server] hw total latency stats: {'count': 201, 'avg_ms': 28.955460373446776, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 5820.047535062802}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.94916299317083, 'max_drift_ms': 2.0164439987411242, 'avg_drift_ms': 0.6186453741463538, 'drift_count': 8}
+[Image Server] capture stats: {'count': 251, 'avg_ms': 26.011775354581143, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 6528.955613999867}
+[Image Server] hw total latency stats: {'count': 251, 'avg_ms': 30.04930075224171, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 7542.374488812669}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.3309613332476147, 'max_drift_ms': 0.3309613332476147, 'avg_drift_ms': 0.3309613332476147, 'drift_count': 1}
+[Image Server] capture stats: {'count': 301, 'avg_ms': 25.791225295680125, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 7763.1588139997175}
+[Image Server] hw total latency stats: {'count': 301, 'avg_ms': 30.57345438283918, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 9202.609769234594}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 85.97319830732886, 'max_drift_ms': 6.834035998735999, 'avg_drift_ms': 2.686662447104027, 'drift_count': 32}
+[Image Server] capture stats: {'count': 351, 'avg_ms': 26.293238253561153, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 9228.926626999964}
+[Image Server] hw total latency stats: {'count': 351, 'avg_ms': 31.60768374007399, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 11094.29699276597}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 401, 'avg_ms': 26.22800763341696, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 10517.431061000201}
+[Image Server] hw total latency stats: {'count': 401, 'avg_ms': 31.92617132485337, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 12802.394701266201}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3763359939389375, 'max_drift_ms': 0.346591999004886, 'avg_drift_ms': 0.19661942770556248, 'drift_count': 7}
+[Image Server] capture stats: {'count': 451, 'avg_ms': 26.22139586031068, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 11825.849533000117}
+[Image Server] hw total latency stats: {'count': 451, 'avg_ms': 32.22356503132001, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 14532.827829125323}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.270093319277748, 'max_drift_ms': 1.0445656654383129, 'avg_drift_ms': 0.38263649048830256, 'drift_count': 19}
+[Image Server] capture stats: {'count': 501, 'avg_ms': 26.245521952095952, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 13149.006498000072}
+[Image Server] hw total latency stats: {'count': 501, 'avg_ms': 32.48245383950921, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 16273.709373594116}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 14.462361655262157, 'max_drift_ms': 1.8934496659426259, 'avg_drift_ms': 0.8507271561918915, 'drift_count': 17}
+[Image Server] capture stats: {'count': 551, 'avg_ms': 26.24695862250456, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 14462.074201000014}
+[Image Server] hw total latency stats: {'count': 551, 'avg_ms': 32.66804865321639, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 18000.09480792223}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.009986658762955, 'max_drift_ms': 1.7611446654655083, 'avg_drift_ms': 0.5566651843069951, 'drift_count': 9}
+[Image Server] capture stats: {'count': 601, 'avg_ms': 26.24095522129824, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 15770.814088000241}
+[Image Server] hw total latency stats: {'count': 601, 'avg_ms': 32.82338543269099, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 19726.854645047286}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 76.6755526342422, 'max_drift_ms': 4.211074998863751, 'avg_drift_ms': 1.7039011696498265, 'drift_count': 45}
+[Image Server] capture stats: {'count': 651, 'avg_ms': 26.3474460322581, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 17152.187367000024}
+[Image Server] hw total latency stats: {'count': 651, 'avg_ms': 33.069741041163425, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 21528.401417797388}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.923298660012733, 'max_drift_ms': 2.6710869993848974, 'avg_drift_ms': 0.6293907872738849, 'drift_count': 11}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[Image Server] capture stats: {'count': 701, 'avg_ms': 26.33569823823106, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 18461.324464999972}
+[Image Server] hw total latency stats: {'count': 701, 'avg_ms': 33.18023337462195, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 23259.343595609986}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.839121322504525, 'max_drift_ms': 2.265158665920808, 'avg_drift_ms': 0.3722401017311173, 'drift_count': 13}
+[Image Server] capture stats: {'count': 751, 'avg_ms': 26.336323471371383, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 19778.578926999908}
+[Image Server] hw total latency stats: {'count': 751, 'avg_ms': 33.289588622358366, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 25000.481055391134}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.8662063242895783, 'max_drift_ms': 1.6435503328011691, 'avg_drift_ms': 0.38662063242895783, 'drift_count': 10}
+[Image Server] capture stats: {'count': 801, 'avg_ms': 26.325852398251982, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 21087.007770999837}
+[Image Server] hw total latency stats: {'count': 801, 'avg_ms': 33.36984829558798, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 26729.248484765973}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.950817656037998, 'max_drift_ms': 1.5392696654430438, 'avg_drift_ms': 0.4500743323670907, 'drift_count': 11}
+[Image Server] capture stats: {'count': 851, 'avg_ms': 26.32138856169179, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 22399.501665999713}
+[Image Server] hw total latency stats: {'count': 851, 'avg_ms': 33.44911225850152, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 28465.194531984795}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.151215328557555, 'max_drift_ms': 1.2197683332715314, 'avg_drift_ms': 0.630243065711511, 'drift_count': 5}
+[Image Server] capture stats: {'count': 901, 'avg_ms': 26.289157997779864, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 23686.531355999658}
+[Image Server] hw total latency stats: {'count': 901, 'avg_ms': 33.48889952783428, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 30173.498474578686}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.1618629994245566, 'max_drift_ms': 0.7909099998641977, 'avg_drift_ms': 0.5809314997122783, 'drift_count': 2}
+[Image Server] capture stats: {'count': 951, 'avg_ms': 26.23878943007311, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 24953.088747999525}
+[Image Server] hw total latency stats: {'count': 951, 'avg_ms': 33.50841422772139, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 31866.50193056304}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.578269661465129, 'max_drift_ms': 1.2719563321752503, 'avg_drift_ms': 0.9156539322930257, 'drift_count': 5}
+[Image Server] capture stats: {'count': 1001, 'avg_ms': 26.23081993306642, 'min_ms': 22.177220000003217, 'max_ms': 77.1196160000045, 'total_ms': 26257.050752999487}
+[Image Server] hw total latency stats: {'count': 1001, 'avg_ms': 33.55613324914206, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 33589.689382391196}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.965271997979471, 'max_drift_ms': 4.643502665942378, 'avg_drift_ms': 1.9884239993264905, 'drift_count': 3}
+[Image Server] capture stats: {'count': 1051, 'avg_ms': 26.211458078020645, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 27548.242439999696}
+[Image Server] hw total latency stats: {'count': 1051, 'avg_ms': 33.58740306722817, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 35300.36062365681}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.725705984431897, 'max_drift_ms': 1.7000543329572793, 'avg_drift_ms': 0.43628529922159487, 'drift_count': 20}
+[Image Server] capture stats: {'count': 1101, 'avg_ms': 26.222702278837343, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 28871.195208999914}
+[Image Server] hw total latency stats: {'count': 1101, 'avg_ms': 33.640215422713005, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 37037.87718040702}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.152563651677156, 'max_drift_ms': 0.8114459992043521, 'avg_drift_ms': 0.2862535362042864, 'drift_count': 18}
+[Image Server] capture stats: {'count': 1151, 'avg_ms': 26.22190820677657, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 30181.41634599983}
+[Image Server] hw total latency stats: {'count': 1151, 'avg_ms': 33.67498466616044, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 38759.90735075067}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.0291219899490898, 'max_drift_ms': 0.4096579988868143, 'avg_drift_ms': 0.16909349916242414, 'drift_count': 12}
+[Image Server] capture stats: {'count': 1201, 'avg_ms': 26.228723587010677, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 31500.697027999824}
+[Image Server] hw total latency stats: {'count': 1201, 'avg_ms': 33.71218997625745, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 40488.3401614852}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.7927556640984221, 'max_drift_ms': 1.5356723329773558, 'avg_drift_ms': 0.5975852213661407, 'drift_count': 3}
+[Image Server] capture stats: {'count': 1251, 'avg_ms': 26.21949250919243, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 32800.58512899973}
+[Image Server] hw total latency stats: {'count': 1251, 'avg_ms': 33.73279744815474, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 42199.72960764158}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.123649319931701, 'max_drift_ms': 1.5534399993271109, 'avg_drift_ms': 0.40824328799544674, 'drift_count': 15}
+[Image Server] capture stats: {'count': 1301, 'avg_ms': 26.222672806302697, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 34115.69732099981}
+[Image Server] hw total latency stats: {'count': 1301, 'avg_ms': 33.76919792794058, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 43933.7265042507}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.665149989250494, 'max_drift_ms': 0.7526383321874164, 'avg_drift_ms': 0.2744205876029702, 'drift_count': 17}
+[Image Server] capture stats: {'count': 1351, 'avg_ms': 26.22143642116955, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 35425.16060500006}
+[Image Server] hw total latency stats: {'count': 1351, 'avg_ms': 33.797932966449025, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 45661.00743767263}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 14.513569321593423, 'max_drift_ms': 2.298578332499801, 'avg_drift_ms': 0.8063094067551901, 'drift_count': 18}
+[Image Server] capture stats: {'count': 1401, 'avg_ms': 26.223907027837086, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 36739.69374599976}
+[Image Server] hw total latency stats: {'count': 1401, 'avg_ms': 33.82958975084794, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 47395.255240937964}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.0899410001552496, 'max_drift_ms': 1.9911786664579267, 'avg_drift_ms': 0.30899410001552496, 'drift_count': 10}
+[Image Server] capture stats: {'count': 1451, 'avg_ms': 26.218457935905985, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 38042.982464999586}
+[Image Server] hw total latency stats: {'count': 1451, 'avg_ms': 33.85196349959116, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 49119.19903790677}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 14.638791015613606, 'max_drift_ms': 2.0551730008264713, 'avg_drift_ms': 0.6364691745918959, 'drift_count': 23}
+[Image Server] capture stats: {'count': 1501, 'avg_ms': 26.2270407241837, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 39366.78812699973}
+[Image Server] hw total latency stats: {'count': 1501, 'avg_ms': 33.890364716782884, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 50869.43743989111}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.0334793466408883, 'max_drift_ms': 0.6968580014472536, 'avg_drift_ms': 0.2022319564427259, 'drift_count': 15}
+[Image Server] capture stats: {'count': 1551, 'avg_ms': 26.230819343004537, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 40684.00080100004}
+[Image Server] hw total latency stats: {'count': 1551, 'avg_ms': 33.92201764713335, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 52613.04937070383}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.472556345196608, 'max_drift_ms': 0.4772296680357613, 'avg_drift_ms': 0.17661116751404343, 'drift_count': 14}
+[Image Server] capture stats: {'count': 1601, 'avg_ms': 26.23229310743293, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 41997.901265000124}
+[Image Server] hw total latency stats: {'count': 1601, 'avg_ms': 33.94833379828057, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 54351.2824110472}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.4794730102257745, 'max_drift_ms': 0.5791200014755304, 'avg_drift_ms': 0.22540663729325222, 'drift_count': 11}
+[Image Server] capture stats: {'count': 1651, 'avg_ms': 26.234799351908126, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 43313.65373000032}
+[Image Server] hw total latency stats: {'count': 1651, 'avg_ms': 33.97182162340052, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 56087.477500234265}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.047115667939579, 'max_drift_ms': 0.047115667939579, 'avg_drift_ms': 0.047115667939579, 'drift_count': 1}
+[Image Server] capture stats: {'count': 1701, 'avg_ms': 26.230974116990364, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 44618.88697300061}
+[Image Server] hw total latency stats: {'count': 1701, 'avg_ms': 33.98384485943921, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 57806.5201059061}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.031780349483597, 'max_drift_ms': 0.8840686680287035, 'avg_drift_ms': 0.42272528155176825, 'drift_count': 19}
+[Image Server] capture stats: {'count': 1751, 'avg_ms': 26.23615643746487, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 45939.50992200099}
+[Image Server] hw total latency stats: {'count': 1751, 'avg_ms': 34.007643573654136, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 59547.3838974684}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.408809348637078, 'max_drift_ms': 2.7416163346742906, 'avg_drift_ms': 0.3181652558021811, 'drift_count': 17}
+[Image Server] capture stats: {'count': 1801, 'avg_ms': 26.23950663631389, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 47257.35145200132}
+[Image Server] hw total latency stats: {'count': 1801, 'avg_ms': 34.03205233674843, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 61291.72625848392}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.2668360122916056, 'max_drift_ms': 0.2039400014837156, 'avg_drift_ms': 0.10556966769096714, 'drift_count': 12}
+[Image Server] capture stats: {'count': 1851, 'avg_ms': 26.240524461913274, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 48571.21077900147}
+[Image Server] hw total latency stats: {'count': 1851, 'avg_ms': 34.05637177580505, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 63038.34415701515}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.644411678531469, 'max_drift_ms': 1.727159667552769, 'avg_drift_ms': 0.4341855137331899, 'drift_count': 13}
+[Image Server] capture stats: {'count': 1901, 'avg_ms': 26.241159209364145, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 49884.44365700124}
+[Image Server] hw total latency stats: {'count': 1901, 'avg_ms': 34.07456998977475, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 64775.7575505618}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.773921348463773, 'max_drift_ms': 0.6075883345602051, 'avg_drift_ms': 0.3207734082479874, 'drift_count': 18}
+[Image Server] capture stats: {'count': 1951, 'avg_ms': 26.24672269605381, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 51207.35598000098}
+[Image Server] hw total latency stats: {'count': 1951, 'avg_ms': 34.0991410932373, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 66527.42427290598}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.5196940045379961, 'max_drift_ms': 0.1925140014691351, 'avg_drift_ms': 0.10393880090759922, 'drift_count': 5}
+[Image Server] capture stats: {'count': 2001, 'avg_ms': 26.242896288856265, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 52512.035474001386}
+[Image Server] hw total latency stats: {'count': 2001, 'avg_ms': 34.112962791807135, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 68260.03854640608}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.30832800121061155, 'max_drift_ms': 0.30832800121061155, 'avg_drift_ms': 0.30832800121061155, 'drift_count': 1}
+[Image Server] capture stats: {'count': 2051, 'avg_ms': 26.236675068747722, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 53811.42056600158}
+[Image Server] hw total latency stats: {'count': 2051, 'avg_ms': 34.11995455680158, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 69980.02679600005}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.584781348304205, 'max_drift_ms': 0.8411310013798357, 'avg_drift_ms': 0.40879911182400974, 'drift_count': 21}
+[Image Server] capture stats: {'count': 2101, 'avg_ms': 26.244383921466568, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 55139.45061900126}
+[Image Server] hw total latency stats: {'count': 2101, 'avg_ms': 34.14194711446905, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 71732.23088749946}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.4203090045393765, 'max_drift_ms': 0.1925560013660288, 'avg_drift_ms': 0.10507725113484412, 'drift_count': 4}
+[Image Server] capture stats: {'count': 2151, 'avg_ms': 26.24109294932686, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 56444.59093400207}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] hw total latency stats: {'count': 2151, 'avg_ms': 34.15148062354679, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 73459.83482124914}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3411956767868105, 'max_drift_ms': 0.49746100091851986, 'avg_drift_ms': 0.13411956767868105, 'drift_count': 10}
+[Image Server] capture stats: {'count': 2201, 'avg_ms': 26.239453198092683, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 57753.03648900199}
+[Image Server] hw total latency stats: {'count': 2201, 'avg_ms': 34.16029273564525, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 75186.8043111552}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.551721344678299, 'max_drift_ms': 1.8777060010961577, 'avg_drift_ms': 0.7959767787231916, 'drift_count': 12}
+[Image Server] capture stats: {'count': 2251, 'avg_ms': 26.240488774323445, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 59067.340231002076}
+[Image Server] hw total latency stats: {'count': 2251, 'avg_ms': 34.1700276219733, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 76916.73217706189}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.1529786756909743, 'max_drift_ms': 0.42131333407269267, 'avg_drift_ms': 0.11529786756909743, 'drift_count': 10}
+[Image Server] capture stats: {'count': 2301, 'avg_ms': 26.244294887441075, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 60388.122536001916}
+[Image Server] hw total latency stats: {'count': 2301, 'avg_ms': 34.18071539765276, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 78649.826129999}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.9832203485493665, 'max_drift_ms': 0.7327220014303748, 'avg_drift_ms': 0.293130608738198, 'drift_count': 17}
+[Image Server] capture stats: {'count': 2351, 'avg_ms': 26.248804652063964, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 61710.93973700238}
+[Image Server] hw total latency stats: {'count': 2351, 'avg_ms': 34.19046505220474, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 80381.78333773334}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.564977340966834, 'max_drift_ms': 0.5078040005628282, 'avg_drift_ms': 0.2849974823296482, 'drift_count': 9}
+[Image Server] capture stats: {'count': 2401, 'avg_ms': 26.24915200874734, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 63024.21397300237}
+[Image Server] hw total latency stats: {'count': 2401, 'avg_ms': 34.19610312799949, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 82104.84361032679}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 2451, 'avg_ms': 26.243894615668054, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 64323.7857030024}
+[Image Server] hw total latency stats: {'count': 2451, 'avg_ms': 34.19304576473209, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 83807.15516935835}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.968559009853379, 'max_drift_ms': 1.0142483346271547, 'avg_drift_ms': 0.552062112205931, 'drift_count': 9}
+[Image Server] capture stats: {'count': 2501, 'avg_ms': 26.24443588764584, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 65637.33415500225}
+[Image Server] hw total latency stats: {'count': 2501, 'avg_ms': 34.1957592320068, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 85523.593839249}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 14.260775015486615, 'max_drift_ms': 2.5800983345334316, 'avg_drift_ms': 0.7922652786381453, 'drift_count': 18}
+[Image Server] capture stats: {'count': 2551, 'avg_ms': 26.247848392003984, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 66958.26124800216}
+[Image Server] hw total latency stats: {'count': 2551, 'avg_ms': 34.20223357979707, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 87249.89786206231}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.520869349671557, 'max_drift_ms': 2.159584000196446, 'avg_drift_ms': 0.47604346748357784, 'drift_count': 20}
+[Image Server] capture stats: {'count': 2601, 'avg_ms': 26.24965440023135, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 68275.35109500174}
+[Image Server] hw total latency stats: {'count': 2601, 'avg_ms': 34.20602531335304, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 88969.87184003125}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.462411678924582, 'max_drift_ms': 0.5842860014126927, 'avg_drift_ms': 0.2885343065770485, 'drift_count': 12}
+[Image Server] capture stats: {'count': 2651, 'avg_ms': 26.250786876273704, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 69590.83600900159}
+[Image Server] hw total latency stats: {'count': 2651, 'avg_ms': 34.211629971856105, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 90695.03105539053}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.427052345723496, 'max_drift_ms': 1.24192200030393, 'avg_drift_ms': 0.5266907716077185, 'drift_count': 16}
+[Image Server] capture stats: {'count': 2701, 'avg_ms': 26.25075733172943, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 70903.2955530012}
+[Image Server] hw total latency stats: {'count': 2701, 'avg_ms': 34.21804584970833, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 92422.94184006221}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.1265110077829377, 'max_drift_ms': 0.6632736680103335, 'avg_drift_ms': 0.1408138759728672, 'drift_count': 8}
+[Image Server] capture stats: {'count': 2751, 'avg_ms': 26.24865748527851, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 72210.05674200118}
+[Image Server] hw total latency stats: {'count': 2751, 'avg_ms': 34.22720611955866, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 94159.04403490588}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.140174344139268, 'max_drift_ms': 1.208563334671453, 'avg_drift_ms': 0.3140174344139268, 'drift_count': 10}
+[Image Server] capture stats: {'count': 2801, 'avg_ms': 26.246648754373908, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 73516.86316100131}
+[Image Server] hw total latency stats: {'count': 2801, 'avg_ms': 34.23689262438617, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 95897.53624090567}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.652694684111339, 'max_drift_ms': 1.4209396667865803, 'avg_drift_ms': 0.3644140325767304, 'drift_count': 21}
+[Image Server] capture stats: {'count': 2851, 'avg_ms': 26.250014451070395, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 74838.7912000017}
+[Image Server] hw total latency stats: {'count': 2851, 'avg_ms': 34.25007619521632, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 97646.96723256173}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.702749677515385, 'max_drift_ms': 2.610450667702935, 'avg_drift_ms': 0.558562473126282, 'drift_count': 12}
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] capture stats: {'count': 2901, 'avg_ms': 26.25278057704275, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 76159.31645400102}
+[Image Server] hw total latency stats: {'count': 2901, 'avg_ms': 34.26150740356202, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 99392.63297773343}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.1107320013034041, 'max_drift_ms': 0.1107320013034041, 'avg_drift_ms': 0.1107320013034041, 'drift_count': 1}
+[Image Server] capture stats: {'count': 2951, 'avg_ms': 26.24581072246756, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 77451.38744200177}
+[Image Server] hw total latency stats: {'count': 2951, 'avg_ms': 34.263009576594506, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 101110.14126053038}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.6071730025259967, 'max_drift_ms': 1.5938990013637522, 'avg_drift_ms': 0.8035865012629984, 'drift_count': 2}
+[Image Server] capture stats: {'count': 3001, 'avg_ms': 26.24186912829134, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 78751.84925400231}
+[Image Server] hw total latency stats: {'count': 3001, 'avg_ms': 34.26810164300942, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 102838.57303067128}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 16.35662068633792, 'max_drift_ms': 1.9825770002626086, 'avg_drift_ms': 0.7434827584699054, 'drift_count': 22}
+[Image Server] capture stats: {'count': 3051, 'avg_ms': 26.24630734415024, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 80077.48370700238}
+[Image Server] hw total latency stats: {'count': 3051, 'avg_ms': 34.279275368321684, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 104586.06914874946}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.09966200013877824, 'max_drift_ms': 0.09966200013877824, 'avg_drift_ms': 0.09966200013877824, 'drift_count': 1}
+[Image Server] capture stats: {'count': 3101, 'avg_ms': 26.220533567559603, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 81309.87459300233}
+[Image Server] hw total latency stats: {'count': 3101, 'avg_ms': 34.25807421580735, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 106234.28814321858}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 13.871228015545967, 'max_drift_ms': 2.1371663345917113, 'avg_drift_ms': 0.7300646323971561, 'drift_count': 19}
+[Image Server] capture stats: {'count': 3151, 'avg_ms': 26.226782373215716, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 82640.59125800272}
+[Image Server] hw total latency stats: {'count': 3151, 'avg_ms': 34.268661801248555, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 107980.5533357342}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.089539678962865, 'max_drift_ms': 1.8725663345549037, 'avg_drift_ms': 0.5778242627830618, 'drift_count': 14}
+[Image Server] capture stats: {'count': 3201, 'avg_ms': 26.227834006873763, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 83955.29665600292}
+[Image Server] hw total latency stats: {'count': 3201, 'avg_ms': 34.2758273610639, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 109716.92338276553}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.5365950039504241, 'max_drift_ms': 0.2490956678684597, 'avg_drift_ms': 0.13414875098760604, 'drift_count': 4}
+[Image Server] capture stats: {'count': 3251, 'avg_ms': 26.218741664104186, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 85237.12915000271}
+[Image Server] hw total latency stats: {'count': 3251, 'avg_ms': 34.27136451351035, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 111416.20603342215}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.6928776763052156, 'max_drift_ms': 0.709024668026359, 'avg_drift_ms': 0.16928776763052156, 'drift_count': 10}
+[Image Server] capture stats: {'count': 3301, 'avg_ms': 26.2208267361414, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 86554.94905600276}
+[Image Server] hw total latency stats: {'count': 3301, 'avg_ms': 34.27780335378966, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 113151.02887085966}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.445937339184638, 'max_drift_ms': 2.0846403333507624, 'avg_drift_ms': 0.9307421673980798, 'drift_count': 8}
+[Image Server] capture stats: {'count': 3351, 'avg_ms': 26.21993025723757, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 87862.9862920031}
+[Image Server] hw total latency stats: {'count': 3351, 'avg_ms': 34.28003006259803, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 114872.380739766}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.989208013445932, 'max_drift_ms': 0.7213796678797735, 'avg_drift_ms': 0.1992805342297288, 'drift_count': 15}
+[Image Server] capture stats: {'count': 3401, 'avg_ms': 26.220629635990235, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 89176.36139200279}
+[Image Server] hw total latency stats: {'count': 3401, 'avg_ms': 34.28427452839261, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 116600.81767106327}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 12.755636014958327, 'max_drift_ms': 2.142037001362951, 'avg_drift_ms': 0.7972272509348954, 'drift_count': 16}
+[Image Server] capture stats: {'count': 3451, 'avg_ms': 26.221980643872097, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 90492.05520200261}
+[Image Server] hw total latency stats: {'count': 3451, 'avg_ms': 34.288816674175266, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 118330.70634257885}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.829957335781728, 'max_drift_ms': 0.6483173345941395, 'avg_drift_ms': 0.414978667890864, 'drift_count': 2}
+[Image Server] capture stats: {'count': 3501, 'avg_ms': 26.217732524422452, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 91788.281568003}
+[Image Server] hw total latency stats: {'count': 3501, 'avg_ms': 34.28870512240284, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 120044.75663353234}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.029163343237997, 'max_drift_ms': 1.817106000999047, 'avg_drift_ms': 0.41909694526983304, 'drift_count': 12}
+[Image Server] capture stats: {'count': 3551, 'avg_ms': 26.215880222754922, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 93092.59067100273}
+[Image Server] hw total latency stats: {'count': 3551, 'avg_ms': 34.29129880482638, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 121768.4020559385}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 11.576720016364561, 'max_drift_ms': 1.8163510013664563, 'avg_drift_ms': 0.6431511120202534, 'drift_count': 18}
+[Image Server] capture stats: {'count': 3601, 'avg_ms': 26.21624894390525, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 94404.7124470028}
+[Image Server] hw total latency stats: {'count': 3601, 'avg_ms': 34.29440060121772, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 123494.136564985}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.364086015423709, 'max_drift_ms': 1.8396410011973785, 'avg_drift_ms': 0.35356033419020605, 'drift_count': 18}
+[Image Server] capture stats: {'count': 3651, 'avg_ms': 26.218476654342098, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 95723.658265003}
+[Image Server] hw total latency stats: {'count': 3651, 'avg_ms': 34.299934159250135, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 125229.05961542224}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.4844590075190354, 'max_drift_ms': 1.620881001485941, 'avg_drift_ms': 0.3105573759398794, 'drift_count': 8}
+[Image Server] capture stats: {'count': 3701, 'avg_ms': 26.218514909484707, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 97034.7236800029}
+[Image Server] hw total latency stats: {'count': 3701, 'avg_ms': 34.302321849521284, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 126952.89316507826}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 12.932402014371291, 'max_drift_ms': 2.0124563335457424, 'avg_drift_ms': 0.7607295302571347, 'drift_count': 17}
+[Image Server] capture stats: {'count': 3751, 'avg_ms': 26.21980994348258, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 98350.50709800316}
+[Image Server] hw total latency stats: {'count': 3751, 'avg_ms': 34.30708180378993, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 128685.86384601603}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.699377350675604, 'max_drift_ms': 0.5454500011410346, 'avg_drift_ms': 0.2473356500355581, 'drift_count': 19}
+[Image Server] capture stats: {'count': 3801, 'avg_ms': 26.2228886493036, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 99673.19975600298}
+[Image Server] hw total latency stats: {'count': 3801, 'avg_ms': 34.31390659474109, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 130427.15896661088}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.288383339030588, 'max_drift_ms': 1.7377293339677635, 'avg_drift_ms': 0.714730556505098, 'drift_count': 6}
+[Image Server] capture stats: {'count': 3851, 'avg_ms': 26.218758594911208, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 100968.43934900306}
+[Image Server] hw total latency stats: {'count': 3851, 'avg_ms': 34.31260531378251, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 132137.84306337647}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.721633019263209, 'max_drift_ms': 0.8569633339448046, 'avg_drift_ms': 0.3634013758026337, 'drift_count': 24}
+[Image Server] capture stats: {'count': 3901, 'avg_ms': 26.223073228403894, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 102296.20866400358}
+[Image Server] hw total latency stats: {'count': 3901, 'avg_ms': 34.32080672357297, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 133885.46702865817}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.0064433338357048, 'max_drift_ms': 1.0064433338357048, 'avg_drift_ms': 1.0064433338357048, 'drift_count': 1}
+[Image Server] capture stats: {'count': 3951, 'avg_ms': 26.21615444115504, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 103580.02619700356}
+[Image Server] hw total latency stats: {'count': 3951, 'avg_ms': 34.31655945459661, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 135584.7264051112}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.720721015696654, 'max_drift_ms': 1.8004743340043206, 'avg_drift_ms': 0.6075450634810409, 'drift_count': 16}
+[Image Server] capture stats: {'count': 4001, 'avg_ms': 26.21697521119817, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 104894.11782000388}
+[Image Server] hw total latency stats: {'count': 4001, 'avg_ms': 34.32028113230332, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 137315.4448103456}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 18.812808683378535, 'max_drift_ms': 2.1932703340326043, 'avg_drift_ms': 0.8551276674262971, 'drift_count': 22}
+[Image Server] capture stats: {'count': 4051, 'avg_ms': 26.220156922736027, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 106217.85569400365}
+[Image Server] hw total latency stats: {'count': 4051, 'avg_ms': 34.32737089357242, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 139060.17948986188}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.58776200741795, 'max_drift_ms': 1.5661890012097501, 'avg_drift_ms': 0.5734702509272438, 'drift_count': 8}
+[Image Server] capture stats: {'count': 4101, 'avg_ms': 26.218384151915046, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 107521.5934070036}
+[Image Server] hw total latency stats: {'count': 4101, 'avg_ms': 34.32833393446008, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 140780.4974652208}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.394369683060177, 'max_drift_ms': 1.5070566679469266, 'avg_drift_ms': 0.4663538712811209, 'drift_count': 18}
+[Image Server] capture stats: {'count': 4151, 'avg_ms': 26.219910344496146, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 108838.8478400035}
+[Image Server] hw total latency stats: {'count': 4151, 'avg_ms': 34.33219667882043, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 142512.9484137836}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.692287014469002, 'max_drift_ms': 1.5839666677948117, 'avg_drift_ms': 0.620877643890643, 'drift_count': 14}
+[Image Server] capture stats: {'count': 4201, 'avg_ms': 26.22125175291683, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 110155.47861400362}
+[Image Server] hw total latency stats: {'count': 4201, 'avg_ms': 34.33667511048398, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 144248.3721391432}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.453836017930371, 'max_drift_ms': 0.7600586678790933, 'avg_drift_ms': 0.37269180089651854, 'drift_count': 20}
+[Image Server] capture stats: {'count': 4251, 'avg_ms': 26.224244022819118, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 111479.26134100406}
+[Image Server] hw total latency stats: {'count': 4251, 'avg_ms': 34.34284452998235, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 145991.432096955}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.743202017129079, 'max_drift_ms': 2.3164190015450004, 'avg_drift_ms': 0.3022737903752147, 'drift_count': 19}
+[Image Server] capture stats: {'count': 4301, 'avg_ms': 26.22608433085426, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 112798.38870700417}
+[Image Server] hw total latency stats: {'count': 4301, 'avg_ms': 34.34722171034023, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 147727.40057617333}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.5374273372353855, 'max_drift_ms': 0.3514050014246095, 'avg_drift_ms': 0.1791424457451285, 'drift_count': 3}
+[Image Server] capture stats: {'count': 4351, 'avg_ms': 26.20676703792313, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 114025.64338200353}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[Image Server] hw total latency stats: {'count': 4351, 'avg_ms': 34.32962541626961, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 149368.20018618906}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.7370020036414644, 'max_drift_ms': 1.4799083339767094, 'avg_drift_ms': 0.6842505009103661, 'drift_count': 4}
+[Image Server] capture stats: {'count': 4401, 'avg_ms': 26.203244265395046, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 115320.4780120036}
+[Image Server] hw total latency stats: {'count': 4401, 'avg_ms': 34.32783261091968, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 151076.7913206575}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.692745016560366, 'max_drift_ms': 0.9080693347414126, 'avg_drift_ms': 0.4346372508280183, 'drift_count': 20}
+[Image Server] capture stats: {'count': 4451, 'avg_ms': 26.204998359470522, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 116638.44769800329}
+[Image Server] hw total latency stats: {'count': 4451, 'avg_ms': 34.33227952239012, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 152812.97615415842}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.2304843395440912, 'max_drift_ms': 0.3574256677438825, 'avg_drift_ms': 0.1538105424430114, 'drift_count': 8}
+[Image Server] capture stats: {'count': 4501, 'avg_ms': 26.203034464119913, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 117939.85812300372}
+[Image Server] hw total latency stats: {'count': 4501, 'avg_ms': 34.332721841709386, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 154531.58100953395}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 172.33201770386586, 'max_drift_ms': 7.109824000963272, 'avg_drift_ms': 3.916636765996951, 'drift_count': 44}
+[Image Server] capture stats: {'count': 4551, 'avg_ms': 26.222879913646086, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 119340.32648700333}
+[Image Server] hw total latency stats: {'count': 4551, 'avg_ms': 34.35451641868268, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 156347.40422142486}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.3528780010810806, 'max_drift_ms': 0.3528780010810806, 'avg_drift_ms': 0.3528780010810806, 'drift_count': 1}
+[Image Server] capture stats: {'count': 4601, 'avg_ms': 26.219275331015762, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 120634.88579800352}
+[Image Server] hw total latency stats: {'count': 4601, 'avg_ms': 34.35238005988914, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 158055.30065554995}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.945866683759959, 'max_drift_ms': 1.3731513333823386, 'avg_drift_ms': 0.29729333418799797, 'drift_count': 20}
+[Image Server] capture stats: {'count': 4651, 'avg_ms': 26.22174941776043, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 121957.35654200376}
+[Image Server] hw total latency stats: {'count': 4651, 'avg_ms': 34.35693714476785, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 159794.11466031527}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.434586347405457, 'max_drift_ms': 1.2105420009902446, 'avg_drift_ms': 0.38818473910038975, 'drift_count': 14}
+[Image Server] capture stats: {'count': 4701, 'avg_ms': 26.223710572432292, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 123277.6634010042}
+[Image Server] hw total latency stats: {'count': 4701, 'avg_ms': 34.360953854366656, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 161530.84406937766}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.126031015194712, 'max_drift_ms': 2.1204400004535273, 'avg_drift_ms': 0.42768584290498485, 'drift_count': 19}
+[Image Server] capture stats: {'count': 4751, 'avg_ms': 26.225081608714877, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 124595.36272300438}
+[Image Server] hw total latency stats: {'count': 4751, 'avg_ms': 34.36440205077944, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 163265.2741432531}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.8199133396592515, 'max_drift_ms': 0.5364600011716902, 'avg_drift_ms': 0.25998761995132164, 'drift_count': 7}
+[Image Server] capture stats: {'count': 4801, 'avg_ms': 26.22371761924691, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 125900.0682900044}
+[Image Server] hw total latency stats: {'count': 4801, 'avg_ms': 34.36600653694923, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 164991.19738389325}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.0743846760969973, 'max_drift_ms': 0.6772230012757063, 'avg_drift_ms': 0.30743846760969973, 'drift_count': 10}
+[Image Server] capture stats: {'count': 4851, 'avg_ms': 26.225551688724885, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 127220.15124200442}
+[Image Server] hw total latency stats: {'count': 4851, 'avg_ms': 34.36985075690302, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 166728.14602173655}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.138154344853319, 'max_drift_ms': 1.7160343334126082, 'avg_drift_ms': 0.4384395960609514, 'drift_count': 14}
+[Image Server] capture stats: {'count': 4901, 'avg_ms': 26.225869089370462, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 128532.98440700464}
+[Image Server] hw total latency stats: {'count': 4901, 'avg_ms': 34.37186483827971, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 168456.50957240886}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.5299986843429, 'max_drift_ms': 1.1143260014705447, 'avg_drift_ms': 0.4143477688844739, 'drift_count': 23}
+[Image Server] capture stats: {'count': 4951, 'avg_ms': 26.228781316704517, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 129858.69629900406}
+[Image Server] hw total latency stats: {'count': 4951, 'avg_ms': 34.37710029745626, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 170201.02357270595}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 15.090831351471934, 'max_drift_ms': 1.8391103336625747, 'avg_drift_ms': 0.6561231022379101, 'drift_count': 23}
+[Image Server] capture stats: {'count': 5001, 'avg_ms': 26.231171371126553, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 131182.0880270039}
+[Image Server] hw total latency stats: {'count': 5001, 'avg_ms': 34.38160535890999, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 171942.40839990883}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.20618167631892, 'max_drift_ms': 1.5616983346262714, 'avg_drift_ms': 0.320618167631892, 'drift_count': 10}
+[Image Server] capture stats: {'count': 5051, 'avg_ms': 26.23049038685493, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 132490.20694400425}
+[Image Server] hw total latency stats: {'count': 5051, 'avg_ms': 34.382223927239565, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 173664.61305648703}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 11.934721344914578, 'max_drift_ms': 1.7679203342595429, 'avg_drift_ms': 0.852480096065327, 'drift_count': 14}
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[Image Server] capture stats: {'count': 5101, 'avg_ms': 26.230185326407423, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 133800.17535000425}
+[Image Server] hw total latency stats: {'count': 5101, 'avg_ms': 34.383012383672266, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 175387.74616911222}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.7318703345617905, 'max_drift_ms': 0.7318703345617905, 'avg_drift_ms': 0.7318703345617905, 'drift_count': 1}
+[Image Server] capture stats: {'count': 5151, 'avg_ms': 26.2236738476033, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 135078.1439890046}
+[Image Server] hw total latency stats: {'count': 5151, 'avg_ms': 34.377822568946584, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 177080.16405264384}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.480161349870286, 'max_drift_ms': 2.355626334178851, 'avg_drift_ms': 0.4989558605194887, 'drift_count': 19}
+[Image Server] capture stats: {'count': 5201, 'avg_ms': 26.224824403192578, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 136395.3117210046}
+[Image Server] hw total latency stats: {'count': 5201, 'avg_ms': 34.37994915975955, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 178810.1155799094}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.2603550014537177, 'max_drift_ms': 2.2603550014537177, 'avg_drift_ms': 2.2603550014537177, 'drift_count': 1}
+[Image Server] capture stats: {'count': 5251, 'avg_ms': 26.22312744029795, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 137697.64218900455}
+[Image Server] hw total latency stats: {'count': 5251, 'avg_ms': 34.37858575862406, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 180521.95381853494}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.9133056715172643, 'max_drift_ms': 1.271330333906917, 'avg_drift_ms': 0.5590436673596092, 'drift_count': 7}
+[Image Server] capture stats: {'count': 5301, 'avg_ms': 26.21930370986699, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 138988.5289660049}
+[Image Server] hw total latency stats: {'count': 5301, 'avg_ms': 34.374335487494236, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 182218.35241920696}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.827734015653732, 'max_drift_ms': 1.5738853346647375, 'avg_drift_ms': 0.464617579771249, 'drift_count': 19}
+[Image Server] capture stats: {'count': 5351, 'avg_ms': 26.222019977201413, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 140314.02889800476}
+[Image Server] hw total latency stats: {'count': 5351, 'avg_ms': 34.3773493306953, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 183953.19626855056}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.9379933486998198, 'max_drift_ms': 0.5919126679145847, 'avg_drift_ms': 0.23164666757057764, 'drift_count': 17}
+[Image Server] capture stats: {'count': 5401, 'avg_ms': 26.22385031697923, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 141635.01556200482}
+[Image Server] hw total latency stats: {'count': 5401, 'avg_ms': 34.38045220374761, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 185688.82235244085}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.5174450138556494, 'max_drift_ms': 0.6825073344316479, 'avg_drift_ms': 0.3430234217818763, 'drift_count': 19}
+[Image Server] capture stats: {'count': 5451, 'avg_ms': 26.224517357549974, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 142949.8441160049}
+[Image Server] hw total latency stats: {'count': 5451, 'avg_ms': 34.38367303131077, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 187425.40169367503}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.345357675608284, 'max_drift_ms': 0.5695543345609622, 'avg_drift_ms': 0.2345357675608284, 'drift_count': 10}
+[Image Server] capture stats: {'count': 5501, 'avg_ms': 26.251793062898514, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 144411.11363900473}
+[Image Server] hw total latency stats: {'count': 5501, 'avg_ms': 34.41281899905185, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 189304.91731378424}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 72.33530836026603, 'max_drift_ms': 6.229141001426797, 'avg_drift_ms': 2.583403870009501, 'drift_count': 28}
+[Image Server] capture stats: {'count': 5551, 'avg_ms': 26.279223536120433, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 145875.96984900453}
+[Image Server] hw total latency stats: {'count': 5551, 'avg_ms': 34.442307683568245, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 191189.24995148732}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 10.316559016814608, 'max_drift_ms': 2.7192706672849454, 'avg_drift_ms': 0.5158279508407304, 'drift_count': 20}
+[Image Server] capture stats: {'count': 5601, 'avg_ms': 26.281274303160924, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 147201.41737200433}
+[Image Server] hw total latency stats: {'count': 5601, 'avg_ms': 34.44641131624998, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 192934.34978231613}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.6714276799566505, 'max_drift_ms': 0.38560000086818036, 'avg_drift_ms': 0.19081626285404646, 'drift_count': 14}
+[Image Server] capture stats: {'count': 5651, 'avg_ms': 26.280009784994515, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 148508.335295004}
+[Image Server] hw total latency stats: {'count': 5651, 'avg_ms': 34.446843760750916, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 194659.1140920034}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.671855010926265, 'max_drift_ms': 2.0364056667858677, 'avg_drift_ms': 0.5479896436375904, 'drift_count': 14}
+[Image Server] capture stats: {'count': 5701, 'avg_ms': 26.280635156639935, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 149825.90102800427}
+[Image Server] hw total latency stats: {'count': 5701, 'avg_ms': 34.44837372977116, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 196390.17863342538}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 15.441749680917383, 'max_drift_ms': 2.2505980011828797, 'avg_drift_ms': 0.8578749822731879, 'drift_count': 18}
+[Image Server] capture stats: {'count': 5751, 'avg_ms': 26.2812231069387, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 151143.31408800447}
+[Image Server] hw total latency stats: {'count': 5751, 'avg_ms': 34.44920557425675, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 198117.38125755056}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.7897490042505524, 'max_drift_ms': 1.2083993342457688, 'avg_drift_ms': 0.5579498008501105, 'drift_count': 5}
+[Image Server] capture stats: {'count': 5801, 'avg_ms': 26.276254664886093, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 152428.55331100422}
+[Image Server] hw total latency stats: {'count': 5801, 'avg_ms': 34.44507328925839, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 199815.8701509879}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.194925017254718, 'max_drift_ms': 0.7773466672915674, 'avg_drift_ms': 0.4378535722502247, 'drift_count': 21}
+[Image Server] capture stats: {'count': 5851, 'avg_ms': 26.278746110580094, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 153756.94349300413}
+[Image Server] hw total latency stats: {'count': 5851, 'avg_ms': 34.44967410599742, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 201565.0431941909}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.3087616774546404, 'max_drift_ms': 0.40670666805908695, 'avg_drift_ms': 0.17759705211189541, 'drift_count': 13}
+[Image Server] capture stats: {'count': 5901, 'avg_ms': 26.279280842061407, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 155074.03624900436}
+[Image Server] hw total latency stats: {'count': 5901, 'avg_ms': 34.4515153860288, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 203298.39229295595}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.805905008609443, 'max_drift_ms': 0.7803406679158797, 'avg_drift_ms': 0.22573812607618038, 'drift_count': 8}
+[Image Server] capture stats: {'count': 5951, 'avg_ms': 26.27738300487383, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 156376.70626200415}
+[Image Server] hw total latency stats: {'count': 5951, 'avg_ms': 34.45035976669926, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 205014.09097162727}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.36998267277977, 'max_drift_ms': 1.2235170013354946, 'avg_drift_ms': 0.673996534555954, 'drift_count': 5}
+[Image Server] capture stats: {'count': 6001, 'avg_ms': 26.27611182969577, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 157682.9470900043}
+[Image Server] hw total latency stats: {'count': 6001, 'avg_ms': 34.449997398681354, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 206734.43438948682}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.9906503351639913, 'max_drift_ms': 1.4825473335804418, 'avg_drift_ms': 0.7476625837909978, 'drift_count': 4}
+[Image Server] capture stats: {'count': 6051, 'avg_ms': 26.273983248058826, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 158983.87263400396}
+[Image Server] hw total latency stats: {'count': 6051, 'avg_ms': 34.44941034538494, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 208453.38199992428}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.731895015969712, 'max_drift_ms': 0.7560090004972153, 'avg_drift_ms': 0.3016786850510375, 'drift_count': 19}
+[Image Server] capture stats: {'count': 6101, 'avg_ms': 26.274207689231908, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 160298.94111200387}
+[Image Server] hw total latency stats: {'count': 6101, 'avg_ms': 34.450487878721646, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 210182.42654808078}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.6340733483466465, 'max_drift_ms': 0.9035976678433144, 'avg_drift_ms': 0.3314160793145086, 'drift_count': 17}
+[Image Server] capture stats: {'count': 6151, 'avg_ms': 26.276031086002966, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 161623.86721000425}
+[Image Server] hw total latency stats: {'count': 6151, 'avg_ms': 34.453341950506505, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 211922.50633756552}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.266383015623433, 'max_drift_ms': 0.7528860012371297, 'avg_drift_ms': 0.27717805345386487, 'drift_count': 19}
+[Image Server] capture stats: {'count': 6201, 'avg_ms': 26.278151323013095, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 162950.8163540042}
+[Image Server] hw total latency stats: {'count': 6201, 'avg_ms': 34.45680500422355, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 213666.64783119023}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.34059200849424, 'max_drift_ms': 1.8345420012337854, 'avg_drift_ms': 1.191513144070606, 'drift_count': 7}
+[Image Server] capture stats: {'count': 6251, 'avg_ms': 26.27514562646048, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 164245.93531100446}
+[Image Server] hw total latency stats: {'count': 6251, 'avg_ms': 34.4544653274256, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 215374.86276173746}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.1162223428964353, 'max_drift_ms': 1.1358190004102653, 'avg_drift_ms': 0.34624692698849285, 'drift_count': 9}
+[Image Server] capture stats: {'count': 6301, 'avg_ms': 26.274157327409142, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 165553.465320005}
+[Image Server] hw total latency stats: {'count': 6301, 'avg_ms': 34.45543651428646, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 217103.705476519}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.695981673492497, 'max_drift_ms': 0.4098893344917087, 'avg_drift_ms': 0.24228309621321387, 'drift_count': 7}
+[Image Server] capture stats: {'count': 6351, 'avg_ms': 26.273489737522393, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 166862.93332300472}
+[Image Server] hw total latency stats: {'count': 6351, 'avg_ms': 34.45654770097035, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 218833.53444886266}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.014381677047822, 'max_drift_ms': 2.3484453339506217, 'avg_drift_ms': 0.6009587784698548, 'drift_count': 15}
+[Image Server] capture stats: {'count': 6401, 'avg_ms': 26.27461586877122, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 168183.8161760046}
+[Image Server] hw total latency stats: {'count': 6401, 'avg_ms': 34.45812134027455, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 220566.4346990974}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 11.669221018223652, 'max_drift_ms': 1.8986113335586197, 'avg_drift_ms': 0.5073574355749414, 'drift_count': 23}
+[Image Server] capture stats: {'count': 6451, 'avg_ms': 26.276376381491936, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 169508.90403700448}
+[Image Server] hw total latency stats: {'count': 6451, 'avg_ms': 34.46076453810504, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 222306.39203531563}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.380124683460053, 'max_drift_ms': 0.9439726680966487, 'avg_drift_ms': 0.37530145196823844, 'drift_count': 17}
+[Image Server] capture stats: {'count': 6501, 'avg_ms': 26.27800433348778, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 170833.30617200406}
+[Image Server] hw total latency stats: {'count': 6501, 'avg_ms': 34.46404750902796, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 224050.77285619074}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.362149679991489, 'max_drift_ms': 1.3279230013267806, 'avg_drift_ms': 0.3115821199993921, 'drift_count': 14}
+[Image Server] capture stats: {'count': 6551, 'avg_ms': 26.277893674859357, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 172146.48146400365}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] hw total latency stats: {'count': 6551, 'avg_ms': 34.46507242436562, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 225780.6894520192}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.601131008826087, 'max_drift_ms': 1.7916120002610114, 'avg_drift_ms': 0.4601131008826087, 'drift_count': 10}
+[Image Server] capture stats: {'count': 6601, 'avg_ms': 26.27771257067159, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 173459.18067900316}
+[Image Server] hw total latency stats: {'count': 6601, 'avg_ms': 34.4657993520992, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 227508.74152320682}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3990416761089364, 'max_drift_ms': 0.3211200008763626, 'avg_drift_ms': 0.15544907512321515, 'drift_count': 9}
+[Image Server] capture stats: {'count': 6651, 'avg_ms': 26.276477769057667, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 174764.85364200253}
+[Image Server] hw total latency stats: {'count': 6651, 'avg_ms': 34.465977453135, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 229233.21604080085}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.280378675957763, 'max_drift_ms': 0.49505366678204155, 'avg_drift_ms': 0.28535857839718426, 'drift_count': 15}
+[Image Server] capture stats: {'count': 6701, 'avg_ms': 26.27470913281642, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 176066.8258990028}
+[Image Server] hw total latency stats: {'count': 6701, 'avg_ms': 34.46567746962964, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 230954.5047239882}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.82316801912475, 'max_drift_ms': 0.7385533344859141, 'avg_drift_ms': 0.4270942617010761, 'drift_count': 23}
+[Image Server] capture stats: {'count': 6751, 'avg_ms': 26.27645631580558, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 177392.35658800346}
+[Image Server] hw total latency stats: {'count': 6751, 'avg_ms': 34.4695540477481, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 232703.9593763474}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.5849186786217615, 'max_drift_ms': 0.6541830007336102, 'avg_drift_ms': 0.23499260714743286, 'drift_count': 11}
+[Image Server] capture stats: {'count': 6801, 'avg_ms': 26.2766609247175, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 178707.5709490037}
+[Image Server] hw total latency stats: {'count': 6801, 'avg_ms': 34.47157763438567, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 234441.19949145694}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.2351193367076121, 'max_drift_ms': 0.1492106679279459, 'avg_drift_ms': 0.07837311223587069, 'drift_count': 3}
+[Image Server] capture stats: {'count': 6851, 'avg_ms': 26.27490379506687, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 180009.36590000312}
+[Image Server] hw total latency stats: {'count': 6851, 'avg_ms': 34.471544498367585, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 236164.55135831633}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.9643136786271498, 'max_drift_ms': 0.5063783344212425, 'avg_drift_ms': 0.17857397078428633, 'drift_count': 11}
+[Image Server] capture stats: {'count': 6901, 'avg_ms': 26.274800970294695, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 181322.4014960037}
+[Image Server] hw total latency stats: {'count': 6901, 'avg_ms': 34.473121777295056, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 237899.01338511318}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.9098626793929725, 'max_drift_ms': 0.45856566782731534, 'avg_drift_ms': 0.22999192231723367, 'drift_count': 17}
+[Image Server] capture stats: {'count': 6951, 'avg_ms': 26.273886500504, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 182629.7850650033}
+[Image Server] hw total latency stats: {'count': 6951, 'avg_ms': 34.47385656335469, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 239627.77697187843}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 179.57161503659336, 'max_drift_ms': 6.2488163342777625, 'avg_drift_ms': 3.7410753132623618, 'drift_count': 48}
+[Image Server] capture stats: {'count': 7001, 'avg_ms': 26.285820573204354, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 184027.02983300367}
+[Image Server] hw total latency stats: {'count': 7001, 'avg_ms': 34.48722831541522, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 241445.085436222}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 17.098697682627062, 'max_drift_ms': 2.4633760007191086, 'avg_drift_ms': 0.8999314569803717, 'drift_count': 19}
+[Image Server] capture stats: {'count': 7051, 'avg_ms': 26.288295087931253, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 185358.76866500327}
+[Image Server] hw total latency stats: {'count': 7051, 'avg_ms': 34.49113363061805, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 243196.9832294879}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.8554060022779595, 'max_drift_ms': 0.7677310001099613, 'avg_drift_ms': 0.46385150056948987, 'drift_count': 4}
+[Image Server] capture stats: {'count': 7101, 'avg_ms': 26.275868850866523, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 186584.94471000318}
+[Image Server] hw total latency stats: {'count': 7101, 'avg_ms': 34.47790506417719, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 244827.60386072224}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.1496950010277942, 'max_drift_ms': 0.1496950010277942, 'avg_drift_ms': 0.1496950010277942, 'drift_count': 1}
+[Image Server] capture stats: {'count': 7151, 'avg_ms': 26.26687996112478, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 187834.4586020033}
+[Image Server] hw total latency stats: {'count': 7151, 'avg_ms': 34.46777004904079, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 246479.02362069066}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.888708674319787, 'max_drift_ms': 2.2628256679126935, 'avg_drift_ms': 0.9814514457199646, 'drift_count': 6}
+[Image Server] capture stats: {'count': 7201, 'avg_ms': 26.266727416331573, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 189146.70412500366}
+[Image Server] hw total latency stats: {'count': 7201, 'avg_ms': 34.46668186575693, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 248194.5761153157}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.9847043377676528, 'max_drift_ms': 1.0836986679123584, 'avg_drift_ms': 0.6641173896279421, 'drift_count': 6}
+[Image Server] capture stats: {'count': 7251, 'avg_ms': 26.2613076444633, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 190420.74173000338}
+[Image Server] hw total latency stats: {'count': 7251, 'avg_ms': 34.460732122705544, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 249874.7686217379}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 4.836535000777076, 'max_drift_ms': 3.2607966669502275, 'avg_drift_ms': 1.6121783335923585, 'drift_count': 3}
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[Image Server] capture stats: {'count': 7301, 'avg_ms': 26.282378063005467, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 191887.6422380029}
+[Image Server] hw total latency stats: {'count': 7301, 'avg_ms': 34.482398386974516, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 251755.99062330095}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 89.8089536972293, 'max_drift_ms': 5.443804001288299, 'avg_drift_ms': 2.565970105635123, 'drift_count': 35}
+[Image Server] capture stats: {'count': 7351, 'avg_ms': 26.300894806829426, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 193337.8777250031}
+[Image Server] hw total latency stats: {'count': 7351, 'avg_ms': 34.501817587327075, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 253622.8610844413}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.9545483368356145, 'max_drift_ms': 0.332926333726391, 'avg_drift_ms': 0.11931854210445181, 'drift_count': 8}
+[Image Server] capture stats: {'count': 7401, 'avg_ms': 26.296689257803347, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 194621.79719700257}
+[Image Server] hw total latency stats: {'count': 7401, 'avg_ms': 34.49840522694619, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 255322.69708462877}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 224.67045503901772, 'max_drift_ms': 6.544905668079082, 'avg_drift_ms': 4.680634479979536, 'drift_count': 48}
+[Image Server] capture stats: {'count': 7451, 'avg_ms': 26.308252760971968, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 196022.79132200213}
+[Image Server] hw total latency stats: {'count': 7451, 'avg_ms': 34.512642971470314, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 257153.70278042532}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.466561349611766, 'max_drift_ms': 0.6602816678196177, 'avg_drift_ms': 0.3233280674805883, 'drift_count': 20}
+[Image Server] capture stats: {'count': 7501, 'avg_ms': 26.310815342087977, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 197357.42588100192}
+[Image Server] hw total latency stats: {'count': 7501, 'avg_ms': 34.51927878050269, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 258929.11013255065}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.682153350515364, 'max_drift_ms': 0.7822446676755135, 'avg_drift_ms': 0.33400666741371143, 'drift_count': 23}
+[Image Server] capture stats: {'count': 7551, 'avg_ms': 26.313835955900164, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 198695.77530300213}
+[Image Server] hw total latency stats: {'count': 7551, 'avg_ms': 34.52556730965517, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 260702.55875520624}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.525427676706386, 'max_drift_ms': 1.723070334719523, 'avg_drift_ms': 0.6525427676706386, 'drift_count': 10}
+[Image Server] capture stats: {'count': 7601, 'avg_ms': 26.31482433456147, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 200018.97976700176}
+[Image Server] hw total latency stats: {'count': 7601, 'avg_ms': 34.52760285528469, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 262444.30930301896}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3919510017785797, 'max_drift_ms': 0.7064373337470897, 'avg_drift_ms': 0.6959755008892898, 'drift_count': 2}
+[Image Server] capture stats: {'count': 7651, 'avg_ms': 26.30723728440753, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 201276.67246300203}
+[Image Server] hw total latency stats: {'count': 7651, 'avg_ms': 34.52063788121905, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 264117.40042920696}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.8992440014026215, 'max_drift_ms': 0.8992440014026215, 'avg_drift_ms': 0.8992440014026215, 'drift_count': 1}
+[Image Server] capture stats: {'count': 7701, 'avg_ms': 26.30253595779788, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 202555.82941100147}
+[Image Server] hw total latency stats: {'count': 7701, 'avg_ms': 34.517351019022044, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 265818.12019748875}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 7751, 'avg_ms': 26.297017715649922, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 203828.18431400254}
+[Image Server] hw total latency stats: {'count': 7751, 'avg_ms': 34.51243334792541, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 267505.87087976985}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 7801, 'avg_ms': 26.291439906678985, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 205099.52271200277}
+[Image Server] hw total latency stats: {'count': 7801, 'avg_ms': 34.507266532197896, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 269191.1862176758}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 7851, 'avg_ms': 26.288900861291925, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 206394.1606620029}
+[Image Server] hw total latency stats: {'count': 7851, 'avg_ms': 34.50492580688008, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 270898.17250981554}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.353827017141157, 'max_drift_ms': 0.6541606679775214, 'avg_drift_ms': 0.4085459453967309, 'drift_count': 18}
+[Image Server] capture stats: {'count': 7901, 'avg_ms': 26.28969555587938, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 207714.88458700298}
+[Image Server] hw total latency stats: {'count': 7901, 'avg_ms': 34.50551577846002, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 272628.0801656126}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.4562633509222, 'max_drift_ms': 0.717039334290348, 'avg_drift_ms': 0.3676636239531391, 'drift_count': 23}
+[Image Server] capture stats: {'count': 7951, 'avg_ms': 26.291433201610186, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 209043.1853860026}
+[Image Server] hw total latency stats: {'count': 7951, 'avg_ms': 34.507375220367706, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 274368.14037714363}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.690427017133516, 'max_drift_ms': 0.6761710013734046, 'avg_drift_ms': 0.27876779238056315, 'drift_count': 24}
+[Image Server] capture stats: {'count': 8001, 'avg_ms': 26.292849642045073, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 210369.08998600263}
+[Image Server] hw total latency stats: {'count': 8001, 'avg_ms': 34.50973722534916, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 276112.40754001867}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 15.48176735150264, 'max_drift_ms': 2.2256083337879318, 'avg_drift_ms': 0.6731203196305496, 'drift_count': 23}
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[Image Server] capture stats: {'count': 8051, 'avg_ms': 26.295187711340546, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 211702.55626400275}
+[Image Server] hw total latency stats: {'count': 8051, 'avg_ms': 34.5128428515193, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 277862.8977975819}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.821752009386728, 'max_drift_ms': 1.3960460007638176, 'avg_drift_ms': 0.6821752009386728, 'drift_count': 10}
+[Image Server] capture stats: {'count': 8101, 'avg_ms': 26.292841231082935, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 212998.30681300286}
+[Image Server] hw total latency stats: {'count': 8101, 'avg_ms': 34.51083296892786, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 279572.2578812846}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.7735976696258149, 'max_drift_ms': 1.4947690015105763, 'avg_drift_ms': 0.8867988348129074, 'drift_count': 2}
+[Image Server] capture stats: {'count': 8151, 'avg_ms': 26.30528122426731, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 214414.34725900285}
+[Image Server] hw total latency stats: {'count': 8151, 'avg_ms': 34.525010609501884, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 281413.36147804983}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 20.826904675914193, 'max_drift_ms': 2.532571000756434, 'avg_drift_ms': 1.301681542244637, 'drift_count': 16}
+[Image Server] capture stats: {'count': 8201, 'avg_ms': 26.31106537800301, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 215777.0471650027}
+[Image Server] hw total latency stats: {'count': 8201, 'avg_ms': 34.53278916399138, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 283203.4039338933}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 59.255364361547436, 'max_drift_ms': 6.522239001469643, 'avg_drift_ms': 2.1162630129124085, 'drift_count': 28}
+[Image Server] capture stats: {'count': 8251, 'avg_ms': 26.331413697249072, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 217260.4944160021}
+[Image Server] hw total latency stats: {'count': 8251, 'avg_ms': 34.55581458682119, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 285120.0261558617}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 10.551248016554382, 'max_drift_ms': 2.1017576671056304, 'avg_drift_ms': 0.47960218257065373, 'drift_count': 22}
+[Image Server] capture stats: {'count': 8301, 'avg_ms': 26.332754698590733, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 218588.19675300168}
+[Image Server] hw total latency stats: {'count': 8301, 'avg_ms': 34.559101123117934, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 286875.09842300194}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.911468013820922, 'max_drift_ms': 2.0081123335558004, 'avg_drift_ms': 0.5242040008129955, 'drift_count': 17}
+[Image Server] capture stats: {'count': 8351, 'avg_ms': 26.33277242114739, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 219904.98248900185}
+[Image Server] hw total latency stats: {'count': 8351, 'avg_ms': 34.56035443639826, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 288613.5198983619}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 6.209794350183984, 'max_drift_ms': 0.6280576681092498, 'avg_drift_ms': 0.295704492865904, 'drift_count': 21}
+[Image Server] capture stats: {'count': 8401, 'avg_ms': 26.33324326687316, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 221225.57668500143}
+[Image Server] hw total latency stats: {'count': 8401, 'avg_ms': 34.5620447772645, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 290355.738173799}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 7.6412423509282235, 'max_drift_ms': 0.6795110014081729, 'avg_drift_ms': 0.3473291977694647, 'drift_count': 22}
+[Image Server] capture stats: {'count': 8451, 'avg_ms': 26.334302678263086, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 222551.19193400134}
+[Image Server] hw total latency stats: {'count': 8451, 'avg_ms': 34.56456475576144, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 292105.1367509399}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 5.209431346315796, 'max_drift_ms': 0.627639334311425, 'avg_drift_ms': 0.30643713801857625, 'drift_count': 17}
+[Image Server] capture stats: {'count': 8501, 'avg_ms': 26.333685686860623, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 223862.66202400214}
+[Image Server] hw total latency stats: {'count': 8501, 'avg_ms': 34.565346409571596, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 293840.00982776814}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3853796763214632, 'max_drift_ms': 0.3594270012854395, 'avg_drift_ms': 0.15393107514682924, 'drift_count': 9}
+[Image Server] capture stats: {'count': 8551, 'avg_ms': 26.332776081862065, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 225171.5682760025}
+[Image Server] hw total latency stats: {'count': 8551, 'avg_ms': 34.56535141808923, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 295568.319976081}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 2.476369675832757, 'max_drift_ms': 0.6818606681235906, 'avg_drift_ms': 0.2251245159847961, 'drift_count': 11}
+[Image Server] capture stats: {'count': 8601, 'avg_ms': 26.33296486176062, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 226489.83077600307}
+[Image Server] hw total latency stats: {'count': 8601, 'avg_ms': 34.56631013986241, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 297304.83351295657}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 3.491368681352469, 'max_drift_ms': 0.6934853342954739, 'avg_drift_ms': 0.21821054258452932, 'drift_count': 16}
+[Image Server] capture stats: {'count': 8651, 'avg_ms': 26.332445896081676, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 227801.9894470026}
+[Image Server] hw total latency stats: {'count': 8651, 'avg_ms': 34.5661929936319, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 299032.13558790955}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 8.510038345434623, 'max_drift_ms': 1.9827516679242763, 'avg_drift_ms': 0.6546183342642018, 'drift_count': 13}
+[Image Server] capture stats: {'count': 8701, 'avg_ms': 26.33239737627891, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 229118.1895710028}
+[Image Server] hw total latency stats: {'count': 8701, 'avg_ms': 34.566331596300394, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 300761.6512194097}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.055373666782543296, 'max_drift_ms': 0.055373666782543296, 'avg_drift_ms': 0.055373666782543296, 'drift_count': 1}
+[Image Server] capture stats: {'count': 8751, 'avg_ms': 26.32714664598365, 'min_ms': 20.719400000018595, 'max_ms': 77.1196160000045, 'total_ms': 230388.8602990029}
+[Image Server] hw total latency stats: {'count': 8751, 'avg_ms': 34.56148448396294, 'min_ms': 14.519164609380823, 'max_ms': 94.57745887497003, 'total_ms': 302447.5507191597}
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.9 Hz target=30.0 Hz
+[real_viser] realtime update rate=29.8 Hz target=30.0 Hz

@@ -1,0 +1,12 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_165840
+conda environment name is set to: hsmujoco
+MuJoCo environment activated successfully
+MuJoCo version: 3.12.0
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'torch'
+PyTorch version: 
+Traceback (most recent call last):
+  File "/home/unitree/FAR/holosoma/src/holosoma/holosoma/sensors/image_server.py", line 9, in <module>
+    import cv2
+ModuleNotFoundError: No module named 'cv2'

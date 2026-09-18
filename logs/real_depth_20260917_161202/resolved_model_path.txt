@@ -1,0 +1,1 @@
+/home/unitree/FAR/holosoma/_ckps/n94vaeq7_model_40000.onnx

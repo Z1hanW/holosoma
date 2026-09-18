@@ -1,0 +1,2 @@
+[real_drop] log_dir=/home/unitree/FAR/holosoma/logs/real_drop_20260917_171352
+real_drop.sh: line 14: checkpoint: unbound variable

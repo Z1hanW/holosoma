@@ -1,0 +1,24 @@
+[real_depth] log_dir=/home/unitree/FAR/holosoma/logs/real_depth_20260917_204523
+[real_depth] behavior_reference=c416c75ac5bd09c3449336ba3de4b466874ff728
+[RealSense] IR emitter: off
+[RealSense] Intrinsics: fx=428.69, fy=428.69, cx=432.43, cy=245.91
+[RealSense] Initialized: serial=auto, resolution=848x480@30fps, depth_scale=0.001000
+[Image Server] Created new shared memory: depth_img_shm
+[Image Server] Shared memory: shape=[1, 1, 58, 87], dtype=<class 'numpy.float32'>
+ImageServer initialized
+[Image Saver] Initialized save images directory: /home/unitree/FAR/holosoma/logs/real_depth_20260917_204523/depth_images/20260917_204526
+[Image Saver] Saved calibration for cameras: ['d435i_depth']
+2026-09-17 20:45:26.323 | INFO     | holosoma.utils.rate:__init__:47 - Rate limiter initialized: 30 Hz (33.33 ms period)
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 1, 'avg_ms': 57.314613000016834, 'min_ms': 57.314613000016834, 'max_ms': 57.314613000016834, 'total_ms': 57.314613000016834}
+[Image Server] hw total latency stats: {'count': 1, 'avg_ms': 70.93383323436501, 'min_ms': 70.93383323436501, 'max_ms': 70.93383323436501, 'total_ms': 70.93383323436501}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 0.0, 'max_drift_ms': 0.0, 'avg_drift_ms': 0.0, 'drift_count': 0}
+[Image Server] capture stats: {'count': 51, 'avg_ms': 26.913059745104018, 'min_ms': 23.411432999978388, 'max_ms': 57.314613000016834, 'total_ms': 1372.566047000305}
+[Image Server] hw total latency stats: {'count': 51, 'avg_ms': 25.61805371998832, 'min_ms': 18.470018703115784, 'max_ms': 70.93383323436501, 'total_ms': 1306.5207397194044}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 1.3867440052308666, 'max_drift_ms': 0.3730476679493222, 'avg_drift_ms': 0.2773488010461733, 'drift_count': 5}
+[Image Server] capture stats: {'count': 101, 'avg_ms': 28.658422970301498, 'min_ms': 23.411432999978388, 'max_ms': 57.314613000016834, 'total_ms': 2894.500720000451}
+[Image Server] hw total latency stats: {'count': 101, 'avg_ms': 28.684702290227722, 'min_ms': 18.470018703115784, 'max_ms': 70.93383323436501, 'total_ms': 2897.154931313}
+[Image Server] Rate limiter stats: {'frequency': 30, 'period_ms': 33.333333333333336, 'total_drift_ms': 9.568736347432605, 'max_drift_ms': 1.0760950009398584, 'avg_drift_ms': 0.5628668439666238, 'drift_count': 17}
+[Image Server] capture stats: {'count': 151, 'avg_ms': 29.46056066887737, 'min_ms': 23.411432999978388, 'max_ms': 57.314613000016834, 'total_ms': 4448.544661000483}
+[Image Server] hw total latency stats: {'count': 151, 'avg_ms': 31.82939652659609, 'min_ms': 18.470018703115784, 'max_ms': 70.93383323436501, 'total_ms': 4806.238875516009}
+real_depth.sh: line 21:  7097 Killed                  PYTHONPATH=src/holosoma${PYTHONPATH:+:${PYTHONPATH}} python src/holosoma/holosoma/sensors/image_server.py real_d435i --image-saver-config.image-root-dir "${log_dir}/depth_images"
