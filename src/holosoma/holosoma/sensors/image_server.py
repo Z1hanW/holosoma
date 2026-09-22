@@ -377,7 +377,7 @@ class ImageServer:
         # Initialize camera wrapper
         self.camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
         self._deployment_audit = None
-        if os.environ.get("HOLOSOMA_DEPLOYMENT_AUDIT_DIR") and cfg.camera_type == "realsense":
+        if os.environ.get("HOLOSOMA_DEPLOYMENT_AUDIT_DIR") and cfg.camera_type in ("realsense", "remote_stereo"):
             from holosoma.utils.deployment_audit import create_deployment_audit
 
             self._deployment_audit = create_deployment_audit("depth", {
@@ -551,6 +551,26 @@ class ImageServer:
         frame = np.expand_dims(frame, axis=0)
         return frame
 
+    def _audit_arrays(self, all_frames: FrameBundle, processed: np.ndarray, published: np.ndarray) -> dict[str, np.ndarray]:
+        """Arrays for one deployment-audit record.
+
+        raw_depth is the metric depth the policy frame was derived from,
+        processed_depth the crop/resize/clip result, published_depth the delayed
+        frame actually written to shared memory. When a stereo pair is present
+        (learned depth predictors), its grey planes go in too, so the depth can
+        be regenerated offline with other settings.
+        """
+        arrays = {
+            "raw_depth": np.stack(list(all_frames[self.cfg.depth_source].values())),
+            "processed_depth": processed,
+            "published_depth": published,
+        }
+        rgb = all_frames.get("rgb")
+        if rgb:
+            # Side-by-side (H, 2W, 3) with identical channels -> keep one plane.
+            arrays["stereo_ir"] = np.stack([frame[..., 0] for frame in rgb.values()])
+        return arrays
+
     def _predict_gum_depth(self, frames: FrameBundle) -> dict[str, np.ndarray]:
         rgb_by_camera = frames.get("rgb", {})
         calibration_by_camera = frames.get("calibration")
@@ -621,11 +641,7 @@ class ImageServer:
                 continue
 
             if self._deployment_audit is not None:
-                self._deployment_audit.record(lambda: {
-                    "raw_depth": np.stack(list(all_frames[self.cfg.depth_source].values())),
-                    "processed_depth": full_depth_for_policy,
-                    "published_depth": delayed_image,
-                }, {
+                self._deployment_audit.record(lambda: self._audit_arrays(all_frames, full_depth_for_policy, delayed_image), {
                     "capture_step": step_count, "published_at_monotonic": published_at,
                     "sampled_additional_delay_frames": current_latency,
                     "legacy_total_latency_ms": total_latency_ms,

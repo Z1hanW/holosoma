@@ -68,6 +68,9 @@ class RemoteStereoCamera:
     def __init__(self, config: RemoteStereoCameraConfig):
         self.config = config
         self.calibration: dict[str, np.ndarray] | None = None
+        # Attributes the image server's deployment audit reads off every camera.
+        self.depth_scale = None
+        self.last_capture_metadata: dict = {}
 
         self._ctx = zmq.Context.instance()
         self._sock = self._ctx.socket(zmq.SUB)
@@ -130,7 +133,7 @@ class RemoteStereoCamera:
             self._seq = seq
 
             with self._lock:
-                self._latest = {"left": left, "right": right, "depth": depth, "t_send": t_send}
+                self._latest = {"left": left, "right": right, "depth": depth, "t_send": t_send, "seq": seq}
                 self._latest_at = time.monotonic()
             self._warned_stale = False
 
@@ -154,6 +157,12 @@ class RemoteStereoCamera:
             time.sleep(0.005)
 
         left, right = frame["left"], frame["right"]
+        self.last_capture_metadata = {
+            "relay_seq": int(frame["seq"]),
+            "relay_send_time": float(frame["t_send"]),
+            "received_at_monotonic": self._latest_at,
+            "dropped_total": int(self._dropped),
+        }
         # Match the RealSense IR-stereo path: grey replicated to 3 channels, side by side.
         rgb = np.concatenate([np.repeat(left[:, :, None], 3, axis=2), np.repeat(right[:, :, None], 3, axis=2)], axis=1)
         depth = frame["depth"]

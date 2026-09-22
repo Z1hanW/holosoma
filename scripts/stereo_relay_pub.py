@@ -60,7 +60,23 @@ def main() -> int:
     config.enable_stream(rs.stream.infrared, 2, args.width, args.height, rs.format.y8, args.fps)
     if args.with_depth:
         config.enable_stream(rs.stream.depth, args.width, args.height, rs.format.z16, args.fps)
-    profile = pipeline.start(config)
+
+    # The D435i needs a few seconds to become claimable after another process
+    # releases it, and start() can either raise or simply take a long time in
+    # that window. Say what we are doing so a stall is visible in the log, and
+    # retry rather than die on the first busy error.
+    profile = None
+    for attempt in range(1, 6):
+        print(f"[stereo-relay] starting camera pipeline (attempt {attempt}/5)...", flush=True)
+        try:
+            profile = pipeline.start(config)
+            break
+        except RuntimeError as exc:
+            print(f"[stereo-relay] pipeline.start failed: {exc}", file=sys.stderr, flush=True)
+            time.sleep(2.0)
+    if profile is None:
+        print("[stereo-relay] could not start the camera; is another process holding it?", file=sys.stderr)
+        return 1
 
     sensor = profile.get_device().first_depth_sensor()
     if sensor.supports(rs.option.emitter_enabled):

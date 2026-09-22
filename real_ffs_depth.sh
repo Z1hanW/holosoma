@@ -38,8 +38,23 @@ done
 
 log_dir="${ROOT_DIR}/logs/real_ffs_depth_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
+
+# Record what the policy actually saw. Each .npz under evidence/ holds the metric
+# FFS depth, the crop/resize/clip result, the delayed 58x87 frame written to shared
+# memory, and the IR stereo pair it came from. Every frame by default (EVERY=1) for
+# up to an hour at 30 Hz; the repo default of every 6th frame is available via
+# HOLOSOMA_AUDIT_DEPTH_EVERY. HOLOSOMA_DEPLOYMENT_AUDIT=0 turns it off.
+if [[ "${HOLOSOMA_DEPLOYMENT_AUDIT:-1}" == "1" ]]; then
+  export HOLOSOMA_DEPLOYMENT_AUDIT_DIR="${log_dir}/evidence"
+  export HOLOSOMA_AUDIT_DEPTH_EVERY="${HOLOSOMA_AUDIT_DEPTH_EVERY:-1}"
+  export HOLOSOMA_AUDIT_DEPTH_LIMIT="${HOLOSOMA_AUDIT_DEPTH_LIMIT:-108000}"
+else
+  unset HOLOSOMA_DEPLOYMENT_AUDIT_DIR
+fi
+
 exec > >(tee -a "${log_dir}/depth.log") 2>&1
 echo "[real_ffs_depth] log_dir=${log_dir}"
+[[ -n "${HOLOSOMA_DEPLOYMENT_AUDIT_DIR:-}" ]] && echo "[real_ffs_depth] recording depth evidence to ${HOLOSOMA_DEPLOYMENT_AUDIT_DIR} (every ${HOLOSOMA_AUDIT_DEPTH_EVERY} frame(s), limit ${HOLOSOMA_AUDIT_DEPTH_LIMIT})"
 
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5)
 
@@ -90,12 +105,14 @@ done
 [ -s services.stopped ] && sleep 1.5
 HOLOSOMA_RELAY_BIND='tcp://*:${RELAY_PORT}' setsid nohup ./real_ffs_relay.sh > relay.log 2>&1 < /dev/null &
 echo \$! > relay.pid
-for i in \$(seq 1 60); do
+for i in \$(seq 1 120); do
   grep -q publishing relay.log 2>/dev/null && { echo "  relay pid \$(cat relay.pid): \$(grep -m1 publishing relay.log)"; exit 0; }
   kill -0 "\$(cat relay.pid)" 2>/dev/null || break
   sleep 0.25
 done
-echo "  relay did not start; remote log:" >&2; tail -8 relay.log >&2; exit 1
+echo "  relay did not start within 30 s; remote log:" >&2; tail -8 relay.log >&2
+echo "  camera holders now:" >&2; for v in /dev/video*; do fuser "\$v" 2>/dev/null | xargs -r -n1 ps -o pid=,cmd= -p 2>/dev/null; done | sort -u | cut -c1-120 | sed 's/^/    /' >&2
+exit 1
 EOF
 }
 
