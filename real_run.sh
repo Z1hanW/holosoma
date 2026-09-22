@@ -4,6 +4,16 @@ set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# The robot-facing NIC is not eth0 on every host (it is enp132s0 on the laptop),
+# so allow it to be overridden rather than hardcoding one machine's name.
+interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
+if ! ip link show "$interface" >/dev/null 2>&1; then
+  echo "[real_run] ERROR: network interface '$interface' does not exist on this host." >&2
+  echo "[real_run] Available: $(ip -brief link show | awk '$1!="lo"{printf "%s ", $1}')" >&2
+  echo "[real_run] Set HOLOSOMA_REAL_INTERFACE=<name> to choose one." >&2
+  exit 1
+fi
+
 log_dir="${ROOT_DIR}/logs/real_run_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/run.log") 2>&1
@@ -23,4 +33,4 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   --task.model-path _ckps/lk9ocrn6_model_11500.onnx \
   --task.use-joystick \
   --task.rl-rate 50 \
-  --task.interface eth0
+  --task.interface "$interface"

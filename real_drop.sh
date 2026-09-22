@@ -34,4 +34,4 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   --task.model-path "$checkpoint" \
   --task.use-joystick \
   --task.rl-rate 50 \
-  --task.interface eth0
+  --task.interface "$interface"
