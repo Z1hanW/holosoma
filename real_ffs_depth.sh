@@ -40,12 +40,32 @@ SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5)
 
 stop_remote_relay() {
   [[ -n "$RELAY_HOST" ]] || return 0
-  "${SSH[@]}" "$RELAY_HOST" "cd ${RELAY_DIR} 2>/dev/null && [ -f relay.pid ] && kill \"\$(cat relay.pid)\" 2>/dev/null; rm -f ${RELAY_DIR}/relay.pid" \
-    && echo "[real_ffs_depth] remote relay stopped" \
-    || echo "[real_ffs_depth] WARNING: could not stop remote relay on ${RELAY_HOST}; check ${RELAY_DIR}/relay.pid there" >&2
+  local out
+  out=$("${SSH[@]}" "$RELAY_HOST" "if [ -f ${RELAY_DIR}/relay.pid ]; then kill \"\$(cat ${RELAY_DIR}/relay.pid)\" 2>/dev/null && echo killed; rm -f ${RELAY_DIR}/relay.pid; fi" 2>/dev/null) \
+    || { echo "[real_ffs_depth] WARNING: could not reach ${RELAY_HOST} to stop the relay; check ${RELAY_DIR}/relay.pid there" >&2; return 0; }
+  [[ "$out" == *killed* ]] && echo "[real_ffs_depth] remote relay stopped"
+}
+
+install_remote_relay() {
+  # The relay is two files that live in this repo. Push them to the robot when
+  # they are missing or differ, so a wiped home directory or a stale copy on the
+  # Jetson can never be the reason deployment fails.
+  local remote_sums
+  remote_sums=$("${SSH[@]}" "$RELAY_HOST" "mkdir -p ${RELAY_DIR} && cd ${RELAY_DIR} && md5sum stereo_relay_pub.py real_ffs_relay.sh 2>/dev/null | awk '{print \$1}' | tr '\n' ' '") \
+    || { echo "[real_ffs_depth] ERROR: cannot ssh to ${RELAY_HOST}" >&2; return 1; }
+  local local_sums
+  local_sums=$(md5sum scripts/stereo_relay_pub.py scripts/real_ffs_relay.sh | awk '{print $1}' | tr '\n' ' ')
+  if [[ "$remote_sums" != "$local_sums" ]]; then
+    echo "[real_ffs_depth] installing relay scripts to ${RELAY_HOST}:${RELAY_DIR}"
+    scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+      scripts/stereo_relay_pub.py scripts/real_ffs_relay.sh "${RELAY_HOST}:${RELAY_DIR}/" \
+      || { echo "[real_ffs_depth] ERROR: scp to ${RELAY_HOST} failed" >&2; return 1; }
+    "${SSH[@]}" "$RELAY_HOST" "chmod +x ${RELAY_DIR}/real_ffs_relay.sh"
+  fi
 }
 
 start_remote_relay() {
+  install_remote_relay || exit 1
   echo "[real_ffs_depth] starting stereo relay on ${RELAY_HOST} (${RELAY_DIR}/real_ffs_relay.sh)"
   # Kill a previous relay via its pidfile, launch detached from this ssh session,
   # then block until it reports it is publishing so image_server never has to wait.

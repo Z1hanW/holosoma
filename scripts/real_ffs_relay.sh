@@ -21,5 +21,23 @@ if ! lsusb 2>/dev/null | grep -q "8086:0b3a"; then
   exit 1
 fi
 
+# The D435i can only be streamed by one process. Another RealSense client (e.g. an
+# autostarted stereo server) makes our pipeline start fine and then starve with
+# "Frame didn't arrive", so refuse up front and say who has it rather than fight.
+holders=""
+for v in /dev/video*; do
+  for p in $(fuser "$v" 2>/dev/null); do
+    [[ "$p" == "$$" ]] && continue
+    holders+="$(ps -o pid=,cmd= -p "$p" 2>/dev/null | cut -c1-110)"$'\n'
+  done
+done
+holders="$(printf '%s' "$holders" | sort -u | sed '/^$/d')"
+if [[ -n "$holders" ]]; then
+  echo "[real_ffs_relay] ERROR: the camera is already in use by another process:" >&2
+  printf '%s\n' "$holders" | sed 's/^/    /' >&2
+  echo "[real_ffs_relay] Stop it first (or set HOLOSOMA_RELAY_IGNORE_HOLDERS=1 to try anyway)." >&2
+  [[ "${HOLOSOMA_RELAY_IGNORE_HOLDERS:-0}" == "1" ]] || exit 1
+fi
+
 echo "[real_ffs_relay] bind=${BIND} emitter=${EMITTER}"
 exec "$PY" -u "${HERE}/stereo_relay_pub.py" --bind "$BIND" --emitter "$EMITTER" --stats-interval 5

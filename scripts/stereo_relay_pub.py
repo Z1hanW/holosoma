@@ -102,9 +102,22 @@ def main() -> int:
 
     seq = sent = 0
     last = time.monotonic()
+    timeouts = 0
     try:
         while not stop:
-            frames = pipeline.wait_for_frames(5000)
+            try:
+                frames = pipeline.wait_for_frames(5000)
+            except RuntimeError as exc:
+                # Usually another process has grabbed the camera, or the stream
+                # stalled after a reconnect. Say so and keep trying for a while
+                # instead of dying and leaving the laptop with a frozen frame.
+                timeouts += 1
+                print(f"[stereo-relay] no frames for 5 s ({timeouts}/6): {exc}", file=sys.stderr)
+                if timeouts >= 6:
+                    print("[stereo-relay] giving up; check for another RealSense client on this host", file=sys.stderr)
+                    raise
+                continue
+            timeouts = 0
             l = frames.get_infrared_frame(1)
             r = frames.get_infrared_frame(2)
             if not l or not r:
