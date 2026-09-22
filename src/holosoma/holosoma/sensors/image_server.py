@@ -670,7 +670,13 @@ if __name__ == "__main__":
     # Parse command line arguments using subcommand presets from config_values.image_server.
     cfg = tyro.cli(ImageServerCliConfig, default=holosoma.config_values.image_server.real)
 
-    if cfg.camera_type == "realsense":
+    if cfg.camera_type == "remote_stereo":
+        # The camera is on another host; stereo_relay_pub.py streams the IR pair
+        # here and the learned depth predictor runs locally.
+        from holosoma.sensors.remote_stereo import RemoteStereoCamerasConfig, RemoteStereoCamerasWrapper
+
+        camera_wrapper = RemoteStereoCamerasWrapper(RemoteStereoCamerasConfig())
+    elif cfg.camera_type == "realsense":
         # Enable IR stereo streams when GUM depth prediction is requested;
         # GUM requires stereo image pairs and stereo calibration.
         if cfg.enable_gum_depth_prediction:
@@ -703,7 +709,14 @@ if __name__ == "__main__":
     thread = threading.Thread(target=image_server.send_process)
     thread.start()
     try:
-        thread.join()
+        # Python only runs signal handlers on the main thread, and a join() with
+        # no timeout parks the main thread on a lock it never returns from when
+        # the signal lands on the worker thread instead. SIGTERM (systemd,
+        # `timeout`, a plain `kill`) then never reaches request_stop() and the
+        # server keeps serving - and never unlinks depth_img_shm. Polling the
+        # join keeps the main thread returning to the interpreter.
+        while thread.is_alive():
+            thread.join(timeout=0.5)
     except KeyboardInterrupt:
         print("[Image Server] Stop requested")
     finally:

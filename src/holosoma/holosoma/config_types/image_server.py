@@ -125,7 +125,10 @@ class ImageServerConfig:
     crop_x_end: int | None = None
     """End column for cropping depth frames before resize. None means no crop."""
 
-    camera_type: Literal["zed", "realsense"] = "zed"
+    camera_type: Literal["zed", "realsense", "remote_stereo"] = "zed"
+    """Camera backend. "remote_stereo" receives IR stereo pairs over the network
+    from stereo_relay_pub.py running on the camera host, for running a learned
+    depth predictor on a different machine than the camera."""
     """Camera backend to use when running the standalone image server."""
 
     def __post_init__(self):

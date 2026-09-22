@@ -24,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 
@@ -38,12 +39,22 @@ class FFSConfig:
     """Checkpoint path; its directory must also contain cfg.yaml. Defaults to $HOLOSOMA_FFS_MODEL."""
 
     device: str = "cuda"
-    valid_iters: int = 16
-    """Refinement iterations. Lower is faster; upstream demo defaults to 32."""
+    valid_iters: int = 8
+    """Refinement iterations. Matches cfg.yaml shipped with the c-fast-foundationstereo
+    checkpoint. At 512x288 on the RTX PRO 5000 laptop GPU: 8 iters ~27 ms p99,
+    16 iters ~41 ms p99, so 16 blows the 33 ms image-server budget."""
 
     max_disp: int = 192
     hierarchical: bool = False
     """Use run_hierachical() (upstream spelling) for high-resolution inputs."""
+
+    infer_height: int = 288
+    infer_width: int = 512
+    """Resolution the network runs at (per eye). The input pair is downscaled to
+    this and the depth is resampled back to the input size, so callers get depth
+    at their own resolution. On the RTX PRO 5000 laptop GPU, 512x288 holds
+    ~27 ms p99 against the 33 ms image-server budget; native 848x480 does not.
+    0 disables the rescale."""
 
     depth_min: float = 0.2
     depth_max: float = 10.0
@@ -133,12 +144,27 @@ class FastFoundationStereo:
             raise ValueError(f"expected a side-by-side HxWx3 image with even width, got {img.shape}")
         half = img.shape[1] // 2
         left, right = img[:, :half], img[:, half:]
+        h0, w0 = left.shape[:2]
 
         intr = np.asarray(camera_intrinsics, dtype=np.float64)
         if intr.shape != (2, 3, 3):
             raise ValueError(f"camera_intrinsics must be (2, 3, 3), got {intr.shape}")
         fx = float(intr[0][0, 0])
         baseline = self._baseline_from_extrinsics(camera_extrinsics)
+
+        # Run the network at a fixed, smaller resolution for speed and resample the
+        # depth back afterwards. Disparity scales with image width, so fx is scaled
+        # the same way to keep the depth metric.
+        rescale = (
+            self.cfg.infer_height > 0
+            and self.cfg.infer_width > 0
+            and (self.cfg.infer_height, self.cfg.infer_width) != (h0, w0)
+        )
+        if rescale:
+            size = (self.cfg.infer_width, self.cfg.infer_height)
+            left = cv2.resize(left, size, interpolation=cv2.INTER_AREA)
+            right = cv2.resize(right, size, interpolation=cv2.INTER_AREA)
+            fx *= self.cfg.infer_width / w0
 
         with torch.no_grad():
             # Upstream feeds raw 0-255 values, not normalized images.
@@ -170,5 +196,10 @@ class FastFoundationStereo:
             depth = (fx * baseline) / disp
         depth[~np.isfinite(depth)] = self.cfg.depth_max
         depth[disp <= 0] = self.cfg.depth_max
+        depth = np.clip(depth, self.cfg.depth_min, self.cfg.depth_max).astype(np.float32)
 
-        return np.clip(depth, self.cfg.depth_min, self.cfg.depth_max).astype(np.float32)
+        if rescale:
+            # Back to the caller's resolution so downstream crop constants, which
+            # are expressed in native pixels, keep their meaning.
+            depth = cv2.resize(depth, (w0, h0), interpolation=cv2.INTER_LINEAR)
+        return depth

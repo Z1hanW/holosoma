@@ -186,7 +186,22 @@ mujoco_zed2i = dataclasses.replace(
     buffer_len=1,
 )
 
+# Real robot, but the D435i is on another host: its IR stereo pair arrives over the
+# network (stereo_relay_pub.py) and Fast-FoundationStereo runs here to produce the
+# depth the policy consumes. Everything downstream of depth_gum matches real_d435i.
+# Select FFS over GUM with HOLOSOMA_DEPTH_PREDICTOR=ffs.
+remote_ffs_d435i = dataclasses.replace(
+    real_d435i,
+    camera_type="remote_stereo",
+    enable_gum_depth_prediction=True,
+    enable_rgb=True,
+    depth_source="depth_gum",
+    save_images=False,
+    visualize_images=False,
+)
+
 DEFAULTS = {
+    "remote_ffs_d435i": remote_ffs_d435i,
     "mujoco": mujoco,
     "mujoco_d435i": mujoco_d435i,
     "mujoco_depth_gum_d435i": mujoco_depth_gum_d435i,
