@@ -103,3 +103,52 @@ Data-only NFS directory:
 - All eight nodes received and independently hashed the complete required
   assets. The exact installed paths/digests are in `dataset_identity.json`
   and `campaign.json` in the active audit directory.
+
+## Additional 2a Launch After Preparing Spare Nodes
+
+At the user's request, prepare zzzihanw-65 before stopping `xfn7ydac` and
+combine the released GPUs with the seven spare nodes. This is a new fresh
+box23K-initialized run with the recipe above, not another model_01000 resume.
+The separately running recovery `3e07dm2e` was not stopped or modified.
+
+- New W&B: <https://wandb.ai/zihanw22/carry-any/runs/5sk26e4t>.
+- Execution remains pinned to `d9c63682732fd77e1565118ea9eb56682d909a80`;
+  every node independently fetched and verified the clean remote Git checkout.
+  No training algorithm, camera, reward, command or data definition changed.
+- Rank order: `zzzihanw-17/.97`, `-47/.24`, `-49/.180`, `-46/.54`,
+  `-40/.244`, `-93/.61`, `-65/.201`, `-39/.39`, all `10.99.0.*` in
+  `ap-northeast-2a`. Master is `10.99.0.97:36960`.
+- Each GPU has 2048 environments: 131072 total. All 56 directed network
+  probes had zero packet loss, with mean RTT 0.210-0.910 ms.
+- Prepared one verified-unused NVMe on -65 for `/data`. Storage inspection
+  also found -40 and -93 using their system disks for training paths. Their
+  inactive training directories were checksum-copied onto one unused NVMe
+  each; originals remain as `*.rootfs-preserved-20260922`. Existing Ray and
+  other service paths were not changed. All new mounts have UUID-bound
+  persistent entries; unavailable mounts leave unwritable directories.
+  Instance-store contents remain ephemeral across instance stop/termination.
+- Only `xfn7ydac` was stopped, after -65 passed asset/runtime/ONNX preflight.
+  Verified parent/worker PID identities before signaling; all eight GPU
+  workers exited. Last observed progress was 32035; durable model_32000 PT
+  and ONNX hashes matched the remote pair manifest. W&B was closed with an
+  explicit user-stop reason, no training-history append, and unchanged
+  scientific config. Its `failed` status means user interruption, not a
+  numerical failure or completed training target.
+- The new 64-rank canary completed two updates and exited zero on all nodes.
+  Complete rank RNG/environment state and finite tensors were verified;
+  independent PyTorch/ORT maximum absolute error was `2.86102294921875e-6`.
+  Formal training loads no canary weights.
+- At `2026-09-22 23:01:40 UTC`, formal acceptance confirmed all eight nodes
+  at 11 completed updates, 64 distinct GPU workers with ranks 0-63, no fatal
+  log matches or uncorrectable ECC, and finite W&B losses. PPO/BC was
+  .01/.99 and distributed loss weights summed to 64. Native saves remain
+  PT+ONNX every 500 updates; the first formal upload boundary was not yet
+  reached at this startup acceptance.
+
+Audit root:
+`/data/holosoma_training_audits/mix216_second_ws64_20260922_2220`.
+See `REPORT.md`, `formal_start_acceptance.json`, `xfn_stop.json`,
+`xfn_wandb_stop_verification.json`, `storage*_ready.json`, `network_probe.json`,
+and `mix-contact+adaptive/run_contract.json`. Controller-local admin helpers
+are not distributed as training source. The pre-existing `agent.md` edits
+were not staged or modified.
