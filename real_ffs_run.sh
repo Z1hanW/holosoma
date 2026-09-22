@@ -79,6 +79,12 @@ then
   echo "[real_ffs_run] refusing to start the policy on this depth. Set HOLOSOMA_SKIP_DEPTH_CHECK=1 to override." >&2
   [[ "${HOLOSOMA_SKIP_DEPTH_CHECK:-0}" == "1" ]] || exit 1
 fi
+# HOLOSOMA_DEPTH_CHECK_ONLY=1: report on the depth and stop here, without
+# launching the policy - a way to look before pressing A.
+if [[ "${HOLOSOMA_DEPTH_CHECK_ONLY:-0}" == "1" ]]; then
+  echo "[real_ffs_run] depth check only - not launching the policy." >&2
+  exit 0
+fi
 
 log_dir="${ROOT_DIR}/logs/real_ffs_run_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
