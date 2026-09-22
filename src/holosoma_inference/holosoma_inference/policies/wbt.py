@@ -1384,7 +1384,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._joystick_sparse_root_command_offset.fill(0.0)
             return
 
-        deadband = 0.1
+        deadband = 0.05
         xy_scale = 0.07
         yaw_scale = 0.1
 
