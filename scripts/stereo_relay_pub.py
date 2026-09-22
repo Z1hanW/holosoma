@@ -133,19 +133,48 @@ def main() -> int:
     seq = sent = 0
     last = time.monotonic()
     timeouts = 0
+    restarts = 0
     try:
         while not stop:
             try:
                 frames = pipeline.wait_for_frames(5000)
             except RuntimeError as exc:
-                # Usually another process has grabbed the camera, or the stream
-                # stalled after a reconnect. Say so and keep trying for a while
-                # instead of dying and leaving the laptop with a frozen frame.
+                # Usually another process has grabbed the camera (an autostarted
+                # RealSense client restarting), or the stream stalled. A stalled
+                # pipeline does not recover on its own, so after a few misses tear
+                # it down and reopen the camera; that re-acquires it once the
+                # other client has let go. Give up only after repeated failures.
                 timeouts += 1
-                print(f"[stereo-relay] no frames for 5 s ({timeouts}/6): {exc}", file=sys.stderr)
-                if timeouts >= 6:
-                    print("[stereo-relay] giving up; check for another RealSense client on this host", file=sys.stderr)
+                print(f"[stereo-relay] no frames for 5 s ({timeouts}/3): {exc}", file=sys.stderr, flush=True)
+                if timeouts < 3:
+                    continue
+                restarts += 1
+                if restarts > 10:
+                    print("[stereo-relay] giving up after 10 pipeline restarts; another RealSense client is holding the camera", file=sys.stderr)
                     raise
+                print(f"[stereo-relay] restarting camera pipeline ({restarts}/10)...", file=sys.stderr, flush=True)
+                try:
+                    pipeline.stop()
+                except RuntimeError:
+                    pass
+                time.sleep(2.0)
+                profile = None
+                for attempt in range(1, 6):
+                    try:
+                        profile = pipeline.start(config)
+                        break
+                    except RuntimeError as exc2:
+                        print(f"[stereo-relay]   start failed ({attempt}/5): {exc2}", file=sys.stderr, flush=True)
+                        time.sleep(2.0)
+                if profile is None:
+                    continue
+                sensor = profile.get_device().first_depth_sensor()
+                if sensor.supports(rs.option.emitter_enabled):
+                    sensor.set_option(rs.option.emitter_enabled, 1.0 if args.emitter == "on" else 0.0)
+                if sensor.supports(rs.option.enable_auto_exposure):
+                    sensor.set_option(rs.option.enable_auto_exposure, 1.0)
+                timeouts = 0
+                print("[stereo-relay] camera pipeline restarted", flush=True)
                 continue
             timeouts = 0
             l = frames.get_infrared_frame(1)

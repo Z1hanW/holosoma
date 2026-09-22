@@ -22,11 +22,14 @@ export HOLOSOMA_FFS_MODEL="${HOLOSOMA_FFS_MODEL:-$HOLOSOMA_FFS_REPO/weights/c-ff
 RELAY_HOST="${HOLOSOMA_RELAY_HOST-192.168.123.164}"
 RELAY_PORT="${HOLOSOMA_RELAY_PORT:-5602}"
 RELAY_DIR="${HOLOSOMA_RELAY_REMOTE_DIR:-~/depth_relay}"
-# Space-separated systemd --user services on the robot that hold the camera (e.g.
-# "lsvla-vision"). They are stopped before the relay starts and started again on
-# exit if they were active. Off by default: stopping someone else's service is a
-# decision, not a default.
-RELAY_STOP_SERVICES="${HOLOSOMA_RELAY_STOP_SERVICES:-}"
+# Space-separated systemd --user services on the robot that hold the camera. They
+# are stopped before the relay starts and started again on exit if they were
+# active. lsvla-vision is on by default: it is autostarted, crash-loops, and
+# re-grabs the D435i every time it restarts, which starves our relay mid-session
+# ("Frame didn't arrive") whenever this script is run without it. The operator
+# has approved stopping it for the duration of a deployment. Set the variable
+# to an empty string to leave robot services alone.
+RELAY_STOP_SERVICES="${HOLOSOMA_RELAY_STOP_SERVICES-lsvla-vision}"
 export HOLOSOMA_REMOTE_STEREO_CONNECT="${HOLOSOMA_REMOTE_STEREO_CONNECT:-tcp://${RELAY_HOST:-192.168.123.164}:${RELAY_PORT}}"
 
 for f in "$HOLOSOMA_FFS_MODEL" "$(dirname "$HOLOSOMA_FFS_MODEL")/cfg.yaml"; do

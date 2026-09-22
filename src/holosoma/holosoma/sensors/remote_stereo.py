@@ -49,8 +49,10 @@ class RemoteStereoCameraConfig:
     stale_after_s: float = 1.0
     """Warn once when no frame has arrived for this long."""
 
-    recv_timeout_s: float = 10.0
-    """How long get_frames() may block waiting for the first frame."""
+    recv_timeout_s: float = 45.0
+    """How long get_frames() may block waiting for the first frame. Long enough
+    to survive one relay-side camera pipeline restart (3 x 5 s misses, stop,
+    reopen), which is how the D435i recovers from a 'started but no frames' stall."""
 
 
 @dataclass(frozen=True)
