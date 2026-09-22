@@ -41,13 +41,14 @@ mkdir -p "$log_dir"
 
 # Record what the policy actually saw. Each .npz under evidence/ holds the metric
 # FFS depth, the crop/resize/clip result, the delayed 58x87 frame written to shared
-# memory, and the IR stereo pair it came from. Every frame by default (EVERY=1) for
-# up to an hour at 30 Hz; the repo default of every 6th frame is available via
-# HOLOSOMA_AUDIT_DEPTH_EVERY. HOLOSOMA_DEPLOYMENT_AUDIT=0 turns it off.
+# memory, and the IR stereo pair it came from. Measured at ~1.4 MB per record, so
+# every 3rd frame (10 Hz, ~14 MB/s, ~50 GB/h) by default; EVERY=1 keeps every
+# frame but the compressor cannot keep up at 30 Hz and starts dropping records.
+# HOLOSOMA_DEPLOYMENT_AUDIT=0 turns recording off.
 if [[ "${HOLOSOMA_DEPLOYMENT_AUDIT:-1}" == "1" ]]; then
   export HOLOSOMA_DEPLOYMENT_AUDIT_DIR="${log_dir}/evidence"
-  export HOLOSOMA_AUDIT_DEPTH_EVERY="${HOLOSOMA_AUDIT_DEPTH_EVERY:-1}"
-  export HOLOSOMA_AUDIT_DEPTH_LIMIT="${HOLOSOMA_AUDIT_DEPTH_LIMIT:-108000}"
+  export HOLOSOMA_AUDIT_DEPTH_EVERY="${HOLOSOMA_AUDIT_DEPTH_EVERY:-3}"
+  export HOLOSOMA_AUDIT_DEPTH_LIMIT="${HOLOSOMA_AUDIT_DEPTH_LIMIT:-36000}"
 else
   unset HOLOSOMA_DEPLOYMENT_AUDIT_DIR
 fi
