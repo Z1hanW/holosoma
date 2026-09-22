@@ -1385,7 +1385,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        xy_scale = 0.1
+        xy_scale = 0.15
         yaw_scale = 0.1
 
         def apply_deadband(value: float) -> float:
@@ -1395,7 +1395,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         ly = apply_deadband(float(getattr(wc_msg, "ly", 0.0)))
         rx = apply_deadband(float(getattr(wc_msg, "rx", 0.0)))
 
-        self._joystick_sparse_root_command_offset[0, 0] = ly * xy_scale
+        self._joystick_sparse_root_command_offset[0, 0] = np.sign(ly) * xy_scale if ly else 0.0
         self._joystick_sparse_root_command_offset[0, 1] = -lx * xy_scale
         self._joystick_sparse_root_command_offset[0, 2] = -rx * yaw_scale
 
