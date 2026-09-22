@@ -1,5 +1,6 @@
 import time
 import os
+import signal
 import threading
 import random
 from queue import Queue
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import TypedDict
 import cv2
 import numpy as np
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import tyro
 from typing_extensions import Annotated, NotRequired
 import holosoma.config_values.image_server
@@ -370,6 +371,8 @@ class ImageVisualizer:
 class ImageServer:
     def __init__(self, camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper, cfg: ImageServerConfig):
         self.cfg: ImageServerConfig = cfg
+        self._stop_event = threading.Event()
+        self._closed = False
 
         # Initialize camera wrapper
         self.camera_wrapper: ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
@@ -464,6 +467,7 @@ class ImageServer:
     
     def _init_shared_memory(self):
         img_shm_name = "depth_img_shm"
+        self._owns_image_shm = False
 
         # Initialize shared memory
         expected_shape = [self.camera_wrapper.num_cameras, 1, self.cfg.resized_height, self.cfg.resized_width]
@@ -474,9 +478,11 @@ class ImageServer:
             # Try to create new shared memory, if it exists, connect to existing one
             try:
                 self.image_shm = shared_memory.SharedMemory(create=True, size=memory_size, name=img_shm_name)
+                self._owns_image_shm = True
                 print(f"[Image Server] Created new shared memory: {img_shm_name}")
             except FileExistsError:
                 self.image_shm = shared_memory.SharedMemory(name=img_shm_name)
+                self._owns_image_shm = True
                 print(f"[Image Server] Connected to existing shared memory: {img_shm_name}")
             
             self.img_array = np.ndarray(expected_shape, dtype=dtype, buffer=self.image_shm.buf)
@@ -486,6 +492,35 @@ class ImageServer:
             raise
 
         print("ImageServer initialized")
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.request_stop()
+
+        if self._deployment_audit is not None:
+            self._deployment_audit.close()
+
+        for camera in getattr(self.camera_wrapper, "cameras", {}).values():
+            release = getattr(camera, "release", None)
+            if release is not None:
+                try:
+                    release()
+                except Exception as exc:
+                    print(f"[Image Server] Camera release warning: {exc}")
+
+        self.image_shm.close()
+        if self._owns_image_shm:
+            try:
+                self.image_shm.unlink()
+            except FileNotFoundError:
+                # A legacy client may already have unlinked this owner segment.
+                resource_tracker.unregister(self.image_shm._name, "shared_memory")
+        print("[Image Server] Shutdown complete")
 
     def _resize_clip_expand_transpose(self, frame):
         # crop
@@ -531,7 +566,7 @@ class ImageServer:
         rate_limiter = RateLimiter(render_frequency)
 
         step_count = 0
-        while True:
+        while not self._stop_event.is_set():
 
             # 0. grab frames from cameras
             with self.capture_profiler.measure():
@@ -651,14 +686,19 @@ if __name__ == "__main__":
     # Create image server with parsed config
     image_server = ImageServer(camera_wrapper, cfg)
 
-    def send_with_audit():
-        try:
-            image_server.send_process()
-        finally:
-            if image_server._deployment_audit is not None:
-                image_server._deployment_audit.close()
+    def request_stop(_signum, _frame):
+        image_server.request_stop()
 
-    thread = threading.Thread(target=send_with_audit)
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGHUP, request_stop)
+
+    thread = threading.Thread(target=image_server.send_process)
     thread.start()
-    time.sleep(2)
-    thread.join()
+    try:
+        thread.join()
+    except KeyboardInterrupt:
+        print("[Image Server] Stop requested")
+    finally:
+        image_server.request_stop()
+        thread.join(timeout=6.0)
+        image_server.close()

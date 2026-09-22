@@ -1,4 +1,4 @@
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import threading
 import time
 from collections import deque
@@ -66,6 +66,7 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
 
         # TDDO: enable this after debugging
         self.depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+        resource_tracker.unregister(self.depth_img_shm._name, "shared_memory")
         self.depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self.depth_img_shm.buf)
         print(f"[Policy] Depth image client initialized with shared memory: {self.depth_img_shm.name}")
         # self.depth_img_array = np.zeros(expected_shape, dtype=np.float32)

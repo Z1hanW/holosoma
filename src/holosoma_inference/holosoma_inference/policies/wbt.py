@@ -2,7 +2,7 @@ import json
 import os
 import sys
 import time
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 
 import numpy as np
@@ -1014,6 +1014,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._depth_img_array is None:
             try:
                 self._depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+                resource_tracker.unregister(self._depth_img_shm._name, "shared_memory")
             except FileNotFoundError as exc:
                 raise RuntimeError(
                     "perception_obs requires shared memory 'depth_img_shm'. Start the MuJoCo image server first."

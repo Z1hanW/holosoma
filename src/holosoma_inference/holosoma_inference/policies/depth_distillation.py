@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import math
 
 import numpy as np
@@ -109,6 +109,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
         expected_shape = [num_cameras, channels, img_shape[0], img_shape[1]]
 
         self.depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+        resource_tracker.unregister(self.depth_img_shm._name, "shared_memory")
         self.depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self.depth_img_shm.buf)
         logger.info(f"[DepthDistillationPolicy] Depth SHM client initialized: shape={expected_shape}")
 
