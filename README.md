@@ -28,6 +28,32 @@ Do not substitute `contact_interval`: contact sidecars can override that mode.
   less than 1 mm of object-z variation; the historical rule labels its drop at
   frame 1. This change does not modify that dataset or add a substitute rule.
 
+## Multi-Clip Return To Default Pose (2026-09-22)
+
+For a new multi-clip experiment, explicitly set:
+
+```text
+--command.setup-terms.motion-command.params.motion-config.runtime-default-pose-append-duration-s=0.2
+```
+
+At 50 Hz this adds ten reference interpolation steps **after the final source
+frame**, ending exactly at the robot's default standing pose. Root XY and yaw
+remain anchored to that clip's endpoint; object reference pose stays at its
+endpoint. This is a tracking target, not a teleport of the simulated robot.
+Motion-end termination waits for the endpoint; safety terminations and the
+episode timeout remain active. The existing reset sampler, source NPZs,
+pickup/drop windows, reward weights and camera are not changed. Appended
+precomputed XY/yaw commands are zero, as with static transition materialization.
+
+The serialized field defaults to zero to preserve historical checkpoints:
+their `enable_default_pose_append=true` / `default_pose_append_duration_s=2`
+did **not** activate a multi-clip tail. Single-clip static append is unchanged.
+The effective `runtime_blend` append and its step count are bound into the
+checkpoint/ONNX transition contract. A changed timeline is not an exact resume;
+do not bypass existing resume or policy-init checks. Existing launchers and
+running jobs are not automatically switched. Use the explicit flag in the
+next authorized experiment, with its normal Git/config/ONNX preflight.
+
 ## Features
 
 - **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)

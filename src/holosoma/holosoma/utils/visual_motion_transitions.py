@@ -127,9 +127,9 @@ def resolve_visual_motion_transition_plan(
 
     Viewers have no authenticated checkpoint artifact, so this deliberately
     mirrors the live command's source classification: an original global bank
-    may display its requested prepend, but never fabricates the requested
-    append that training skipped. A standalone source keeps both static
-    splices.
+    may display its requested prepend. Its historical static append request
+    stays inactive; only an explicit runtime append adds a tail. A standalone
+    source keeps both static splices.
     """
 
     if (
@@ -188,6 +188,12 @@ def resolve_visual_motion_transition_plan(
 
     prepend_steps = requested_steps("prepend")
     append_steps = requested_steps("append")
+    runtime_duration = getattr(motion_cfg, "runtime_default_pose_append_duration_s", 0.0)
+    if type(runtime_duration) not in (int, float) or not math.isfinite(runtime_duration) or runtime_duration < 0:
+        raise ValueError("runtime_default_pose_append_duration_s must be finite and non-negative.")
+    runtime_append_steps = round(runtime_duration / float(control_dt_s))
+    if runtime_duration > 0 and not 2 <= runtime_append_steps <= MAX_VISUAL_MOTION_TRANSITION_STEPS:
+        raise ValueError("Runtime append must contain 2..4096 control steps.")
     if motion_transition_source is not None:
         source_semantics = canonical_motion_transition_source(
             motion_transition_source,
@@ -202,13 +208,17 @@ def resolve_visual_motion_transition_plan(
         )
 
     if source_semantics == "global_multi_clip_runtime":
+        if runtime_append_steps and simulator_type != "isaacsim":
+            raise ValueError("Runtime default-pose append requires IsaacSim.")
         return VisualMotionTransitionPlan(
             source_semantics="global_multi_clip_runtime",
             # The live global-bank implementation is an IsaacSim-only runtime
             # blend. MuJoCo and IsaacGym explicitly disable it.
             prepend_steps=prepend_steps if simulator_type == "isaacsim" else 0,
-            append_steps=0,
+            append_steps=runtime_append_steps,
         )
+    if runtime_append_steps:
+        raise ValueError("Runtime default-pose append requires global multi-clip semantics.")
     return VisualMotionTransitionPlan(
         source_semantics="single_clip_static",
         prepend_steps=prepend_steps,

@@ -74,6 +74,7 @@ class SourceSpec:
     label: str
     motion_dir: Path
     contact_root: Path
+    contact_reference_mode: str = "embedded_legacy"
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,8 @@ def audit_sources(source_specs: list[SourceSpec], *, expected_total: int | None)
     transition_semantics: tuple[int, str] | None = None
 
     for source in source_specs:
+        if source.contact_reference_mode not in {"embedded_legacy", "source_motion"}:
+            raise ValueError(f"Unknown contact reference mode: {source.contact_reference_mode}")
         motion_dir = source.motion_dir.expanduser().resolve()
         contact_root = source.contact_root.expanduser().resolve()
         if motion_dir.is_symlink() or not motion_dir.is_dir():
@@ -497,8 +500,9 @@ def audit_sources(source_specs: list[SourceSpec], *, expected_total: int | None)
                 "right_wrist_contact_points.npy",
                 "right_wrist_contact_point_counts.npy",
                 "right_wrist_contact_interval_steps.npy",
-                "teacher_rollout_reference.npz",
             }
+            if source.contact_reference_mode == "embedded_legacy":
+                required_sidecars.add("teacher_rollout_reference.npz")
             direct_names = {path.name for path in contact_dir.iterdir() if path.is_file()}
             missing_sidecars = sorted(required_sidecars - direct_names)
             if missing_sidecars:
@@ -547,6 +551,8 @@ def audit_sources(source_specs: list[SourceSpec], *, expected_total: int | None)
         source_payloads.append(
             {
                 "label": source.label,
+                **({"contact_reference_mode": "source_motion"}
+                   if source.contact_reference_mode == "source_motion" else {}),
                 "clip_count": len(motion_paths),
                 "object_map": stable_file_record(
                     map_path, record_path=OBJECT_MAP_NAME

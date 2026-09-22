@@ -53,6 +53,18 @@ def test_direct_replay_terminal_is_full_source_frame_only() -> None:
     assert not _replay_reached_full_source_terminal(command, 0)
 
 
+def test_runtime_append_is_counted_once_and_replay_reaches_its_endpoint() -> None:
+    assert _expected_replay_frame_count(359, _global_runtime_contract(append=10)) == 379
+    command = SimpleNamespace(
+        time_steps=torch.tensor([358]),
+        current_clip_lengths=torch.tensor([369]),
+        _runtime_default_pose_prepend_active=torch.tensor([False]),
+    )
+    assert not _replay_reached_full_source_terminal(command, 0)
+    command.time_steps[:] = 368
+    assert _replay_reached_full_source_terminal(command, 0)
+
+
 def test_episodic_motion_end_margin_and_visualize_default_are_unchanged() -> None:
     command = SimpleNamespace(
         time_steps=torch.tensor([316, 317, 318], dtype=torch.long),

@@ -224,7 +224,7 @@ def _source_frame_to_materialized_index(source_frame: int, prepend_frames: int) 
 
 
 def _replay_reached_full_source_terminal(motion_command: Any, env_id: int) -> bool:
-    """End direct replay only after rendering source frame ``L - 1``.
+    """End direct replay after the full source and any runtime append.
 
     ``MotionCommand.motion_end_mask`` intentionally remains at ``L - 2`` for
     episodic training.  Direct replay needs the complete source artifact, so it
@@ -286,7 +286,7 @@ def replay(tyro_config: ExperimentConfig):
         if not video_recorder.is_recording:
             video_recorder.start_recording(episode_id=0)
 
-    source_frame_count = int(motion_command.current_clip_lengths[record_env_id].item())
+    source_frame_count = int(motion_command._current_clip_lengths()[record_env_id].item())
     expected_replay_frame_count = _expected_replay_frame_count(
         source_frame_count,
         transition_contract,

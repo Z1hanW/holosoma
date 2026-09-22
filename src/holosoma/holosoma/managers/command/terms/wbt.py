@@ -210,11 +210,10 @@ def canonical_motion_transition_contract(contract: Any) -> dict[str, Any]:
     if source_semantics == "global_multi_clip_runtime":
         prepend_allowed = {"none", "runtime_hold"}
     prepend = canonical_phase("prepend", allowed_implementations=prepend_allowed)
-    append = canonical_phase("append", allowed_implementations={"none", "static_splice"})
-    if source_semantics == "global_multi_clip_runtime" and append["applied"]:
-        raise ValueError(
-            "motion_transition_contract global_multi_clip_runtime semantics cannot apply an append transition."
-        )
+    append_allowed = {"none", "static_splice"}
+    if source_semantics == "global_multi_clip_runtime":
+        append_allowed = {"none", "runtime_blend"}
+    append = canonical_phase("append", allowed_implementations=append_allowed)
 
     return {
         "version": MOTION_TRANSITION_CONTRACT_VERSION,
@@ -4274,6 +4273,8 @@ class MotionCommand(CommandTermBase):
             )
         motion_indices = self._get_motion_indices(self.time_steps)
         command = self.motion.precomputed_root_command.index_select(0, motion_indices)
+        if getattr(self, "_runtime_default_pose_append_steps", 0) > 0:
+            command = torch.where((self.time_steps < self._current_clip_lengths())[:, None], command, 0.0)
         if self.pickup_anchor_set is None:
             return torch.zeros_like(command)
         return torch.where(
@@ -4289,6 +4290,8 @@ class MotionCommand(CommandTermBase):
             )
         motion_indices = self._get_motion_indices(self.time_steps)
         phase = self.motion.precomputed_root_command_phase.index_select(0, motion_indices)
+        if getattr(self, "_runtime_default_pose_append_steps", 0) > 0:
+            phase = torch.where(self.time_steps < self._current_clip_lengths(), phase, 0)
         if self.pickup_anchor_set is None:
             return torch.zeros_like(phase)
         return torch.where(self.pickup_anchor_set, phase, torch.zeros_like(phase))
@@ -4960,6 +4963,7 @@ class MotionCommand(CommandTermBase):
                 ),
             )
         self._configure_runtime_default_pose_prepend()
+        self._configure_runtime_default_pose_append()
         self._configure_contact_prior_regions()
         # The valid reset range depends on future-target lookahead and must be
         # finalized before constructing the adaptive sampler.
@@ -6480,7 +6484,7 @@ class MotionCommand(CommandTermBase):
             # HMI holds the terminal reference goal through the remainder of
             # the 10-second task episode; reaching the motion end is not an
             # episode termination and must not resample the command.
-            current_clip_lengths = self._current_clip_lengths()
+            current_clip_lengths = self.current_clip_lengths
             ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
             if ended_env_ids.numel() > 0:
                 self.time_steps[ended_env_ids] = torch.clamp(
@@ -6490,11 +6494,11 @@ class MotionCommand(CommandTermBase):
 
         if self._termination_owns_clip_rollover():
             # BaseTask evaluated motion_ends before resetting and entering this
-            # command step.  The standard term fires at clip_length - 2, so no
-            # surviving row can reach clip_length after this step's +1 advance.
+            # command step. Its boundary is inside the effective clip (including
+            # the append endpoint), so no surviving row can advance past it.
             return
 
-        current_clip_lengths = self._current_clip_lengths()
+        current_clip_lengths = self.current_clip_lengths
         ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
         if ended_env_ids.numel() == 0:
             return
@@ -6961,6 +6965,12 @@ class MotionCommand(CommandTermBase):
         return self.motion.clip_lengths[clip_ids]
 
     def _get_motion_indices(self, steps: torch.Tensor, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if getattr(self, "_runtime_default_pose_append_steps", 0) > 0:
+            # The source bank stays immutable. Appended targets blend from each
+            # clip's last frame, never from the next clip in the packed buffer.
+            last = self._current_clip_lengths(env_ids) - 1
+            last = last.view(*last.shape, *([1] * (steps.ndim - last.ndim)))
+            steps = torch.minimum(steps, last)
         if self.motion.num_clips <= 1:
             return steps
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
@@ -6968,6 +6978,38 @@ class MotionCommand(CommandTermBase):
         if steps.ndim > offsets.ndim:
             offsets = offsets.view(-1, *([1] * (steps.ndim - 1)))
         return offsets + steps
+
+    def _blend_runtime_default_pose_append(
+        self,
+        current: torch.Tensor,
+        key: str,
+        env_ids: torch.Tensor | None = None,
+        *,
+        steps: torch.Tensor | None = None,
+        quaternion: bool = False,
+    ) -> torch.Tensor:
+        num_steps = getattr(self, "_runtime_default_pose_append_steps", 0)
+        if num_steps == 0:
+            return current
+        if steps is None:
+            steps = self.time_steps if env_ids is None else self.time_steps[env_ids]
+        clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
+        last = self._current_clip_lengths(env_ids) - 1
+        last = last.view(*last.shape, *([1] * (steps.ndim - last.ndim)))
+        alpha = ((steps - last).to(current.dtype) / num_steps).clamp(0.0, 1.0)
+        alpha = alpha.view(*alpha.shape, *([1] * (current.ndim - alpha.ndim)))
+        target = self._runtime_default_pose_append_defaults[key][clip_ids]
+        if steps.ndim > 1:
+            target = target.unsqueeze(1)
+        target = target.expand_as(current)
+        if quaternion:
+            weights = alpha.expand(*current.shape[:-1], 1).reshape(-1, 1)
+            blended = slerp(current.reshape(-1, 4), target.reshape(-1, 4), weights).view_as(current)
+        else:
+            blended = current + alpha * (target - current)
+        # Preserve original source tensors exactly, including quaternion sign.
+        blended = torch.where(alpha >= 1.0, target, blended)
+        return torch.where(alpha > 0.0, blended, current)
 
     def _clear_runtime_default_pose_prepend(self, env_ids: torch.Tensor) -> None:
         if (
@@ -7017,6 +7059,7 @@ class MotionCommand(CommandTermBase):
         key: str,
         env_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        current = self._blend_runtime_default_pose_append(current, key, env_ids)
         if not self._runtime_default_pose_prepend_enabled:
             return current
         defaults = self._runtime_default_pose_prepend_defaults.get(key)
@@ -7042,6 +7085,7 @@ class MotionCommand(CommandTermBase):
         key: str,
         env_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        current = self._blend_runtime_default_pose_append(current, key, env_ids, quaternion=True)
         if not self._runtime_default_pose_prepend_enabled:
             return current
         defaults = self._runtime_default_pose_prepend_defaults.get(key)
@@ -7139,9 +7183,15 @@ class MotionCommand(CommandTermBase):
 
     @property
     def current_clip_lengths(self) -> torch.Tensor:
-        return self._current_clip_lengths()
+        lengths = self._current_clip_lengths()
+        steps = getattr(self, "_runtime_default_pose_append_steps", 0)
+        return lengths + steps if steps > 0 else lengths
 
     def motion_end_mask(self) -> torch.Tensor:
+        if getattr(self, "_runtime_default_pose_append_steps", 0) > 0:
+            # Evaluate an action against the exact default-pose endpoint before
+            # terminating. Legacy no-append runs retain their L-2 boundary.
+            return self.time_steps >= (self.current_clip_lengths - 1)
         clip_lengths = self._current_clip_lengths()
         return self.time_steps >= (clip_lengths - 2)
 
@@ -9700,17 +9750,21 @@ class MotionCommand(CommandTermBase):
 
         time_offsets = torch.arange(1, num_future_steps + 1, device=self.device, dtype=torch.long)
         future_steps = self.time_steps.unsqueeze(1) + time_offsets.unsqueeze(0)
-        max_steps = self._current_clip_lengths().unsqueeze(1) - 1
+        max_steps = self.current_clip_lengths.unsqueeze(1) - 1
         future_steps = torch.minimum(future_steps, max_steps)
 
         times = (future_steps - self.time_steps.unsqueeze(1)).to(dtype=torch.float32) * self._env.dt
         future_steps_global = self._get_motion_indices(future_steps)
 
         target_body_pos = (
-            self.motion.body_pos_w[future_steps_global][:, :, self.tracked_body_indexes]
+            self._blend_runtime_default_pose_append(
+                self.motion.body_pos_w[future_steps_global], "body_pos", steps=future_steps
+            )[:, :, self.tracked_body_indexes]
             + self._get_env_offsets()[:, None, None, :]
         )
-        target_body_rot = self.motion.body_quat_w[future_steps_global][:, :, self.tracked_body_indexes]
+        target_body_rot = self._blend_runtime_default_pose_append(
+            self.motion.body_quat_w[future_steps_global], "body_quat", steps=future_steps, quaternion=True
+        )[:, :, self.tracked_body_indexes]
 
         reference_body_pos = target_body_pos.roll(shifts=1, dims=1)
         reference_body_pos[:, 0] = self.body_pos_w
@@ -9902,6 +9956,47 @@ class MotionCommand(CommandTermBase):
             duration,
         )
 
+    def _configure_runtime_default_pose_append(self) -> None:
+        self._runtime_default_pose_append_steps = 0
+        self._runtime_default_pose_append_defaults = {}
+        duration = getattr(self.motion_cfg, "runtime_default_pose_append_duration_s", 0.0)
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, numbers.Real)
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
+            raise ValueError("runtime_default_pose_append_duration_s must be finite and non-negative.")
+        if duration == 0:
+            return
+        if not self._uses_global_multi_clip_transition_semantics():
+            raise ValueError(
+                "Runtime default-pose append requires global multi-clip semantics; "
+                "use static append for a native single clip."
+            )
+        if self._env.simulator.get_simulator_type() != SimulatorType.ISAACSIM:
+            raise ValueError("Runtime default-pose append requires IsaacSim FK; it cannot be silently disabled.")
+        num_steps = round(duration / self._env.dt)
+        if not 2 <= num_steps <= MAX_MOTION_TRANSITION_STEPS:
+            raise ValueError(
+                f"Runtime default-pose append requires 2..{MAX_MOTION_TRANSITION_STEPS} "
+                f"control steps, got {num_steps}."
+            )
+        last_indices = self.motion.clip_offsets + self.motion.clip_lengths - 1
+        states = [self._build_default_pose_state_robot_order(int(idx)) for idx in last_indices.tolist()]
+        keys = (
+            "joint_pos", "joint_vel", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel",
+            "object_pos", "object_quat", "object_lin_vel",
+        )
+        self._runtime_default_pose_append_defaults = {
+            key: torch.stack([state[key] for state in states]) for key in keys
+        }
+        self._runtime_default_pose_append_steps = num_steps
+        logger.info(
+            "Using runtime default-pose append ({} clips, {} control steps, {}s).",
+            self.motion.num_clips, num_steps, duration,
+        )
+
     def get_motion_transition_contract(self) -> dict[str, Any]:
         """Return the exact transition sequence that shaped this training environment."""
 
@@ -9913,8 +10008,8 @@ class MotionCommand(CommandTermBase):
                 else 0
             )
             prepend_implementation = "runtime_hold" if prepend_steps > 0 else "none"
-            append_steps = 0
-            append_implementation = "none"
+            append_steps = int(getattr(self, "_runtime_default_pose_append_steps", 0))
+            append_implementation = "runtime_blend" if append_steps > 0 else "none"
             source_semantics = "global_multi_clip_runtime"
         else:
             prepend_steps = int(getattr(self, "_static_default_pose_prepend_steps", 0) or 0)

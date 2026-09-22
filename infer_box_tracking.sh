@@ -1414,6 +1414,10 @@ fi
 if [[ -z "${DEFAULT_POSE_APPEND_DURATION_S+x}" || -z "${DEFAULT_POSE_APPEND_DURATION_S}" ]]; then
   DEFAULT_POSE_APPEND_DURATION_S="${CHECKPOINT_EFFECTIVE_DEFAULT_POSE_APPEND_DURATION_S:-0.0}"
 fi
+RUNTIME_DEFAULT_POSE_APPEND_DURATION_S=0.0
+if [[ "${CHECKPOINT_TRANSITION_SOURCE_SEMANTICS}" == "global_multi_clip_runtime" && "${ENABLE_DEFAULT_POSE_APPEND,,}" == "true" ]]; then
+  RUNTIME_DEFAULT_POSE_APPEND_DURATION_S="${DEFAULT_POSE_APPEND_DURATION_S}"
+fi
 if [[ -z "${RESET_NOISE_SCALE+x}" || -z "${RESET_NOISE_SCALE}" ]]; then
   RESET_NOISE_SCALE="${CHECKPOINT_SAVED_RESET_NOISE_SCALE:-0.0}"
 fi
@@ -1653,6 +1657,7 @@ cmd+=(
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${ENABLE_DEFAULT_POSE_APPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${DEFAULT_POSE_APPEND_DURATION_S}"
+  --command.setup_terms.motion_command.params.motion_config.runtime_default_pose_append_duration_s "${RUNTIME_DEFAULT_POSE_APPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
 )
 

@@ -1013,7 +1013,7 @@ def motion_transition_contract_from_metadata(
         allowed_implementations = (
             {"none", "static_splice", "runtime_hold"}
             if phase_name == "prepend"
-            else {"none", "static_splice"}
+            else {"none", "static_splice", "runtime_blend"}
         )
         if not isinstance(implementation, str) or implementation not in allowed_implementations:
             raise PolicyContractError(
@@ -1046,9 +1046,9 @@ def motion_transition_contract_from_metadata(
     prepend_impl = phases["prepend"]["implementation"]
     append_impl = phases["append"]["implementation"]
     if source_semantics == "global_multi_clip_runtime":
-        if prepend_impl not in {"none", "runtime_hold"} or append_impl != "none":
+        if prepend_impl not in {"none", "runtime_hold"} or append_impl not in {"none", "runtime_blend"}:
             raise PolicyContractError(
-                "Global multi-clip training permits only a runtime-hold prepend and no append."
+                "Global multi-clip training permits only runtime-hold prepend and runtime-blend append."
             )
     elif prepend_impl not in {"none", "static_splice"} or append_impl not in {
         "none",
@@ -1104,6 +1104,9 @@ def effective_motion_transition_settings_from_metadata(
         if not isinstance(motion_cfg, Mapping):
             # This helper is used only by WBT timeline consumers. Absence of a
             # motion config cannot prove an explicitly inactive legacy source.
+            return True
+        runtime_append = motion_cfg.get("runtime_default_pose_append_duration_s", 0.0)
+        if type(runtime_append) not in (int, float) or not math.isfinite(runtime_append) or runtime_append != 0:
             return True
         for enabled_key, duration_key in (
             ("enable_default_pose_prepend", "default_pose_prepend_duration_s"),
@@ -1211,6 +1214,20 @@ def effective_motion_transition_settings_from_metadata(
         "control_dt_s": control_dt,
         "contract_sha256": metadata["motion_transition_contract_sha256"],
     }
+    runtime_duration = motion_cfg.get("runtime_default_pose_append_duration_s", 0.0)
+    if (
+        isinstance(runtime_duration, bool)
+        or not isinstance(runtime_duration, Real)
+        or not math.isfinite(float(runtime_duration))
+        or runtime_duration < 0
+    ):
+        raise PolicyContractError(
+            "motion_config.runtime_default_pose_append_duration_s must be finite and non-negative."
+        )
+    if runtime_duration > 0:
+        runtime_steps = round(float(runtime_duration) / control_dt)
+        if source_semantics != "global_multi_clip_runtime" or not 2 <= runtime_steps <= _MAX_MOTION_TRANSITION_STEPS:
+            raise PolicyContractError("Runtime append requires global multi-clip semantics and 2..4096 control steps.")
     for phase_name in ("prepend", "append"):
         enabled_key = f"enable_default_pose_{phase_name}"
         duration_key = f"default_pose_{phase_name}_duration_s"
@@ -1227,6 +1244,9 @@ def effective_motion_transition_settings_from_metadata(
             raise PolicyContractError(
                 f"motion_config.{duration_key} must be finite and non-negative."
             )
+        if phase_name == "append" and source_semantics == "global_multi_clip_runtime":
+            duration = runtime_duration
+            enabled = runtime_duration > 0
         requested_steps = round(float(duration) / control_dt)
         phase = contract[phase_name]
         if bool(phase["applied"]):
@@ -1234,9 +1254,11 @@ def effective_motion_transition_settings_from_metadata(
                 raise PolicyContractError(
                     f"Effective {phase_name} transition contradicts serialized motion_config."
                 )
-        elif source_semantics == "single_clip_static" and enabled and requested_steps > 1:
+        elif enabled and requested_steps > 1 and (
+            source_semantics == "single_clip_static" or phase_name == "append"
+        ):
             raise PolicyContractError(
-                f"Single-clip contract omitted the requested {phase_name} static transition."
+                f"Motion transition contract omitted the requested {phase_name} transition."
             )
         steps = int(phase["steps"])
         result[phase_name] = {

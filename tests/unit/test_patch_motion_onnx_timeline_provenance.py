@@ -397,6 +397,74 @@ def test_patch_default_materializes_and_authenticates_effective_timeline(
 
 
 @pytest.mark.parametrize("mode", ["kinematic_lift", "peak_height"])
+def test_runtime_append_onnx_and_native_inference_preserve_source_buttons(
+    tmp_path: Path,
+    fake_pinocchio: None,
+    mode: str,
+) -> None:
+    import onnxruntime as ort
+    from holosoma.managers.command.terms.wbt import motion_transition_contract_sha256
+
+    source, motion, output = (tmp_path / name for name in ("source.onnx", "clip.npz", "patched.onnx"))
+    metadata = _transition_metadata()
+    transition = metadata["motion_transition_contract"]
+    transition["append"] = {"implementation": "runtime_blend", "applied": True, "steps": 10}
+    metadata["motion_transition_contract_sha256"] = motion_transition_contract_sha256(transition)
+    cfg = metadata["experiment_config"]["command"]["setup_terms"]["motion_command"]["params"]["motion_config"]
+    cfg.update(runtime_default_pose_append_duration_s=0.2, contact_aware_button_window_mode=mode,
+               contact_aware_carry_window_mode="peak_height")
+    rel_z = _write_kinematic_object_motion(motion)
+    with np.load(motion, allow_pickle=False) as data:
+        payload = {key: data[key] for key in data.files}
+    payload["joint_pos"][:] = 2.0
+    np.savez(motion, **payload)
+    _write_source_model(source, metadata)
+    model = onnx.load(source)
+    model.ir_version = 10
+    onnx.save(model, source)
+    patch_model(source, motion, output)
+    patched = onnx.load(output)
+    onnx.checker.check_model(patched)
+    patched_metadata = _metadata(patched)
+    timeline = validate_embedded_motion_timeline_model(patched, patched_metadata)
+    assert timeline["source_frame_count"] == 13
+    assert timeline["embedded_frame_count"] == 25
+    assert timeline["effective_append_steps"] == 10
+    button = embedded_button_window_contract_from_metadata(patched_metadata, required=True)
+    expected_window = (
+        _kinematic_lift_window_from_rel_z(torch.from_numpy(rel_z)) if mode == "kinematic_lift"
+        else _contact_aware_carry_window_from_peak_height(torch.from_numpy(1.0 + rel_z))
+    )
+    assert button["source_window"] == list(expected_window)
+    assert button["materialized_window"] == [expected_window[0] + 2, expected_window[1] + 2]
+
+    policy = object.__new__(inference_wbt_module.WholeBodyTrackingPolicy)
+    policy.config = SimpleNamespace(task=SimpleNamespace(apply_training_motion_transitions=True),
+                                    robot=SimpleNamespace(dof_names=["j0", "j1"]))
+    policy.pinocchio_robot = inference_wbt_module.PinocchioRobot()
+    policy._motion_data = inference_wbt_module.MotionData(motion, ["j0", "j1"], "torso_link")
+    policy._effective_motion_transition_settings = inference_wbt_module._validated_runtime_motion_transition_settings(
+        patched_metadata, apply_training_motion_transitions=True
+    )
+    policy._motion_transition_prepend_steps = policy._maybe_apply_training_motion_transitions_to_motion_data(
+        patched_metadata, "torso_link"
+    )
+    policy._motion_cfg = cfg
+    policy._onnx_metadata = patched_metadata
+    policy._contact_aware_carry_window = None
+    assert policy._load_contact_aware_button_window(output) == tuple(button["materialized_window"])
+    expected_carry = _contact_aware_carry_window_from_peak_height(torch.from_numpy(1.0 + rel_z))
+    assert policy._get_contact_aware_carry_window() == (expected_carry[0] + 2, expected_carry[1] + 2)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(output), sess_options=options, providers=["CPUExecutionProvider"])
+    for step in range(25):
+        actual = session.run(["joint_pos"], {"time_step": np.asarray([step], dtype=np.int64)})[0]
+        np.testing.assert_allclose(actual[0], policy._motion_data.joint_pos[step], atol=1e-6)
+    np.testing.assert_array_equal(policy._motion_data.joint_pos[-1], np.zeros(2, dtype=np.float32))
+
+
+@pytest.mark.parametrize("mode", ["kinematic_lift", "peak_height"])
 def test_single_static_button_contract_matches_native_training_and_inference(
     tmp_path: Path,
     fake_pinocchio: None,

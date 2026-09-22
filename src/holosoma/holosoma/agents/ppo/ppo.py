@@ -12060,6 +12060,9 @@ class PPO(BaseAlgo):
         motion_config = params.get("motion_config") if isinstance(params, Mapping) else None
         if not isinstance(motion_config, Mapping):
             return False
+        runtime_append = motion_config.get("runtime_default_pose_append_duration_s", 0.0)
+        if type(runtime_append) not in (int, float) or not math.isfinite(runtime_append) or runtime_append != 0:
+            return True
         for enabled_key, duration_key in (
             ("enable_default_pose_prepend", "default_pose_prepend_duration_s"),
             ("enable_default_pose_append", "default_pose_append_duration_s"),

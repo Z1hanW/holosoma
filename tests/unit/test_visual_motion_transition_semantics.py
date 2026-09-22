@@ -91,6 +91,19 @@ def test_global_bank_view_plan_keeps_prepend_and_never_fabricates_append() -> No
     assert plan.append_steps == 0
 
 
+def test_global_bank_view_materializes_explicit_runtime_append() -> None:
+    cfg = _motion_cfg()
+    cfg.runtime_default_pose_append_duration_s = 0.2
+    plan = resolve_visual_motion_transition_plan(
+        cfg, fps=50.0, control_dt_s=0.02, source_clip_count=30, simulator_type="isaacsim",
+    )
+    assert (plan.prepend_steps, plan.append_steps) == (10, 10)
+    with pytest.raises(ValueError, match="IsaacSim"):
+        resolve_visual_motion_transition_plan(
+            cfg, fps=50.0, control_dt_s=0.02, source_clip_count=30, simulator_type="mujoco",
+        )
+
+
 def test_selected_clip_from_global_bank_retains_original_source_semantics(tmp_path) -> None:
     (tmp_path / "clip_a.npz").touch()
     (tmp_path / "clip_b.NPZ").touch()

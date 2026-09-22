@@ -578,6 +578,14 @@ class MotionConfig:
     """Duration in seconds of the post-appended interpolation phase.
     Only used if enable_default_pose_append is True."""
 
+    runtime_default_pose_append_duration_s: float = 0.0
+    """Explicit multi-clip return-to-default transition after the final source frame.
+
+    Set to 0.2 for ten control steps at 50 Hz. Zero preserves historical multi-clip
+    checkpoints, whose static append flags were ignored. Does not change source
+    frames, reset sampling, or single-clip static transitions.
+    """
+
     align_motion_to_init_yaw: bool = False
     """If True, rotate the motion so frame-0 yaw matches the robot init yaw.
 

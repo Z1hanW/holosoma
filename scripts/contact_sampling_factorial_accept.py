@@ -52,7 +52,7 @@ class IndependentActor(torch.nn.Module):
         return self.mlp(torch.cat((actor, self.encoder(depth)), dim=-1))
 
 
-def accept(root, arm):
+def accept(root, arm, *, world_size=8, bank=None, append_duration_s=0.0):
     campaign = json.loads((root / "campaign.json").read_text())
     mix, contact, adaptive = exp.arm_flags(arm)
     artifacts = root / arm / "canary_artifacts"
@@ -68,7 +68,7 @@ def accept(root, arm):
     finite(checkpoint)
     require(checkpoint["iter"] == checkpoint["iteration"] == 1 and checkpoint["next_iter"] == 2, "PT iteration mismatch")
     for key in ("rng_state_by_rank", "env_state_by_rank"):
-        require(sorted(map(int, checkpoint[key])) == list(range(8)), f"Incomplete {key}")
+        require(sorted(map(int, checkpoint[key])) == list(range(world_size)), f"Incomplete {key}")
     cfg = yaml.safe_load((artifacts / "holosoma_config.yaml").read_text())
     require(cfg == checkpoint["experiment_config"], "Config mismatch")
     training, algo = cfg["training"], cfg["algo"]["config"]
@@ -82,7 +82,8 @@ def accept(root, arm):
         require(distill["policy_to_clone"] == exp.TEACHER and distill["teacher_obs_keys"] == ["actor_obs"], "Teacher binding drift")
         require(distill["ppo_start_coeff"] == .01 and distill["ppo_target_coeff"] == .9, "Mix weights drift")
         require(distill["ppo_schedule_step_epochs"] == 700 and distill["dagger_end_epoch"] == 6300, "Schedule drift")
-    require(motion["motion_file"] == exp.BANK, "Motion bank drift")
+    require(motion["motion_file"] == (exp.BANK if bank is None else bank), "Motion bank drift")
+    require(motion.get("runtime_default_pose_append_duration_s", 0.0) == append_duration_s, "Runtime append drift")
     require(motion["contact_aware_button_window_mode"] == "peak_height", "Button drift")
     require(motion["contact_aware_sparse_root_command_mode"] == "precomputed_turn_then_forward", "Command drift")
     require(motion["zero_root_command_when_drop_active"], "Drop is not exclusive")
@@ -108,7 +109,7 @@ def accept(root, arm):
     require(provenance["teacher_enabled"] == mix, "Teacher provenance drift")
     require(provenance["factorial_experiment"]["definition_sha256"] == campaign["definitions"][arm], "Definition drift")
     logs = sorted(artifacts.glob("train_rank_*.log"))
-    require(len(logs) == 8, "Missing rank logs")
+    require(len(logs) == world_size, "Missing rank logs")
     fatal = re.compile(r"Traceback|RuntimeError|CUDA out of memory|ChildFailedError|Segmentation fault|non-finite|NCCL.*error", re.I)
     for log in [*logs, artifacts / "controller.log"]:
         content = log.read_text(errors="replace")
@@ -135,7 +136,8 @@ def accept(root, arm):
     report = {"accepted": True, "arm": arm, "commit": campaign["source"]["commit"],
               "definition_sha256": campaign["definitions"][arm], "git_verification": verification,
               "pair": pair, "independent_onnx_max_abs": max_abs, "independent_probe_rows": 14,
-              "envs_per_gpu": 2048, "ranks": 8, "canary_updates": 2}
+              "envs_per_gpu": 2048, "ranks": world_size, "canary_updates": 2,
+              "runtime_default_pose_append_duration_s": append_duration_s}
     exp.save(root / arm / "canary_acceptance.json", report)
     print(json.dumps(report), flush=True)
 

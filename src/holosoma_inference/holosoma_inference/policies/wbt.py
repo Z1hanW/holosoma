@@ -2260,6 +2260,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 source_frame_count = int(getattr(self._motion_data, "frame_count", 0))
                 if source_semantics == "global_multi_clip_runtime":
                     source_frame_count -= prepend_steps
+                    source_frame_count -= int(
+                        (self._effective_motion_transition_settings or {}).get("append", {}).get("steps", 0)
+                    )
             else:
                 source_frame_count = int(declared_source_frame_count)
             if not (0 <= training_window[0] < training_window[1] <= source_frame_count):
@@ -3988,14 +3991,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if source_semantics == "global_multi_clip_runtime" and prepend_steps > 0
             else 0
         )
-        source_total_steps = total_steps - source_offset
+        runtime_append_steps = (
+            int(
+                (getattr(self, "_effective_motion_transition_settings", None) or {})
+                .get("append", {}).get("steps", 0)
+            )
+            if source_semantics == "global_multi_clip_runtime" else 0
+        )
+        source_end = total_steps - runtime_append_steps
+        source_total_steps = source_end - source_offset
         if source_total_steps <= 0:
             raise ValueError(
                 "Materialized runtime prepend leaves no source motion frames for the "
                 "contact-aware carry-window contract."
             )
-        source_object_pos_w = self._motion_data.object_pos_w[source_offset:]
-        source_root_pos_w = self._motion_data.root_pos_w[source_offset:]
+        source_object_pos_w = self._motion_data.object_pos_w[source_offset:source_end]
+        source_root_pos_w = self._motion_data.root_pos_w[source_offset:source_end]
 
         if mode == "peak_height":
             height = _smooth_1d_edge_padded(source_object_pos_w[:, 2], smoothing_steps)

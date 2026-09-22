@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src" / "holosoma"))
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--world-size", type=int, choices=(8, 32), default=32)
+    parser.add_argument("--world-size", type=int, choices=(8, 32, 64), default=32)
     parser.add_argument("--allow-distillation", action="store_true")
     parser.add_argument("train_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()

@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import sys
 import tarfile
+import dataclasses
+
+import pytest
 
 import numpy as np
 
@@ -13,11 +16,27 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from build_merged_training_bank import (  # noqa: E402
     SourceSpec,
+    audit_sources,
     build_bank,
     thaw_and_remove,
     verify_archive,
     verify_bank,
 )
+
+
+def test_source_motion_contact_mode_is_explicit_and_keeps_required_targets(tmp_path):
+    a = _write_source(tmp_path / "a", clip_id="box_1", category="box")
+    b = _write_source(tmp_path / "b", clip_id="bin_1", category="bin")
+    reference = next(b.contact_root.rglob("teacher_rollout_reference.npz"))
+    reference.unlink()
+    with pytest.raises(ValueError, match="missing required contact sidecars"):
+        audit_sources([a, b], expected_total=2)
+    b = dataclasses.replace(b, contact_reference_mode="source_motion")
+    audit = audit_sources([a, b], expected_total=2)
+    assert audit.sources[1]["contact_reference_mode"] == "source_motion"
+    next(b.contact_root.rglob("right_wrist_contact_points.npy")).unlink()
+    with pytest.raises(ValueError, match="missing required contact sidecars"):
+        audit_sources([a, b], expected_total=2)
 
 
 def _write_motion(path: Path, clip_id: str, urdf: Path) -> None:
