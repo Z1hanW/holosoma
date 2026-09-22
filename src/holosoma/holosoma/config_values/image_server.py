@@ -198,6 +198,13 @@ remote_ffs_d435i = dataclasses.replace(
     depth_source="depth_gum",
     save_images=False,
     visualize_images=False,
+    # real_d435i adds 3 frames (100 ms) on top of the RealSense's own ~80-100 ms
+    # to land near the ~140-160 ms the policy was trained with. This path already
+    # carries ~66 ms more on the laptop (frame arrival -> FFS -> shm, measured
+    # median) plus network, so the artificial delay is cut to 1 frame (33 ms) to
+    # end up in the same place rather than ~100 ms beyond it.
+    latency_frame=(1, 1),
+    buffer_len=2,
 )
 
 DEFAULTS = {

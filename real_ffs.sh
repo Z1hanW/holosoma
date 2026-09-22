@@ -91,14 +91,26 @@ for ((t = 0; t < shm_wait; t++)); do
     seen+="|$line|"
     echo "  $line"
   done < <(grep -E "installing relay|stopped .* \(will restart|relay pid|calibration received|\[FFS\] Initialized|Created new shared memory|ERROR|did not start" "$depth_log" 2>/dev/null | cut -c1-140)
-  [[ -e /dev/shm/depth_img_shm ]] && break
+  # "Live" means the frame is changing, not merely that the segment exists: a
+  # server whose receiver has died still creates the segment and never writes it.
+  if [[ -e /dev/shm/depth_img_shm ]] && "${HOLOSOMA_INFERENCE_PYTHON:-$HOME/.holosoma_deps/miniconda3/envs/hsinference/bin/python3}" - <<'EOF' 2>/dev/null
+import sys, time, numpy as np
+from multiprocessing import shared_memory, resource_tracker
+s = shared_memory.SharedMemory(name="depth_img_shm"); resource_tracker.unregister(s._name, "shared_memory")
+a = np.ndarray((1, 1, 58, 87), dtype=np.float32, buffer=s.buf)
+seen = set(); t0 = time.monotonic()
+while time.monotonic() - t0 < 1.0:
+    seen.add(a.tobytes()); time.sleep(0.02)
+s.close(); sys.exit(0 if len(seen) >= 5 else 1)
+EOF
+  then break; fi
   sleep 1
 done
-if [[ ! -e /dev/shm/depth_img_shm ]]; then
-  echo "[real_ffs] ERROR: depth_img_shm did not appear within ${shm_wait}s; see ${depth_log}" >&2
+if [[ ! -e /dev/shm/depth_img_shm ]] || ! kill -0 "$depth_pid" 2>/dev/null; then
+  echo "[real_ffs] ERROR: live depth did not appear within ${shm_wait}s; see ${depth_log}" >&2
   exit 1
 fi
-echo "[real_ffs] depth is live."
+echo "[real_ffs] depth is live (frames updating)."
 
 if [[ "${HOLOSOMA_DRY_RUN:-0}" == "1" ]]; then
   echo "[real_ffs] DRY RUN: depth is up, not launching the policy. Ctrl-C to tear down."

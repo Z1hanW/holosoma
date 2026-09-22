@@ -87,6 +87,9 @@ class RemoteStereoCamera:
         self._latest_at = 0.0
         self._seq = -1
         self._dropped = 0
+        self._recv_count = 0
+        self._stats_at = time.monotonic()
+        self._stats_dropped = 0
         self._warned_stale = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._recv_loop, name="remote-stereo-recv", daemon=True)
@@ -133,6 +136,21 @@ class RemoteStereoCamera:
             if self._seq >= 0 and seq > self._seq + 1:
                 self._dropped += seq - self._seq - 1
             self._seq = seq
+            self._recv_count += 1
+
+            # Periodic receiver health line: makes receive-side starvation (the
+            # image server not draining frames because something else holds the
+            # GIL) visible without needing the deployment audit.
+            now_m = time.monotonic()
+            if now_m - self._stats_at >= 5.0:
+                dt = now_m - self._stats_at
+                print(
+                    f"[RemoteStereo] recv {self._recv_count / dt:.1f} Hz  seq={seq}  "
+                    f"gaps(dropped frames) +{self._dropped - self._stats_dropped}  total {self._dropped}"
+                )
+                self._stats_at = now_m
+                self._recv_count = 0
+                self._stats_dropped = self._dropped
 
             with self._lock:
                 self._latest = {"left": left, "right": right, "depth": depth, "t_send": t_send, "seq": seq}
