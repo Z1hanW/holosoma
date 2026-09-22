@@ -23,9 +23,27 @@ fi
 checkpoint="${HOLOSOMA_REAL_MODEL_PATH:-_ckps/4kocpixa_model_25500.onnx}"
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1}"
 
+# The policy attaches to depth_img_shm at start and raises if it is missing, so
+# wait for real_ffs_depth.sh to publish it instead of failing on an ordering race.
+# It takes ~10 s to create (relay start + FFS model load), so a plain existence
+# check at launch is almost always too early.
+shm_wait="${HOLOSOMA_SHM_WAIT_S:-120}"
 if [[ ! -e /dev/shm/depth_img_shm ]]; then
-  echo "[real_ffs_run] ERROR: /dev/shm/depth_img_shm not found. Start real_ffs_depth.sh first." >&2
-  exit 1
+  if ! pgrep -f "image_server.py remote_ffs_d435i" >/dev/null 2>&1; then
+    echo "[real_ffs_run] real_ffs_depth.sh is not running yet - start it in another terminal; waiting up to ${shm_wait}s for it..." >&2
+  else
+    echo "[real_ffs_run] waiting for real_ffs_depth.sh to publish depth_img_shm (up to ${shm_wait}s)..." >&2
+  fi
+  for ((t = 0; t < shm_wait; t++)); do
+    [[ -e /dev/shm/depth_img_shm ]] && break
+    (( t > 0 && t % 10 == 0 )) && echo "[real_ffs_run]   still waiting (${t}s)..." >&2
+    sleep 1
+  done
+  if [[ ! -e /dev/shm/depth_img_shm ]]; then
+    echo "[real_ffs_run] ERROR: depth_img_shm did not appear within ${shm_wait}s. Check the real_ffs_depth.sh terminal for errors." >&2
+    exit 1
+  fi
+  echo "[real_ffs_run] depth_img_shm is up." >&2
 fi
 
 log_dir="${ROOT_DIR}/logs/real_ffs_run_$(date +%Y%m%d_%H%M%S)"
