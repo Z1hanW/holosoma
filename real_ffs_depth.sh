@@ -136,6 +136,12 @@ else
 fi
 
 echo "[real_ffs_depth] stereo source=${HOLOSOMA_REMOTE_STEREO_CONNECT}  predictor=ffs  model=${HOLOSOMA_FFS_MODEL}"
+# A segment left by a killed server would be reused ("Connected to existing shared
+# memory") and briefly serve its last frame; start from a clean one instead.
+if [[ -e /dev/shm/depth_img_shm ]] && ! pgrep -f "image_server.py" >/dev/null 2>&1; then
+  echo "[real_ffs_depth] removing stale depth_img_shm left by a previous session"
+  rm -f /dev/shm/depth_img_shm
+fi
 source scripts/source_inference_setup.sh
 PYTHONPATH=src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python src/holosoma/holosoma/sensors/image_server.py remote_ffs_d435i \
