@@ -394,9 +394,17 @@ class ImageServer:
         # GUM is optional and is not needed by the RealSense depth server.
         if self.cfg.enable_gum_depth_prediction:
             import torch
-            from holosoma.models.gum.infer import GUM
 
-            self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16)
+            # Fast-FoundationStereo is an opt-in swap for GUM; it produces the same
+            # `depth_gum` channel, so nothing downstream of the image server changes.
+            if os.environ.get("HOLOSOMA_DEPTH_PREDICTOR", "gum").lower() == "ffs":
+                from holosoma.models.ffs.infer import FastFoundationStereo, FFSConfig
+
+                self.gum = FastFoundationStereo(cfg=FFSConfig(), dtype=torch.bfloat16)
+            else:
+                from holosoma.models.gum.infer import GUM
+
+                self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16)
         else:
             self.gum = None
         
