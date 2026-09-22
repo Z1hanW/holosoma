@@ -54,6 +54,10 @@ do not bypass existing resume or policy-init checks. Existing launchers and
 running jobs are not automatically switched. Use the explicit flag in the
 next authorized experiment, with its normal Git/config/ONNX preflight.
 
+The authorized CORL79 + current rollout137, 64-GPU mixed training recipe and
+active run/audit pointers are recorded in
+[the September 22 launch record](docs/mix_contact_adaptive_216_append_20260922.md).
+
 ## Features
 
 - **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)

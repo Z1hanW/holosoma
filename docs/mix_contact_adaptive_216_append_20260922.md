@@ -49,3 +49,57 @@ No replay recording or video upload is part of the launch path.
 
 Audit root:
 `/data/holosoma_training_audits/mix_contact_adaptive_corl79_rollout137_append02_ws64_20260922`.
+
+## Formal Launch
+
+- W&B: <https://wandb.ai/zihanw22/carry-any/runs/zksf8buh>.
+- Immutable execution commit: `d9c63682732fd77e1565118ea9eb56682d909a80`.
+- Git tree: `e23c654f9d482636f0fa3185b67d0668a3455702`.
+- Active evidence is under `attempt2_git_reachability/` in the audit root;
+  its `mix-contact+adaptive/run_contract.json` is the formal contract.
+  The parent-directory reserved identity `7sakymlv` was never launched.
+- All eight nodes are in `ap-northeast-2a`, in rank order:
+  `10.99.0.18`, `.227`, `.167`, `.77`, `.116`, `.117`, `.165`, `.176`.
+  Transport is eight local NCCL groups with eight Gloo CPU leaders.
+- Stopped only the four pure-RL factorial runs: `aulhhzxm`, `fgwvovxy`,
+  `5zmbxh3t`, `legiadml`. Their durable checkpoint pairs were retained.
+  No stop/restart was sent to the four mixed runs or unrelated experiments.
+- Fresh 64-rank canary completed two actual updates; all rank RNG/env states
+  and tensors passed validation. Native PT/ONNX pairing passed; independent
+  14-row PyTorch/ORT parity had maximum absolute error `3.814697265625e-6`.
+  All 64 rank logs confirm ten appended control steps. No canary weights or
+  optimizer state are inherited by the formal run.
+- At `2026-09-22 10:34 UTC`, read-only live acceptance verified all 64 worker
+  PIDs/ranks, exact checkout/environment bindings and at least 11 completed
+  updates on every node. No NCCL timeout, OOM, non-finite loss or uncorrectable
+  ECC was observed. Fresh W&B reported `running`, PPO `0.01`, BC `0.99`, and
+  distributed loss weights summing to 64. Full evidence is in
+  `mix-contact+adaptive/formal_start_acceptance.json` in the active attempt.
+  The first formal 500-update upload boundary had not yet been reached;
+  native pair export/parity was verified by the full-rank canary, not claimed
+  as a completed formal checkpoint upload.
+
+The first canary passed, but its formal preflight stopped before launch when
+a provenance consumer incorrectly equated a pinned commit with the moving
+remote branch tip. The fix revalidates live HEAD/tree and Git ancestry; it
+does not weaken clean-checkout or remote-source requirements. Regression
+tests cover advancing tips, unrelated histories, moved HEAD and invalid
+proofs. A new exact-source checkout, new 64-rank canary and fresh identity
+were used after the fix. The original failure remains in `attempt1_outcome.json`.
+
+## Published Data
+
+Data-only NFS directory:
+`/nfs/zzzihanw/ds_as_data/_distill/corl79_ch2_40k_rollout137_mix216_append02`.
+
+- Archive basename:
+  `ad8b834a6f0dce7e1426417bf8796d14941143d9187016e42e04321a960cecbf.tar.gz`.
+- Archive SHA256:
+  `b461df2fb2d70cdb734ef72edd6a04b441339a2da74b736be4305135dfb298c0`.
+- Adjacent same-basename `.manifest.json` binds all 14,223 data files.
+- The published archive was fully reread and hashed through NFS. It contains
+  the 216-clip precomputed bank, geometry/shards and normalized contact export,
+  not executable source. Append is applied at runtime, not baked into NPZs.
+- All eight nodes received and independently hashed the complete required
+  assets. The exact installed paths/digests are in `dataset_identity.json`
+  and `campaign.json` in the active audit directory.
