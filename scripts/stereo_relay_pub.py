@@ -81,6 +81,20 @@ def main() -> int:
     sensor = profile.get_device().first_depth_sensor()
     if sensor.supports(rs.option.emitter_enabled):
         sensor.set_option(rs.option.emitter_enabled, 1.0 if args.emitter == "on" else 0.0)
+    # RealSense option values persist on the device across processes. Another
+    # client (lsvla-vision runs with --exposure-us 6000 --gain 64) can leave the
+    # IR sensors in manual exposure, which makes the pair dark and low-texture
+    # and a stereo network then reports most of the image as far plane. Put the
+    # camera back in a known state instead of inheriting whatever was left.
+    if sensor.supports(rs.option.enable_auto_exposure):
+        sensor.set_option(rs.option.enable_auto_exposure, 1.0)
+        print("[stereo-relay] IR auto-exposure: on")
+    if sensor.supports(rs.option.laser_power):
+        try:
+            rng = sensor.get_option_range(rs.option.laser_power)
+            sensor.set_option(rs.option.laser_power, rng.max if args.emitter == "on" else 0.0)
+        except RuntimeError:
+            pass
     print(f"[stereo-relay] {args.width}x{args.height}@{args.fps}  emitter={args.emitter}  depth={'yes' if args.with_depth else 'no'}")
 
     # Same convention as holosoma.sensors.realsense: left is the reference frame,

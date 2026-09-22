@@ -569,6 +569,13 @@ class ImageServer:
         if rgb:
             # Side-by-side (H, 2W, 3) with identical channels -> keep one plane.
             arrays["stereo_ir"] = np.stack([frame[..., 0] for frame in rgb.values()])
+        calibration = all_frames.get("calibration")
+        if calibration:
+            # Per record rather than in session.json: for a network camera the
+            # calibration only arrives with the first frame, after the session
+            # metadata has already been written. 50 floats, so it costs nothing.
+            arrays["intrinsics"] = np.stack([c["intrinsics"] for c in calibration.values()])
+            arrays["extrinsics"] = np.stack([c["extrinsics"] for c in calibration.values()])
         return arrays
 
     def _predict_gum_depth(self, frames: FrameBundle) -> dict[str, np.ndarray]:
