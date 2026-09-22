@@ -150,4 +150,20 @@ PYTHONPATH=src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python src/holosoma/holosoma/sensors/image_server.py remote_ffs_d435i \
   --image-saver-config.image-root-dir "${log_dir}/depth_images" &
 image_server_pid=$!
+
+# This script is only the depth half and runs until stopped; the image server's
+# stats will scroll below. Say so once the segment is live, because it is easy to
+# sit here waiting for the policy's prompt that will never come from this process.
+(
+  for _ in $(seq 1 90); do [[ -e /dev/shm/depth_img_shm ]] && break; sleep 1; done
+  if [[ -e /dev/shm/depth_img_shm ]]; then
+    echo
+    echo "================================================================================"
+    echo "[real_ffs_depth] DEPTH IS RUNNING. This terminal only serves depth."
+    echo "[real_ffs_depth] To run the policy, open another terminal:  bash real_ffs_run.sh"
+    echo "[real_ffs_depth] (or stop this and use the single command:  bash real_ffs.sh)"
+    echo "================================================================================"
+    echo
+  fi
+) &
 wait "$image_server_pid"
