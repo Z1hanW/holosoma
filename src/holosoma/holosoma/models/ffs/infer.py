@@ -83,9 +83,20 @@ class FastFoundationStereo:
         # Upstream ships the whole model pickled, not a state dict.
         self.model = torch.load(str(model_path), map_location="cpu", weights_only=False)
         self.model.args.max_disp = self.cfg.max_disp
+        self.model.args.valid_iters = self.cfg.valid_iters
+
+        # The commercially licensed c-fast-foundationstereo checkpoint was pickled
+        # without `normalize`, which core/foundation_stereo.py reads unconditionally
+        # when building the cost volume. Upstream's own run_demo.py crashes on it the
+        # same way. Fill it with the default that build_gwc_volume_* declares.
+        if "normalize" not in self.model.args:
+            self.model.args.normalize = True
+            print("[FFS] checkpoint args had no 'normalize'; defaulting to True (repo default)")
+
         self.model = self.model.to(self.device).eval()
 
-        from Utils import InputPadder  # noqa: E402  (only importable once repo_dir is on sys.path)
+        # Only importable once repo_dir is on sys.path.
+        from core.utils.utils import InputPadder  # noqa: E402
 
         self._InputPadder = InputPadder
 
@@ -130,20 +141,28 @@ class FastFoundationStereo:
         baseline = self._baseline_from_extrinsics(camera_extrinsics)
 
         with torch.no_grad():
-            t0 = torch.from_numpy(np.ascontiguousarray(left)).to(self.device).float()[None].permute(0, 3, 1, 2)
-            t1 = torch.from_numpy(np.ascontiguousarray(right)).to(self.device).float()[None].permute(0, 3, 1, 2)
+            # Upstream feeds raw 0-255 values, not normalized images.
+            t0 = torch.as_tensor(np.ascontiguousarray(left)).to(self.device).float()[None].permute(0, 3, 1, 2)
+            t1 = torch.as_tensor(np.ascontiguousarray(right)).to(self.device).float()[None].permute(0, 3, 1, 2)
             padder = self._InputPadder(t0.shape, divis_by=32, force_square=False)
             t0, t1 = padder.pad(t0, t1)
 
-            if self.cfg.hierarchical:
-                disp = self.model.run_hierachical(t0, t1, iters=self.cfg.valid_iters, test_mode=True, small_ratio=0.5)
-            else:
-                disp = self.model.forward(t0, t1, iters=self.cfg.valid_iters, test_mode=True)
+            # fp16 autocast matches Utils.AMP_DTYPE upstream; the model is trained
+            # and profiled under it, so running without it changes the output.
+            with torch.amp.autocast(self.device.type, enabled=True, dtype=torch.float16):
+                if self.cfg.hierarchical:
+                    disp = self.model.run_hierachical(
+                        t0, t1, iters=self.cfg.valid_iters, test_mode=True, small_ratio=0.5
+                    )
+                else:
+                    disp = self.model.forward(
+                        t0, t1, iters=self.cfg.valid_iters, test_mode=True, optimize_build_volume="pytorch1"
+                    )
 
             disp = padder.unpad(disp.float())
 
         h, w = left.shape[:2]
-        disp = disp.detach().cpu().numpy().reshape(h, w)
+        disp = disp.detach().cpu().numpy().reshape(h, w).clip(0, None)
 
         # disparity -> metric depth; guard the division so zero/negative disparity
         # becomes far-plane rather than inf/NaN, which the policy cannot consume.
