@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -651,8 +652,23 @@ def _formal_git_identity_from_env() -> dict[str, Any]:
         value = payload.get(key)
         if not isinstance(value, str) or _GIT_OBJECT_ID_RE.fullmatch(value) is None:
             raise ValueError(f"formal Git verification has malformed {key}: {value!r}")
-    if payload["commit_sha"] != payload["fetched_ref_commit"]:
-        raise ValueError("formal Git commit is not the commit fetched from the declared remote ref")
+    source_root = Path(__file__).resolve().parents[1]
+    if payload.get("accepted") is not True or payload.get("source_root") != str(source_root):
+        raise ValueError("formal Git verification does not bind this source checkout")
+    for revision, key in (("HEAD", "commit_sha"), ("HEAD^{tree}", "tree_sha")):
+        actual = subprocess.check_output(
+            ["git", "-C", str(source_root), "rev-parse", revision], text=True
+        ).strip()
+        if actual != payload[key]:
+            raise ValueError(f"formal Git verification no longer matches live {revision}")
+    # The contract pins HEAD, not the moving branch tip observed during fetch.
+    ancestor = subprocess.run(
+        ["git", "-C", str(source_root), "merge-base", "--is-ancestor",
+         payload["commit_sha"], payload["fetched_ref_commit"]],
+        capture_output=True, text=True,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("formal Git commit is not reachable from the fetched remote ref")
     for key in ("remote_url", "remote_ref"):
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
