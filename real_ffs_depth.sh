@@ -22,6 +22,11 @@ export HOLOSOMA_FFS_MODEL="${HOLOSOMA_FFS_MODEL:-$HOLOSOMA_FFS_REPO/weights/c-ff
 RELAY_HOST="${HOLOSOMA_RELAY_HOST-192.168.123.164}"
 RELAY_PORT="${HOLOSOMA_RELAY_PORT:-5602}"
 RELAY_DIR="${HOLOSOMA_RELAY_REMOTE_DIR:-~/depth_relay}"
+# Space-separated systemd --user services on the robot that hold the camera (e.g.
+# "lsvla-vision"). They are stopped before the relay starts and started again on
+# exit if they were active. Off by default: stopping someone else's service is a
+# decision, not a default.
+RELAY_STOP_SERVICES="${HOLOSOMA_RELAY_STOP_SERVICES:-}"
 export HOLOSOMA_REMOTE_STEREO_CONNECT="${HOLOSOMA_REMOTE_STEREO_CONNECT:-tcp://${RELAY_HOST:-192.168.123.164}:${RELAY_PORT}}"
 
 for f in "$HOLOSOMA_FFS_MODEL" "$(dirname "$HOLOSOMA_FFS_MODEL")/cfg.yaml"; do
@@ -41,9 +46,12 @@ SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5)
 stop_remote_relay() {
   [[ -n "$RELAY_HOST" ]] || return 0
   local out
-  out=$("${SSH[@]}" "$RELAY_HOST" "if [ -f ${RELAY_DIR}/relay.pid ]; then kill \"\$(cat ${RELAY_DIR}/relay.pid)\" 2>/dev/null && echo killed; rm -f ${RELAY_DIR}/relay.pid; fi" 2>/dev/null) \
+  out=$("${SSH[@]}" "$RELAY_HOST" "if [ -f ${RELAY_DIR}/relay.pid ]; then kill \"\$(cat ${RELAY_DIR}/relay.pid)\" 2>/dev/null && echo killed; rm -f ${RELAY_DIR}/relay.pid; fi
+    if [ -f ${RELAY_DIR}/services.stopped ]; then for s in \$(cat ${RELAY_DIR}/services.stopped); do systemctl --user start \"\$s\" && echo \"restarted \$s\"; done; rm -f ${RELAY_DIR}/services.stopped; fi" 2>/dev/null) \
     || { echo "[real_ffs_depth] WARNING: could not reach ${RELAY_HOST} to stop the relay; check ${RELAY_DIR}/relay.pid there" >&2; return 0; }
   [[ "$out" == *killed* ]] && echo "[real_ffs_depth] remote relay stopped"
+  [[ "$out" == *restarted* ]] && echo "[real_ffs_depth] remote services restored: $(printf '%s' "$out" | sed -n 's/^restarted //p' | tr '\n' ' ')"
+  return 0
 }
 
 install_remote_relay() {
@@ -73,7 +81,13 @@ start_remote_relay() {
 set -e
 cd ${RELAY_DIR}
 [ -f relay.pid ] && kill "\$(cat relay.pid)" 2>/dev/null && sleep 0.5
-rm -f relay.log
+rm -f relay.log services.stopped
+for s in ${RELAY_STOP_SERVICES}; do
+  if systemctl --user is-active --quiet "\$s"; then
+    systemctl --user stop "\$s" && echo "\$s" >> services.stopped && echo "  stopped \$s (will restart on exit)"
+  fi
+done
+[ -s services.stopped ] && sleep 1.5
 HOLOSOMA_RELAY_BIND='tcp://*:${RELAY_PORT}' setsid nohup ./real_ffs_relay.sh > relay.log 2>&1 < /dev/null &
 echo \$! > relay.pid
 for i in \$(seq 1 60); do
