@@ -157,6 +157,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._drop_button_command = float(os.environ.get("HOLOSOMA_POLICY_DROP_BUTTON", "0") or "0")
         except ValueError:
             self._drop_button_command = 0.0
+        # What a fresh launch starts with; restored whenever the policy is stopped
+        # so that a restart sees the same inputs a first start does.
+        self._pickup_button_startup = self._pickup_button_command
+        self._drop_button_startup = self._drop_button_command
         self._pickup_button_key_down = False
         self._drop_button_key_down = False
         self._logged_missing_drop_button_key = False
@@ -1230,9 +1234,45 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "kd": self._stiff_hold_kd,
         }
 
+    def _reset_policy_io_state(self, reason: str) -> None:
+        """Forget what the policy last did and reset operator toggles to startup values.
+
+        On the robot, restarting after a stop fed the network the last action from
+        before the stop (|a| 3.2 vs 0 on a fresh launch) and a drop_button that had
+        been toggled on minutes earlier. Neither is what a start should look like.
+        """
+        self.last_policy_action.fill(0.0)
+        self.scaled_policy_action.fill(0.0)
+        if (
+            self._pickup_button_command != self._pickup_button_startup
+            or self._drop_button_command != self._drop_button_startup
+        ):
+            self.logger.info(
+                colored(
+                    f"{reason}: pickup_button -> {self._pickup_button_startup:.0f}, "
+                    f"drop_button -> {self._drop_button_startup:.0f} (startup values)",
+                    "blue",
+                )
+            )
+        self._pickup_button_command = self._pickup_button_startup
+        self._drop_button_command = self._drop_button_startup
+
+    def _handle_init_state(self):
+        super()._handle_init_state()
+        self._reset_policy_io_state("init state")
+
     def _handle_start_policy(self):
         super()._handle_start_policy()
         self._stiff_hold_active = False
+        # A restart must look like a first start to the network: no stale previous
+        # action, and history filled from the robot's current state rather than
+        # from whatever was in the buffers when it was stopped.
+        self.last_policy_action.fill(0.0)
+        self.scaled_policy_action.fill(0.0)
+        try:
+            self.warm_start_observation_history()
+        except Exception as exc:  # never let a warm-start problem block starting
+            self.logger.warning(f"observation history warm-start skipped: {exc}")
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
 
@@ -1291,6 +1331,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_policy_inference_clock_ms = None
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
+        self._reset_policy_io_state("policy stopped")
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
