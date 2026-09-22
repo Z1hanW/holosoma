@@ -133,7 +133,7 @@ def gather(root, campaign, rank):
     code = f"""from pathlib import Path
 import json
 r=Path({str(work)!r})
-print(json.dumps({{n:[str(p) for p in r.rglob(n)] for n in ['model_00002.pt','model_00002.onnx','model_00002.pair.json','holosoma_config.yaml','train_rank_*.log']}}))
+print(json.dumps({{n:[str(p) for p in r.rglob(n) if '.wandb' not in p.parts] for n in ['model_00002.pt','model_00002.onnx','model_00002.pair.json','holosoma_config.yaml','train_rank_*.log']}}))
 """
     paths = json.loads(ssh(host, "python3 -c " + shlex.quote(code)))
     dest = root / exp.ARM / "canary_artifacts"
