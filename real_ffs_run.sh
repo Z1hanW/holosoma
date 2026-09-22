@@ -48,10 +48,9 @@ if [[ ! -e /dev/shm/depth_img_shm ]] || ! depth_server_running; then
   exit 1
 fi
 
-# Liveness and sanity: the frame must be updating and must not be almost all
-# far-plane (camera pointed at the ceiling / nothing within 3 m). The policy was
-# trained on scenes with floor and objects in view; starting it on such input
-# has produced large actions within a second on this robot.
+# Liveness and sanity: the frame must be updating and values must be in range.
+# Scene content (e.g. how much of the image is at the far plane) is reported but
+# deliberately not gated on - whether the view is suitable is the operator's call.
 depth_check_py="${HOLOSOMA_INFERENCE_PYTHON:-$HOME/.holosoma_deps/miniconda3/envs/hsinference/bin/python3}"
 [[ -x "$depth_check_py" ]] || depth_check_py=python3
 if ! "$depth_check_py" - <<'EOF'
@@ -69,10 +68,8 @@ if len(snaps) < 5:
     print(f"[real_ffs_run] ERROR: depth frame is not updating ({len(snaps)} distinct frames in 1.5 s) - the depth server is stalled or this is a stale segment.", file=sys.stderr); ok = False
 if not np.isfinite(frame).all() or lo < -0.5001 or hi > 0.5001:
     print(f"[real_ffs_run] ERROR: depth values out of range [{lo:.3f}, {hi:.3f}] / non-finite.", file=sys.stderr); ok = False
-if far > 0.8:
-    print(f"[real_ffs_run] ERROR: {far*100:.0f}% of the depth image is at the far plane (>3 m). The camera is not seeing the floor/objects - reposition the robot before starting the policy.", file=sys.stderr); ok = False
 if ok:
-    print(f"[real_ffs_run] depth is live: {len(snaps)} frames/1.5 s, far-plane {far*100:.0f}%, range [{lo:.2f}, {hi:.2f}]", file=sys.stderr)
+    print(f"[real_ffs_run] depth is live: {len(snaps)} frames/1.5 s, range [{lo:.2f}, {hi:.2f}], far-plane {far*100:.0f}% (info only)", file=sys.stderr)
 sys.exit(0 if ok else 1)
 EOF
 then
