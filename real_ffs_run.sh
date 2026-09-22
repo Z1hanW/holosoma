@@ -93,6 +93,12 @@ python3 scripts/show_policy_command.py "${log_dir}/latest_command.json" &
 command_window_pid=$!
 trap 'kill "$command_window_pid" 2>/dev/null || true' EXIT
 source scripts/source_inference_setup.sh
+# The policy's ONNX inference takes ~0.2 ms; onnxruntime's default of one
+# spinning thread per core (24 here) starves the depth server on the same
+# machine (measured: 30 -> ~20-25 Hz, i.e. skipped depth frames and extra
+# latency). Two threads are plenty. OMP_NUM_THREADS covers numpy/BLAS.
+export HOLOSOMA_ORT_THREADS="${HOLOSOMA_ORT_THREADS:-2}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=0 \
 HOLOSOMA_POLICY_DROP_BUTTON="${HOLOSOMA_POLICY_DROP_BUTTON:-0}" \
 HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${log_dir}/latest_command.json" \

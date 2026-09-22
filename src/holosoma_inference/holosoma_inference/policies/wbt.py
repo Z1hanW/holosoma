@@ -340,7 +340,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return self._get_ref_body_pose_in_world(robot_state_data)[1]
 
     def setup_policy(self, model_path):
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        # The policy net runs in ~0.2 ms; onnxruntime's default thread pool (one
+        # spinning thread per core) only starves whatever else shares the machine,
+        # notably the depth server. HOLOSOMA_ORT_THREADS (default 2) caps it.
+        so = onnxruntime.SessionOptions()
+        so.intra_op_num_threads = int(os.environ.get("HOLOSOMA_ORT_THREADS", "2"))
+        so.inter_op_num_threads = 1
+        self.onnx_policy_session = onnxruntime.InferenceSession(model_path, so)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
         self._policy_action_output_name = self._resolve_action_output_name()

@@ -364,7 +364,14 @@ class BasePolicy:
 
     def setup_policy(self, model_path):
         """Setup ONNX policy model and extract metadata."""
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        import os
+
+        # Cap onnxruntime's thread pool: the default spins one thread per core and
+        # starves co-located processes (the depth server) for a ~0.2 ms inference.
+        so = onnxruntime.SessionOptions()
+        so.intra_op_num_threads = int(os.environ.get("HOLOSOMA_ORT_THREADS", "2"))
+        so.inter_op_num_threads = 1
+        self.onnx_policy_session = onnxruntime.InferenceSession(model_path, so)
         input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
 
