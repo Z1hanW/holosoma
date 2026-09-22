@@ -20,7 +20,7 @@ IPS = ["10.99.0." + x for x in ("18", "227", "167", "77", "116", "117", "165", "
 def prepare(root):
     if (root / "campaign.json").exists():
         raise ValueError("Campaign already exists")
-    dataset = json.loads((root / "bank_identity.json").read_text())
+    dataset = json.loads((root / "dataset_identity.json").read_text())
     if dataset["clip_count"] != 216 or dataset["source_counts"] != {"corl79": 79, "ch2_40k_rollout137": 137}:
         raise ValueError("Unexpected data union")
     inventory = json.loads((root / "node_inventory.json").read_text())
@@ -33,7 +33,7 @@ def prepare(root):
     tree = recipe.run(["git", "-C", recipe.ROOT, "rev-parse", "HEAD^{tree}"]).strip()
     manifest = hashlib.sha256(subprocess.check_output(["git", "-C", str(recipe.ROOT), "ls-tree", "-r", "--full-tree", commit])).hexdigest()
     files = set()
-    for directory in [Path(dataset["bank"]), Path(json.loads((recipe.ROOT / "scripts/box23k_robot_assets.json").read_text())["asset_root"])]:
+    for directory in [Path(dataset["bank"]), Path(dataset["contact_root"]), Path(json.loads((recipe.ROOT / "scripts/box23k_robot_assets.json").read_text())["asset_root"])]:
         files.update(p.absolute() for p in directory.rglob("*") if p.is_file())
     files.update([Path(recipe.INIT), Path(recipe.TEACHER)])
     assets = []

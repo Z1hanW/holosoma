@@ -1,9 +1,25 @@
 from pathlib import Path
 import sys
 
+import numpy as np
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import contact_sampling_factorial as recipe
 import mix_contact_adaptive_ws64 as launch
+from prepare_mix216_contact_labels import interval_json
+
+
+def test_legacy_interval_conversion_is_exact_and_never_fabricates(tmp_path):
+    np.save(tmp_path / "left_wrist_contact_interval_steps.npy", np.array([-1, -1]))
+    np.save(tmp_path / "right_wrist_contact_interval_steps.npy", np.array([25, 200]))
+    assert interval_json(tmp_path) == {"left_wrist": [-1, -1], "right_wrist": [25, 200]}
+    np.save(tmp_path / "left_wrist_contact_interval_steps.npy", np.array([5, 4]))
+    with pytest.raises(ValueError, match="bounds"):
+        interval_json(tmp_path)
+    (tmp_path / "left_wrist_contact_interval_steps.npy").unlink()
+    with pytest.raises(FileNotFoundError):
+        interval_json(tmp_path)
 
 
 def _options(args):

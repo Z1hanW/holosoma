@@ -9,6 +9,9 @@ The four existing mixed runs and unrelated training processes remain untouched.
   clips, with 60 box, 38 ball, 69 barrel and 49 bin. No old debug30 duplication.
 - Preserve original numeric trajectories, real visual/collision meshes, inertial
   properties and available contact sidecars. No geometry or contact fallback.
+  The legacy79 interval NPY files are explicitly converted to the runtime JSON
+  schema in a separate immutable contact export; every integer pair and every
+  original file is verified unchanged. Missing labels are not invented.
 - Use the existing precomputed turn-then-forward algorithm, with pickup latch,
   exclusive x/yaw and drop clearing root commands. Peak-height button labels
   retain SW alpha=0.91, five-frame smoothing and five-frame debounce.
@@ -33,6 +36,7 @@ bank and is reported in its identity; it is not silently removed or relabeled.
 ## Reproduction
 
 Data builder: `scripts/prepare_corl79_rollout137_mix_bank.py`.
+Contact format converter: `scripts/prepare_mix216_contact_labels.py`.
 Git-bound worker: `scripts/mix_contact_adaptive_ws64.py`.
 Controller: `scripts/mix_contact_adaptive_ws64_control.py`.
 
