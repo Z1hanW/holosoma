@@ -13,7 +13,7 @@
 # Defaults chosen for this robot; every one can be overridden in the environment:
 #   HOLOSOMA_REAL_INTERFACE       auto-detected: the NIC holding a 192.168.123.x address
 #   HOLOSOMA_RELAY_STOP_SERVICES  lsvla-vision  (autostarted service that holds the camera)
-#   HOLOSOMA_REAL_MODEL_PATH      _ckps/4kocpixa_model_25500.onnx  (see real_ffs_run.sh)
+#   HOLOSOMA_REAL_MODEL_PATH      _ckps/4kocpixa_model_39000.onnx  (see real_ffs_run.sh)
 #   HOLOSOMA_DRY_RUN=1            bring up depth only, do not launch the policy
 #
 # WARNING: as soon as the policy starts it sends a stiff hold-position command,
