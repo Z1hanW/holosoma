@@ -16,10 +16,20 @@ if [[ ! -x "$PY" ]]; then
   echo "[real_ffs_relay] ERROR: python not found at $PY (set HOLOSOMA_RELAY_PYTHON)" >&2
   exit 1
 fi
+# The D435i drops off the bus for a few seconds at a time on this robot and then
+# re-enumerates on its own. Wait for it instead of failing the whole deployment.
+cam_wait="${HOLOSOMA_RELAY_CAMERA_WAIT_S:-20}"
+for ((t = 0; t < cam_wait; t++)); do
+  lsusb 2>/dev/null | grep -q "8086:0b3a" && break
+  (( t == 0 )) && echo "[real_ffs_relay] D435i (8086:0b3a) not on the USB bus; waiting up to ${cam_wait}s for it to re-enumerate..." >&2
+  sleep 1
+done
 if ! lsusb 2>/dev/null | grep -q "8086:0b3a"; then
-  echo "[real_ffs_relay] ERROR: no D435i (8086:0b3a) on the USB bus. Re-seat the cable." >&2
+  echo "[real_ffs_relay] ERROR: no D435i (8086:0b3a) on the USB bus after ${cam_wait}s. Re-seat the camera cable." >&2
   exit 1
 fi
+# Give udev a moment to create the video nodes after a re-enumeration.
+for ((t = 0; t < 10; t++)); do [[ $(ls /dev/video* 2>/dev/null | wc -l) -ge 6 ]] && break; sleep 0.5; done
 
 # The D435i can only be streamed by one process. Another RealSense client (e.g. an
 # autostarted stereo server) makes our pipeline start fine and then starve with
