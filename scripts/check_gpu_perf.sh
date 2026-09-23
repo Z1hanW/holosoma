@@ -42,10 +42,15 @@ ok=1
 [[ "${lim%W}" == "115.00" ]] || ok=0
 [[ "${clk:-0}" -ge 1200 ]] || ok=0
 if [[ $ok == 1 ]]; then echo "RESULT: GPU is at full performance"; else
-  echo "RESULT: GPU is POWER-CAPPED / stuck low. Fix (needs sudo):"
-  echo "    sudo nvidia-smi -pm 1 && sudo nvidia-smi -rgc     # then re-run this script"
-  echo "  if still capped, disable runtime D3 and reboot:"
-  echo "    echo 'options nvidia NVreg_DynamicPowerManagement=0x00' | sudo tee /etc/modprobe.d/nvidia-no-rtd3.conf"
-  echo "    sudo update-initramfs -u && sudo reboot"
+  echo "RESULT: GPU is POWER-CAPPED / stuck low."
+  echo "  1. Check the charger first. The EC budgets the dGPU from the adapter it sees; a"
+  echo "     USB-C PD source under ~180 W (see the line above) caps the GPU at 20 W no"
+  echo "     matter what the drivers do. Plug in the original high-wattage Dell adapter"
+  echo "     and re-run this script - it recovers live, no reboot needed."
+  echo "  2. Only if on the proper adapter and still capped (needs sudo):"
+  echo "       sudo nvidia-smi -pm 1 && sudo nvidia-smi -rgc"
+  echo "     and make sure runtime D3 is disabled (RTD3 line above should say Disabled):"
+  echo "       echo 'options nvidia NVreg_DynamicPowerManagement=0x00' | sudo tee /etc/modprobe.d/nvidia-no-rtd3.conf"
+  echo "       sudo update-initramfs -u && sudo reboot"
   exit 1
 fi
