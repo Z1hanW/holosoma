@@ -11,6 +11,14 @@ D=/sys/bus/pci/devices/0000:02:00.0
 
 echo "platform profile : $(cat /sys/firmware/acpi/platform_profile 2>/dev/null)   ($(powerprofilesctl get 2>/dev/null))"
 echo "AC power         : $(cat /sys/class/power_supply/AC/online 2>/dev/null)"
+# Dell caps the dGPU (20 W) when the adapter cannot supply the platform's rated
+# power. A USB-C PD source shows its contract here; the RTX PRO 5000 alone wants
+# 115-175 W, so anything under ~180 W means a capped GPU regardless of drivers.
+for p in /sys/class/power_supply/ucsi-source-psy-*; do
+  [[ "$(cat $p/online 2>/dev/null)" == "1" ]] || continue
+  vmax=$(cat $p/voltage_max); imax=$(cat $p/current_max); vnow=$(cat $p/voltage_now); inow=$(cat $p/current_now 2>/dev/null || echo 0)
+  echo "USB-C PD source  : contract $((vmax/1000000))V x $(awk -v i=$imax 'BEGIN{printf "%.1f",i/1e6}')A = $(awk -v v=$vmax -v i=$imax 'BEGIN{printf "%.0f",v/1e6*i/1e6}') W, now $((vnow/1000000))V x $(awk -v i=$inow 'BEGIN{printf "%.1f",i/1e6}')A = $(awk -v v=$vnow -v i=$inow 'BEGIN{printf "%.0f",v/1e6*i/1e6}') W   (GPU alone needs 115-175 W)"
+done
 lim=$(nvidia-smi -q -d POWER 2>/dev/null | awk -F: '/Current Power Limit/{gsub(/ /,"",$2); print $2; exit}')
 echo "GPU power limit  : ${lim:-?}   (expected 115.00W; 20.00W = stuck)"
 echo "GPU persistence  : $(nvidia-smi --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null)"
