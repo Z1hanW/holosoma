@@ -20,7 +20,7 @@ fi
 
 # 4kocpixa (wandb zihanw22/carry-any) exports actor_obs=94 / perception_obs=5046,
 # which matches exactly one inference preset.
-checkpoint="${HOLOSOMA_REAL_MODEL_PATH:-_ckps/4kocpixa_model_39000.onnx}"
+checkpoint="${HOLOSOMA_REAL_MODEL_PATH:-_ckps/4kocpixa_model_28000.onnx}"
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1}"
 
 # The policy attaches to depth_img_shm at start and reads whatever is there. A
