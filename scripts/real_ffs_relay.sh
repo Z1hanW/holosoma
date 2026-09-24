@@ -8,12 +8,19 @@
 set -eo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${HOLOSOMA_RELAY_PYTHON:-$HOME/.holosoma_deps/miniconda3/envs/hsinference/bin/python}"
+# Prefer the conda env if the robot has one; otherwise any python3 that has the
+# three deps (pyrealsense2, pyzmq, numpy) - e.g. system python3 with pip --user.
+PY="${HOLOSOMA_RELAY_PYTHON:-}"
+if [[ -z "$PY" ]]; then
+  for cand in "$HOME/.holosoma_deps/miniconda3/envs/hsinference/bin/python" python3; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import pyrealsense2, zmq, numpy" 2>/dev/null; then PY="$cand"; break; fi
+  done
+fi
 BIND="${HOLOSOMA_RELAY_BIND:-tcp://*:5602}"
 EMITTER="${HOLOSOMA_RELAY_EMITTER:-on}"
 
-if [[ ! -x "$PY" ]]; then
-  echo "[real_ffs_relay] ERROR: python not found at $PY (set HOLOSOMA_RELAY_PYTHON)" >&2
+if [[ -z "$PY" ]]; then
+  echo "[real_ffs_relay] ERROR: no python with pyrealsense2 + pyzmq + numpy found (set HOLOSOMA_RELAY_PYTHON)" >&2
   exit 1
 fi
 # The D435i drops off the bus for a few seconds at a time on this robot and then
