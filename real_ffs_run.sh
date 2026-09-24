@@ -64,7 +64,10 @@ while time.monotonic() - t0 < 1.5:
 frame = a.copy(); s.close()
 far = float(np.isclose(frame, 0.5).mean()); lo, hi = float(frame.min()), float(frame.max())
 ok = True
-if len(snaps) < 5:
+saturated = bool(np.all(np.isclose(frame, -0.5)) or np.all(np.isclose(frame, 0.5)))
+if saturated:
+    print(f"[real_ffs_run] WARNING: depth frame is fully saturated ({'all <0.3 m - camera blocked or something touching it' if frame.max() < 0 else 'all >3 m'}); frames look identical so change cannot be checked.", file=sys.stderr)
+if len(snaps) < 5 and not saturated:
     print(f"[real_ffs_run] ERROR: depth frame is not updating ({len(snaps)} distinct frames in 1.5 s) - the depth server is stalled or this is a stale segment.", file=sys.stderr); ok = False
 if not np.isfinite(frame).all() or lo < -0.5001 or hi > 0.5001:
     print(f"[real_ffs_run] ERROR: depth values out of range [{lo:.3f}, {hi:.3f}] / non-finite.", file=sys.stderr); ok = False

@@ -101,7 +101,11 @@ a = np.ndarray((1, 1, 58, 87), dtype=np.float32, buffer=s.buf)
 seen = set(); t0 = time.monotonic()
 while time.monotonic() - t0 < 1.0:
     seen.add(a.tobytes()); time.sleep(0.02)
-s.close(); sys.exit(0 if len(seen) >= 5 else 1)
+frame = a.copy(); s.close()
+# A saturated frame (everything <0.3 m or >3 m) is byte-identical every tick even
+# though the server is publishing, so it cannot be told apart by change alone.
+saturated = bool(np.all(np.isclose(frame, -0.5)) or np.all(np.isclose(frame, 0.5)))
+sys.exit(0 if (len(seen) >= 5 or saturated) else 1)
 EOF
   then break; fi
   sleep 1
