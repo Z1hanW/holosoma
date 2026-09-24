@@ -25,7 +25,7 @@ if [[ -z "$PY" ]]; then
 fi
 # The D435i drops off the bus for a few seconds at a time on this robot and then
 # re-enumerates on its own. Wait for it instead of failing the whole deployment.
-cam_wait="${HOLOSOMA_RELAY_CAMERA_WAIT_S:-20}"
+cam_wait="${HOLOSOMA_RELAY_CAMERA_WAIT_S:-90}"
 for ((t = 0; t < cam_wait; t++)); do
   lsusb 2>/dev/null | grep -q "8086:0b3a" && break
   (( t == 0 )) && echo "[real_ffs_relay] D435i (8086:0b3a) not on the USB bus; waiting up to ${cam_wait}s for it to re-enumerate..." >&2

@@ -109,12 +109,12 @@ done
 [ -s services.stopped ] && sleep 1.5
 HOLOSOMA_RELAY_BIND='tcp://*:${RELAY_PORT}' setsid nohup ./real_ffs_relay.sh > relay.log 2>&1 < /dev/null &
 echo \$! > relay.pid
-for i in \$(seq 1 120); do
+for i in \$(seq 1 480); do
   grep -q publishing relay.log 2>/dev/null && { echo "  relay pid \$(cat relay.pid): \$(grep -m1 publishing relay.log)"; exit 0; }
   kill -0 "\$(cat relay.pid)" 2>/dev/null || break
   sleep 0.25
 done
-echo "  relay did not start within 30 s; remote log:" >&2; tail -8 relay.log >&2
+echo "  relay did not start within 120 s; remote log:" >&2; tail -8 relay.log >&2
 echo "  camera holders now:" >&2; for v in /dev/video*; do fuser "\$v" 2>/dev/null | xargs -r -n1 ps -o pid=,cmd= -p 2>/dev/null; done | sort -u | cut -c1-120 | sed 's/^/    /' >&2
 exit 1
 EOF

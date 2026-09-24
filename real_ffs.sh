@@ -78,7 +78,7 @@ depth_pid=$!
 echo "[real_ffs] depth server starting (pid ${depth_pid}); log: ${depth_log}"
 
 # Surface the milestones from the depth log while waiting for the segment.
-shm_wait="${HOLOSOMA_SHM_WAIT_S:-120}"
+shm_wait="${HOLOSOMA_SHM_WAIT_S:-180}"
 seen=""
 for ((t = 0; t < shm_wait; t++)); do
   if ! kill -0 "$depth_pid" 2>/dev/null; then
