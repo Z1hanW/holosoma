@@ -1,0 +1,493 @@
+"""Observation manager for computing and processing observations."""
+
+from __future__ import annotations
+
+from collections import deque
+from typing import Any, Callable, Iterable
+
+import torch
+
+from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
+from holosoma.managers.utils import resolve_callable
+
+from .base import ObservationTermBase, is_reusable_observation_base_term
+
+
+class ObservationManager:
+    """Manages observation computation with groups, terms, and processing.
+
+    The manager orchestrates the computation of observations from multiple terms,
+    applying scaling, noise, clipping, and history buffering to produce the final
+    observation tensors. It maintains exact equivalence with the direct observation
+    system while providing a more modular structure.
+
+    Parameters
+    ----------
+    cfg : ObservationManagerCfg
+        Configuration specifying observation groups and terms.
+    env : Any
+        Environment instance (typically a ``BaseTask`` subclass).
+    device : str
+        Device to place tensors on.
+    """
+
+    def __init__(self, cfg: ObservationManagerCfg, env: Any, device: str):
+        self.cfg = cfg
+        self.env = env
+        self.device = device
+        self.logger = getattr(env, "logger", None)
+
+        # Storage for resolved functions and stateful terms
+        self._term_funcs: dict[str, dict[str, Callable]] = {}
+        self._term_instances: dict[str, dict[str, ObservationTermBase]] = {}
+        self._term_slice_cache: dict[str, dict[str, slice]] = {}
+        self._term_base_reuse_keys: dict[str, dict[str, Callable]] = {}
+        self._repeated_base_reuse_keys: frozenset[Callable] = frozenset()
+
+        # History buffers: group_name -> term_name -> deque
+        self._history_buffers: dict[str, dict[str, deque]] = {}
+        self._active_group_names: tuple[str, ...] | None = None
+
+        # Initialize groups
+        self._initialize_groups()
+        self._update_base_reuse_plan()
+
+    def set_active_groups(self, group_names: Iterable[str] | None) -> None:
+        """Restrict runtime observation computation to selected groups."""
+        if group_names is None:
+            self._active_group_names = None
+            self._update_base_reuse_plan()
+            return
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        missing: list[str] = []
+        for group_name in group_names:
+            if group_name in seen:
+                continue
+            seen.add(group_name)
+            if group_name not in self.cfg.groups:
+                missing.append(group_name)
+                continue
+            ordered.append(group_name)
+
+        if missing:
+            raise KeyError(f"Observation group(s) not found: {missing}")
+        if not ordered:
+            raise ValueError("Active observation groups cannot be empty.")
+        self._active_group_names = tuple(ordered)
+        self._update_base_reuse_plan()
+
+    @property
+    def active_group_names(self) -> tuple[str, ...] | None:
+        return self._active_group_names
+
+    def _initialize_groups(self) -> None:
+        """Initialize observation groups and resolve term functions."""
+        for group_name, group_cfg in self.cfg.groups.items():
+            self._term_funcs[group_name] = {}
+            self._term_instances[group_name] = {}
+            self._history_buffers[group_name] = {}
+            self._term_base_reuse_keys[group_name] = {}
+
+            for term_name, term_cfg in group_cfg.terms.items():
+                # Resolve function
+                func = resolve_callable(term_cfg.func, context="observation term")
+
+                # Check if it's a class (stateful) or function (stateless)
+                if isinstance(func, type) and issubclass(func, ObservationTermBase):
+                    # Stateful term - instantiate
+                    instance = func(term_cfg, self.env)
+                    self._term_instances[group_name][term_name] = instance
+                else:
+                    # Stateless function
+                    self._term_funcs[group_name][term_name] = func
+                    if (
+                        self.cfg.reuse_exact_base_terms
+                        and not term_cfg.params
+                        and is_reusable_observation_base_term(func)
+                    ):
+                        self._term_base_reuse_keys[group_name][term_name] = func
+
+                # Initialize history buffer if needed (using group-level history_length)
+                if group_cfg.history_length > 1:
+                    self._history_buffers[group_name][term_name] = deque(maxlen=group_cfg.history_length)
+
+    def _update_base_reuse_plan(self) -> None:
+        """Select marked raw terms repeated by the currently active groups."""
+
+        if not self.cfg.reuse_exact_base_terms:
+            self._repeated_base_reuse_keys = frozenset()
+            return
+
+        group_names = self._active_group_names if self._active_group_names is not None else self.cfg.groups
+        counts: dict[Callable, int] = {}
+        for group_name in group_names:
+            for reuse_key in self._term_base_reuse_keys[group_name].values():
+                counts[reuse_key] = counts.get(reuse_key, 0) + 1
+        self._repeated_base_reuse_keys = frozenset(key for key, count in counts.items() if count > 1)
+
+    def compute(self, *, modify_history: bool = True) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+        """Compute all observation groups.
+
+        Parameters
+        ----------
+        modify_history : bool, optional
+            If ``True``, update history buffers; if ``False``, preserve them
+            for bootstrapping. Defaults to ``True``.
+
+        Returns
+        -------
+        dict[str, torch.Tensor | dict[str, torch.Tensor]]
+            Mapping from group names to observation tensors or dictionaries of tensors.
+        """
+        obs_dict = {}
+        group_names = self._active_group_names if self._active_group_names is not None else self.cfg.groups
+        base_cache: dict[Callable, torch.Tensor] | None = (
+            {} if self._repeated_base_reuse_keys else None
+        )
+        timing = getattr(self.env, "step_timing", None)
+        if not getattr(timing, "enabled", False):
+            timing = None
+        for group_name in group_names:
+            if timing is None:
+                obs_dict[group_name] = self.compute_group(
+                    group_name,
+                    modify_history=modify_history,
+                    _base_cache=base_cache,
+                )
+            else:
+                with timing.record(f"post/observations/group/{group_name}"):
+                    obs_dict[group_name] = self.compute_group(
+                        group_name,
+                        modify_history=modify_history,
+                        _base_cache=base_cache,
+                    )
+        return obs_dict
+
+    def compute_group(
+        self,
+        group_name: str,
+        *,
+        modify_history: bool = True,
+        _base_cache: dict[Callable, torch.Tensor] | None = None,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        """Compute observations for a specific group.
+
+        This method replicates the exact behavior of the direct
+        ``parse_observation()`` function to ensure equivalence.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the observation group to compute.
+        modify_history : bool, optional
+            If ``True``, update history buffers; if ``False``, preserve them
+            for bootstrapping. Defaults to ``True``.
+
+        Returns
+        -------
+        torch.Tensor | dict[str, torch.Tensor]
+            Concatenated tensor when ``group.concatenate`` is ``True``; otherwise
+            a dictionary of tensors keyed by term name.
+        """
+        group_cfg = self.cfg.groups[group_name]
+        obs_tensors = {}
+
+        clone_term_result = group_cfg.history_length > 1 or not group_cfg.concatenate
+        for term_name, term_cfg in group_cfg.terms.items():
+            # 1. Compute base observation
+            obs = self._compute_term(
+                group_name,
+                term_name,
+                term_cfg,
+                clone_result=clone_term_result,
+                base_cache=_base_cache,
+            )
+
+            # 2. Apply noise (matches direct: noise before scaling)
+            if group_cfg.enable_noise and term_cfg.noise > 0:
+                obs = self._apply_noise(obs, term_cfg.noise)
+
+            # 3. Apply scaling (matches direct: scale after noise)
+            if not self._is_unity_scale(term_cfg.scale):
+                obs = self._apply_scale(obs, term_cfg.scale)
+
+            # 4. Apply clipping (if specified)
+            if term_cfg.clip is not None:
+                obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
+
+            # 5. Handle history buffering
+            if group_cfg.history_length > 1:
+                obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
+
+            obs_tensors[term_name] = obs
+
+        # Concatenate or return dict
+        if group_cfg.concatenate:
+            # Concatenate in alphabetically sorted order (to match direct system behavior)
+            # Direct system does: sorted(obs_config) before concatenation
+            sorted_keys = sorted(obs_tensors.keys())
+            return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
+        return obs_tensors
+
+    def _compute_term(
+        self,
+        group_name: str,
+        term_name: str,
+        term_cfg: ObsTermCfg,
+        *,
+        clone_result: bool = True,
+        base_cache: dict[Callable, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Compute a single observation term.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the observation group.
+        term_name : str
+            Name of the observation term.
+        term_cfg : ObsTermCfg
+            Configuration for the observation term.
+
+        Returns
+        -------
+        torch.Tensor
+            Observation tensor with shape ``[num_envs, obs_dim]``.
+        """
+        # Check if stateful or stateless
+        if term_name in self._term_instances[group_name]:
+            # Stateful term
+            instance = self._term_instances[group_name][term_name]
+            obs = instance(self.env, **term_cfg.params)
+        else:
+            # Stateless function
+            func = self._term_funcs[group_name][term_name]
+            reuse_key = self._term_base_reuse_keys[group_name].get(term_name)
+            should_reuse = (
+                base_cache is not None
+                and reuse_key is not None
+                and reuse_key in self._repeated_base_reuse_keys
+            )
+            if should_reuse and reuse_key in base_cache:
+                obs = base_cache[reuse_key]
+            else:
+                obs = func(self.env, **term_cfg.params)
+                if should_reuse:
+                    base_cache[reuse_key] = obs
+
+        if clone_result:
+            return obs.clone()
+        return obs
+
+    @staticmethod
+    def _is_unity_scale(scale: float | tuple) -> bool:
+        return isinstance(scale, (int, float)) and not isinstance(scale, bool) and float(scale) == 1.0
+
+    def _apply_noise(self, obs: torch.Tensor, noise_scale: float) -> torch.Tensor:
+        """Apply uniform observation noise.
+
+        The implementation matches the direct path, sampling uniform noise in
+        ``[-noise_scale, noise_scale]``.
+
+        Parameters
+        ----------
+        obs : torch.Tensor
+            Observation tensor.
+        noise_scale : float
+            Magnitude of the uniform noise.
+
+        Returns
+        -------
+        torch.Tensor
+            Noisy observation tensor.
+        """
+        # Direct uses: (torch.rand_like(obs) * 2.0 - 1.0) * noise_scale
+        noise = (torch.rand_like(obs) * 2.0 - 1.0) * noise_scale
+        return obs + noise
+
+    def _apply_scale(self, obs: torch.Tensor, scale: float | tuple) -> torch.Tensor:
+        """Apply scaling to an observation tensor.
+
+        Parameters
+        ----------
+        obs : torch.Tensor
+            Observation tensor.
+        scale : float or tuple
+            Scalar or per-dimension scale factors.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled observation tensor.
+        """
+        return obs * scale
+
+    def _apply_history(
+        self, group_name: str, term_name: str, obs: torch.Tensor, group_cfg: ObsGroupCfg, *, modify_buffer: bool = True
+    ) -> torch.Tensor:
+        """Apply history buffering to an observation term.
+
+        Maintains a circular buffer of past observations and returns them
+        concatenated along the feature dimension.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the observation group.
+        term_name : str
+            Name of the observation term.
+        obs : torch.Tensor
+            Current observation tensor with shape ``[num_envs, obs_dim]``.
+        group_cfg : ObsGroupCfg
+            Configuration for the observation group (contains ``history_length``).
+        modify_buffer : bool, optional
+            If ``True``, append to the history buffer; if ``False``, preserve the
+            buffer contents. Defaults to ``True``.
+
+        Returns
+        -------
+        torch.Tensor
+            Historical observations with shape ``[num_envs, obs_dim * history_length]``.
+        """
+        buffer = self._history_buffers[group_name][term_name]
+
+        if modify_buffer:
+            # Add current observation to buffer
+            buffer.append(obs)
+            history = list(buffer)
+        else:
+            # Don't modify buffer - create temporary history with current obs
+            history = list(buffer) + [obs]
+            # Trim to history_length if needed
+            if len(history) > group_cfg.history_length:
+                history = history[-group_cfg.history_length :]
+
+        # If buffer not full yet, pad with zeros (same as direct behavior)
+        if len(history) < group_cfg.history_length:
+            num_missing = group_cfg.history_length - len(history)
+            obs_dim = obs.shape[1]
+            padding = [torch.zeros(self.env.num_envs, obs_dim, device=self.device) for _ in range(num_missing)]
+            history = padding + history
+
+        # Stack along time dimension: [num_envs, history_length, obs_dim]
+        stacked = torch.stack(history, dim=1)
+
+        # Flatten to [num_envs, history_length * obs_dim]
+        return stacked.reshape(self.env.num_envs, -1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        """Reset observation history and stateful terms.
+
+        Parameters
+        ----------
+        env_ids : torch.Tensor or None, optional
+            Environment IDs to reset. If ``None``, reset all environments.
+        """
+        # Normalize environment ids
+        env_ids_tensor: torch.Tensor | None
+        if env_ids is None:
+            env_ids_tensor = None
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+
+        # Reset or clear history buffers
+        for group_buffers in self._history_buffers.values():
+            for buffer in group_buffers.values():
+                if env_ids_tensor is None:
+                    buffer.clear()
+                else:
+                    if env_ids_tensor.numel() == 0:
+                        continue
+                    for history in buffer:
+                        history[env_ids_tensor] = 0.0
+
+        # Reset stateful term instances
+        for group_instances in self._term_instances.values():
+            for instance in group_instances.values():
+                instance.reset(env_ids_tensor)
+
+    def get_obs_dims(
+        self,
+        group_names: Iterable[str] | None = None,
+    ) -> dict[str, int | dict[str, int]]:
+        """Get observation dimensions for each group.
+
+        Returns
+        -------
+        dict[str, int or dict[str, int]]
+            Mapping from group names to observation dimensions. Values are integers
+            when the group concatenates terms, otherwise dictionaries of per-term
+            dimensions.
+        """
+        selected_groups = None if group_names is None else set(group_names)
+        if selected_groups is not None:
+            missing = selected_groups - set(self.cfg.groups)
+            if missing:
+                raise KeyError(f"Unknown observation groups requested for dimension lookup: {sorted(missing)!r}.")
+        dims: dict[str, int | dict[str, int]] = {}
+        for group_name, group_cfg in self.cfg.groups.items():
+            if selected_groups is not None and group_name not in selected_groups:
+                continue
+            if group_cfg.concatenate:
+                # Sum up all term dimensions
+                total_dim = 0
+                for term_name, term_cfg in group_cfg.terms.items():
+                    # Compute term once to get its dimension
+                    obs = self._compute_term(group_name, term_name, term_cfg, clone_result=False)
+                    term_dim = obs.shape[1]
+
+                    # Account for history at group level
+                    if group_cfg.history_length > 1:
+                        term_dim *= group_cfg.history_length
+
+                    total_dim += term_dim
+                dims[group_name] = total_dim
+            else:
+                # Return dict of individual dimensions
+                term_dims: dict[str, int] = {
+                    term_name: self._compute_term(group_name, term_name, term_cfg, clone_result=False).shape[1]
+                    for term_name, term_cfg in group_cfg.terms.items()
+                }
+                dims[group_name] = term_dims
+        return dims
+
+    def get_term_slices(self, group_name: str) -> dict[str, slice]:
+        """Return slice indices for concatenated terms within a group.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the observation group.
+
+        Returns
+        -------
+        dict[str, slice]
+            Mapping from term name to its slice in the concatenated tensor.
+        """
+        if group_name in self._term_slice_cache:
+            return self._term_slice_cache[group_name]
+
+        if group_name not in self.cfg.groups:
+            raise KeyError(f"Unknown observation group: {group_name}")
+
+        group_cfg = self.cfg.groups[group_name]
+        if not group_cfg.concatenate:
+            raise ValueError(f"Observation group '{group_name}' does not concatenate terms.")
+
+        slices: dict[str, slice] = {}
+        current_index = 0
+        for term_name in sorted(group_cfg.terms.keys()):
+            term_cfg = group_cfg.terms[term_name]
+            obs = self._compute_term(group_name, term_name, term_cfg, clone_result=False)
+            term_dim = obs.shape[1]
+            if group_cfg.history_length > 1:
+                term_dim *= group_cfg.history_length
+            slices[term_name] = slice(current_index, current_index + term_dim)
+            current_index += term_dim
+
+        self._term_slice_cache[group_name] = slices
+        return slices

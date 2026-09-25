@@ -1,0 +1,665 @@
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Tuple
+
+import onnx
+import torch
+
+from holosoma.config_types.robot import RobotConfig
+from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.utils.module_utils import get_holosoma_root
+
+
+def _find_input_dim_from_module(module: torch.nn.Module) -> int:
+    """Finds the input dimension by examining a torch module's structure.
+
+    Tries multiple strategies to find the first Linear layer's input features.
+    """
+    # Strategy 0: Modules exposing an explicit input_dim
+    if hasattr(module, "input_dim"):
+        return module.input_dim
+
+    # Strategy 0: PPO-style actor/critic with BaseModule input_dim
+    if hasattr(module, "actor_module") and hasattr(module.actor_module, "input_dim"):
+        return module.actor_module.input_dim
+    if hasattr(module, "critic_module") and hasattr(module.critic_module, "input_dim"):
+        return module.critic_module.input_dim
+
+    # Strategy 1: PPO-style - actor_module.module (torch.nn.Sequential)
+    if hasattr(module, "actor_module") and hasattr(module.actor_module, "module"):
+        core_model = module.actor_module.module
+        if hasattr(core_model[0], "in_features"):
+            return core_model[0].in_features
+
+    # Strategy 2: FastSAC/FastTD3-style - .net attribute
+    if hasattr(module, "net") and len(module.net) > 0:
+        if hasattr(module.net[0], "in_features"):
+            return module.net[0].in_features
+
+    # Strategy 3: Find first Linear layer in module tree
+    for submodule in module.modules():
+        if isinstance(submodule, torch.nn.Linear):
+            return submodule.in_features
+
+    raise ValueError(f"Cannot determine input dimension from module: {type(module)}")
+
+
+def _infer_actor_input_dim(actor_wrapper: object) -> int:
+    """Best-effort input dimension inference for actor wrappers."""
+    candidates = [actor_wrapper, getattr(actor_wrapper, "actor", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if hasattr(candidate, "actor_module") and hasattr(candidate.actor_module, "input_dim"):
+            return candidate.actor_module.input_dim
+        if hasattr(candidate, "input_dim"):
+            return candidate.input_dim
+    # Fallback to module inspection
+    if isinstance(actor_wrapper, torch.nn.Module):
+        return _find_input_dim_from_module(actor_wrapper)
+    if hasattr(actor_wrapper, "actor") and isinstance(actor_wrapper.actor, torch.nn.Module):
+        return _find_input_dim_from_module(actor_wrapper.actor)
+    raise ValueError(f"Cannot determine actor input dimension from wrapper: {type(actor_wrapper)}")
+
+
+def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, int]:
+    """Extracts the underlying actor model and input dimension from various actor wrapper types.
+
+    This function handles the complete actor pipeline including observation normalization.
+
+    Parameters
+    ----------
+    actor_wrapper : object
+        Actor wrapper containing the actor model. Can be various types including:
+        - PPO actors: ActorWrapper -> PPOActor -> actor_module.module (torch.nn.Sequential)
+        - FastSAC actors: ActorWrapper(with obs_normalizer) -> FastSAC Actor (custom module)
+        - FastTD3 actors: ActorWrapper(with obs_normalizer) -> FastTD3 Actor (custom module)
+
+    Returns
+    -------
+    complete_actor_model : torch.nn.Module
+        The complete actor model including observation normalization if present.
+    input_dimension : int
+        The input dimension of the actor model.
+
+    Notes
+    -----
+    The returned actor_model includes observation normalization if present,
+    so it can be called directly with raw observations.
+    """
+    # If it's already a complete wrapper (from actor_onnx_wrapper), use it directly
+    if hasattr(actor_wrapper, "forward") and hasattr(actor_wrapper, "actor"):
+        # Use the complete wrapper that includes obs normalization
+        complete_model = actor_wrapper
+        # Find input dim from the inner actor
+        input_dim = _find_input_dim_from_module(actor_wrapper.actor)
+        return complete_model, input_dim
+
+    # Otherwise, extract the inner actor and find its input dimension
+    inner_actor = getattr(actor_wrapper, "actor", actor_wrapper)
+
+    if not isinstance(inner_actor, torch.nn.Module):
+        raise ValueError(
+            f"Unsupported actor type: {type(inner_actor)}. Expected torch.nn.Module or wrapper with .actor attribute"
+        )
+
+    input_dim = _find_input_dim_from_module(inner_actor)
+
+    # For unwrapped actors, we might need to return the inner model for certain types
+    # PPO: Return the core Sequential model, others: return the actor itself
+    if hasattr(inner_actor, "actor_module") and hasattr(inner_actor.actor_module, "module"):
+        return inner_actor.actor_module.module, input_dim
+    return inner_actor, input_dim
+
+
+def export_policy_as_onnx(
+    wrapper,
+    onnx_file_path: str,
+    example_obs_dict,
+    *,
+    perception_input_name: str | None = None,
+):
+    # Ensure parent directory exists
+    os.makedirs(Path(onnx_file_path).parent, exist_ok=True)
+    declared_input_names = getattr(wrapper, "onnx_input_names", None)
+    declared_output_names = getattr(wrapper, "onnx_output_names", None)
+    declared_dynamic_axes = getattr(wrapper, "onnx_dynamic_axes", None)
+    if declared_input_names is not None:
+        if perception_input_name:
+            raise ValueError("A custom ONNX I/O contract cannot also request a perception input.")
+        input_names = list(declared_input_names)
+        output_names = list(declared_output_names or ())
+        if not input_names or not output_names:
+            raise ValueError("Custom ONNX I/O contracts require non-empty input and output names.")
+        if set(example_obs_dict) != set(input_names):
+            raise ValueError(
+                "Custom ONNX examples do not match the declared inputs: "
+                f"declared={input_names}, examples={list(example_obs_dict)}."
+            )
+        if not isinstance(declared_dynamic_axes, Mapping):
+            raise ValueError("Custom ONNX I/O contracts require explicit dynamic axes.")
+        dynamic_axes = copy.deepcopy(dict(declared_dynamic_axes))
+        example_inputs = [example_obs_dict[name] for name in input_names]
+    else:
+        example_inputs = [example_obs_dict["actor_obs"]]
+        input_names = ["actor_obs"]
+        output_names = ["action"]
+        extra_input_names = [name for name in example_obs_dict if name != "actor_obs"]
+        if perception_input_name:
+            if perception_input_name in {"obs", "actor_obs", "time_step"}:
+                raise ValueError(
+                    f"Perception input name {perception_input_name!r} is reserved for actor/time inputs."
+                )
+            if perception_input_name not in example_obs_dict:
+                raise ValueError(
+                    f"Requested perception input {perception_input_name!r} is absent from example_obs_dict."
+                )
+            extra_input_names = [perception_input_name]
+        if len(extra_input_names) > 1:
+            raise ValueError(
+                "Pure policy ONNX export supports at most one external perception input, "
+                f"got {extra_input_names}."
+            )
+        if extra_input_names:
+            perception_name = extra_input_names[0]
+            example_inputs.append(example_obs_dict[perception_name])
+            input_names.append(perception_name)
+        dynamic_axes = {name: {0: "batch"} for name in input_names}
+        dynamic_axes["action"] = {0: "batch"}
+
+    # --- SUPPRESS LOGS START ---
+    # Silence onnxscript and onnx_ir debug/info noise
+    import logging
+
+    for logger_name in ["onnxscript", "onnx_ir", "torch.onnx"]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    # --- SUPPRESS LOGS END ---
+
+    export_inputs = tuple(example_inputs) if len(example_inputs) > 1 else example_inputs[0]
+    torch.onnx.export(
+        wrapper,
+        export_inputs,
+        onnx_file_path,
+        verbose=False,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        opset_version=14,
+        dynamo=False,
+    )
+
+
+def validate_exported_policy_onnx(
+    *,
+    wrapper: torch.nn.Module,
+    onnx_file_path: str,
+    example_obs_dict: dict[str, torch.Tensor],
+    perception_input_name: str | None = None,
+    rtol: float = 1.0e-3,
+    atol: float = 1.0e-5,
+) -> dict[str, Any]:
+    """Run checker and deterministic PyTorch-CPU-vs-ORT-CPU parity.
+
+    The relative tolerance is intentionally bounded at 1e-3. Deep float32
+    CNN/MLP graphs can differ at that scale between PyTorch CPU and ORT CPU
+    because the two runtimes select different reduction kernels, even when
+    the exported graph and weights are equivalent. The absolute tolerance
+    remains 1e-5 so near-zero actions stay tightly constrained.
+    """
+
+    import numpy as np
+    import onnxruntime
+
+    path = Path(onnx_file_path)
+    model = onnx.load(str(path))
+    onnx.checker.check_model(model)
+    session = onnxruntime.InferenceSession(
+        path.read_bytes(),
+        providers=["CPUExecutionProvider"],
+    )
+    declared_input_names = getattr(wrapper, "onnx_input_names", None)
+    declared_output_names = getattr(wrapper, "onnx_output_names", None)
+    declared_dynamic_axes = getattr(wrapper, "onnx_dynamic_axes", None)
+    if declared_input_names is not None:
+        if perception_input_name:
+            raise ValueError("A custom ONNX I/O contract cannot also request a perception input.")
+        expected_input_names = list(declared_input_names)
+        expected_output_names = list(declared_output_names or ())
+        dynamic_axes = dict(declared_dynamic_axes or {})
+    else:
+        expected_input_names = ["actor_obs"]
+        if perception_input_name:
+            expected_input_names.append(perception_input_name)
+        expected_output_names = ["action"]
+        dynamic_axes = {name: {0: "batch"} for name in expected_input_names}
+        dynamic_axes["action"] = {0: "batch"}
+    actual_input_names = [value.name for value in session.get_inputs()]
+    if actual_input_names != expected_input_names:
+        raise RuntimeError(
+            "Exported ONNX input names do not match the actor deployment contract: "
+            f"expected={expected_input_names}, actual={actual_input_names}."
+        )
+    output_names = [value.name for value in session.get_outputs()]
+    if output_names != expected_output_names:
+        raise RuntimeError(
+            "Exported ONNX outputs do not match the deployment contract: "
+            f"expected={expected_output_names}, actual={output_names}."
+        )
+    if not math.isfinite(float(rtol)) or not math.isfinite(float(atol)) or rtol < 0 or atol < 0:
+        raise ValueError("ONNX parity tolerances must be finite and non-negative.")
+
+    example_inputs = [example_obs_dict[name] for name in expected_input_names]
+    if any(not isinstance(value, torch.Tensor) or value.ndim < 2 for value in example_inputs):
+        raise ValueError("ONNX parity examples must be rank-2-or-higher torch tensors.")
+
+    # ORT is intentionally validated with CPUExecutionProvider.  Compare it
+    # against the exact same checkpoint weights on CPU as well; comparing
+    # against the live CUDA/TF32 training graph conflates backend rounding
+    # with an ONNX graph mismatch.  PPO actors retain the most recent Normal
+    # distribution as an unregistered non-leaf tensor cache, which vanilla
+    # deepcopy rejects even though inference never reads it.  Seed deepcopy's
+    # memo with detached copies of such caches so the live module remains
+    # entirely untouched.
+    deepcopy_memo: dict[int, Any] = {}
+    visited: set[int] = set()
+
+    def register_nonleaf_tensor_copies(value: Any) -> None:
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if isinstance(value, torch.Tensor):
+            if not value.is_leaf:
+                deepcopy_memo[value_id] = value.detach().clone()
+            return
+        if isinstance(value, torch.nn.Module):
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                register_nonleaf_tensor_copies(item)
+            return
+        if isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                register_nonleaf_tensor_copies(item)
+            return
+        if isinstance(value, torch.distributions.Distribution):
+            for item in vars(value).values():
+                register_nonleaf_tensor_copies(item)
+
+    for submodule in wrapper.modules():
+        for attribute in vars(submodule).values():
+            register_nonleaf_tensor_copies(attribute)
+    cpu_wrapper = copy.deepcopy(wrapper, deepcopy_memo).to(device=torch.device("cpu"))
+    cpu_wrapper.eval()
+
+    max_abs_error = 0.0
+    max_rel_error = 0.0
+    probe_count = 0
+    for batch_size, amplitude in ((1, 0.0), (2, 0.125), (3, 1.0)):
+        torch_inputs: list[torch.Tensor] = []
+        ort_feed: dict[str, np.ndarray] = {}
+        for input_index, (name, example) in enumerate(
+            zip(expected_input_names, example_inputs, strict=True)
+        ):
+            batch_axes = [
+                int(axis)
+                for axis, label in dynamic_axes.get(name, {}).items()
+                if label == "batch"
+            ]
+            if len(batch_axes) != 1:
+                raise ValueError(
+                    f"ONNX input {name!r} must declare exactly one dynamic batch axis."
+                )
+            shape_list = list(example.shape)
+            shape_list[batch_axes[0]] = batch_size
+            shape = tuple(shape_list)
+            element_count = int(np.prod(shape))
+            if amplitude == 0.0:
+                probe = torch.zeros(shape, dtype=example.dtype, device="cpu")
+            else:
+                probe = torch.linspace(
+                    -amplitude,
+                    amplitude,
+                    steps=element_count,
+                    dtype=example.dtype,
+                    device="cpu",
+                ).reshape(shape)
+                if input_index:
+                    probe = torch.flip(probe, dims=(-1,))
+            torch_inputs.append(probe)
+            ort_feed[name] = probe.detach().cpu().numpy()
+
+        with torch.no_grad():
+            torch_output = cpu_wrapper(*torch_inputs)
+        if isinstance(torch_output, torch.Tensor):
+            torch_outputs = [torch_output]
+        elif isinstance(torch_output, (tuple, list)):
+            torch_outputs = list(torch_output)
+        else:
+            raise TypeError(
+                "PyTorch ONNX wrapper must return a tensor or tensor sequence, "
+                f"got {type(torch_output).__name__}."
+            )
+        if len(torch_outputs) != len(expected_output_names) or not all(
+            isinstance(value, torch.Tensor) for value in torch_outputs
+        ):
+            raise TypeError(
+                "PyTorch ONNX wrapper output count/types do not match the contract: "
+                f"expected={expected_output_names}, got={len(torch_outputs)} outputs."
+            )
+        ort_outputs = session.run(expected_output_names, ort_feed)
+        for output_name, torch_value, actual in zip(
+            expected_output_names,
+            torch_outputs,
+            ort_outputs,
+            strict=True,
+        ):
+            expected = torch_value.detach().cpu().numpy()
+            if expected.shape != actual.shape:
+                raise RuntimeError(
+                    f"PyTorch and ORT {output_name!r} shapes differ: "
+                    f"torch={expected.shape}, ort={actual.shape}."
+                )
+            if not np.all(np.isfinite(expected)) or not np.all(np.isfinite(actual)):
+                raise RuntimeError(
+                    f"PyTorch/ORT parity probe for {output_name!r} produced NaN or infinity."
+                )
+            difference = np.abs(actual - expected)
+            relative = difference / np.maximum(np.abs(expected), np.float32(atol))
+            max_abs_error = max(max_abs_error, float(np.max(difference, initial=0.0)))
+            max_rel_error = max(max_rel_error, float(np.max(relative, initial=0.0)))
+            if not np.allclose(actual, expected, rtol=rtol, atol=atol):
+                parity_kind = "action parity" if output_name in {"action", "actions"} else "state parity"
+                raise RuntimeError(
+                    f"Exported ONNX failed PyTorch-vs-ORT {parity_kind} for {output_name!r}: "
+                    f"batch={batch_size}, max_abs_error={max_abs_error:.9g}, "
+                    f"max_rel_error={max_rel_error:.9g}, rtol={rtol}, atol={atol}."
+                )
+        probe_count += batch_size
+
+    return {
+        "version": 2 if declared_input_names is not None else 1,
+        "checker": "onnx.checker.check_model",
+        "runtime": "onnxruntime_cpu",
+        "pytorch_vs_ort": True,
+        "input_names": expected_input_names,
+        "output_names": output_names,
+        "probe_rows": probe_count,
+        "rtol": float(rtol),
+        "atol": float(atol),
+        "max_abs_error": max_abs_error,
+        "max_rel_error": max_rel_error,
+    }
+
+
+def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_name, example_obs_dict, config):
+    os.makedirs(path, exist_ok=True)
+    path = os.path.join(path, exported_policy_name)
+    body_keys = config.robot.get("body_keys", ["lower_body", "upper_body"])
+    actor_obs_keys = {}
+    for body_key in body_keys:
+        actor_obs_keys[body_key] = config.algo.config.module_dict[f"actor_{body_key}"].input_dim
+
+    # Prepare example inputs
+    example_input_list = []
+    for body_key in body_keys:
+        actor_obs = torch.cat([example_obs_dict[value] for value in actor_obs_keys[body_key]], dim=-1)
+        example_input_list.append(actor_obs)
+
+    # Export to ONNX
+    torch.onnx.export(
+        wrapper,
+        example_input_list,
+        path,
+        verbose=False,
+        input_names=[f"actor_obs_{body_key}" for body_key in body_keys],
+        output_names=["action"],
+        opset_version=14,
+        dynamo=False,
+    )
+
+
+class _OnnxMotionPolicyExporter(torch.nn.Module):
+    def __init__(self, motion_command, actor, device):
+        super().__init__()
+        self.device = device
+        # Extract the underlying actor model and input dimension generically
+        actor_model, _ = _extract_actor_model_and_input_dim(actor)
+        self.input_dim = _infer_actor_input_dim(actor)
+        # Wrap the actor to handle different return signatures
+        self._wrapped_actor = self._create_actor_wrapper(actor_model)
+        self.perception_key = getattr(actor, "perception_key", None) or None
+        self.perception_dim = self._infer_perception_dim(actor, self.perception_key)
+
+        motion = motion_command.motion
+
+        joint_pos = motion.joint_pos
+        joint_vel = motion.joint_vel
+
+        body_pos_w = motion.body_pos_w
+        body_quat_w = motion.body_quat_w
+        ref_body_index = motion_command.ref_body_index
+        ref_body_pos_w = body_pos_w[:, ref_body_index, :]
+        ref_body_quat_w = body_quat_w[:, ref_body_index, :]  # in xyzw
+
+        self.joint_pos = joint_pos.to("cpu")
+        self.joint_vel = joint_vel.to("cpu")
+        self.ref_body_pos_w = ref_body_pos_w.to("cpu")
+        self.ref_body_quat_w = ref_body_quat_w.to("cpu")
+
+        self.time_step_total = self.joint_pos.shape[0]
+
+    def _create_actor_wrapper(self, actor_model):
+        """Creates a wrapper that normalizes actor output to just return actions."""
+
+        class ActorWrapper(torch.nn.Module):
+            def __init__(self, actor):
+                super().__init__()
+                self.actor = actor
+
+            def forward(self, x, perception_obs=None):
+                if perception_obs is None:
+                    output = self.actor(x)
+                else:
+                    output = self.actor(x, perception_obs)
+                # Handle different return signatures:
+                # - PPO Sequential: returns tensor directly
+                # - PPO ActorWrapper: returns tensor directly
+                # - FastSAC/FastTD3: returns tuple (action, mean, log_std) or (action, ...)
+                # - FastSAC/FastTD3 ActorWrapper: already returns action tensor
+                if isinstance(output, tuple):
+                    return output[0]  # Return first element (action)
+                return output  # Return as-is for tensors
+
+        return ActorWrapper(actor_model)
+
+    def _infer_perception_dim(self, actor_wrapper: object, perception_key: str | None) -> int | None:
+        if not perception_key:
+            return None
+        candidate = getattr(actor_wrapper, "actor", None)
+        if candidate is not None and hasattr(candidate, "actor_module"):
+            obs_dim_dict = getattr(candidate.actor_module, "obs_dim_dict", None)
+            if isinstance(obs_dim_dict, dict) and perception_key in obs_dim_dict:
+                return int(obs_dim_dict[perception_key])
+        obs_dim_dict = getattr(actor_wrapper, "obs_dim_dict", None)
+        if isinstance(obs_dim_dict, dict) and perception_key in obs_dim_dict:
+            return int(obs_dim_dict[perception_key])
+        return None
+
+    def forward(self, x, time_step, perception_obs=None):
+        time_step_clamped = torch.clamp(time_step.long().squeeze(-1), max=self.time_step_total - 1)
+        if self.perception_dim is not None and perception_obs is None:
+            raise ValueError("Perception obs is required for ONNX motion export but not provided.")
+        return (
+            self._wrapped_actor(x, perception_obs),
+            self.joint_pos[time_step_clamped],
+            self.joint_vel[time_step_clamped],
+            self.ref_body_pos_w[time_step_clamped],
+            self.ref_body_quat_w[time_step_clamped],
+        )
+
+    def export(self, onnx_file_path: str):
+        onnx_file_dir = os.path.dirname(onnx_file_path)
+        os.makedirs(onnx_file_dir, exist_ok=True)
+        self.to("cpu")
+        obs = torch.zeros(1, self.input_dim)
+        time_step = torch.zeros(1, 1)
+        export_inputs = (obs, time_step)
+        input_names = ["obs", "time_step"]
+        if self.perception_dim is not None:
+            perception_obs = torch.zeros(1, self.perception_dim)
+            export_inputs = (obs, time_step, perception_obs)
+            input_names = ["obs", "time_step", "perception_obs"]
+        torch.onnx.export(
+            self,
+            export_inputs,
+            onnx_file_path,
+            export_params=True,
+            opset_version=14,
+            verbose=False,
+            input_names=input_names,
+            output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],
+            dynamo=False,
+        )
+        self.to(self.device)
+
+
+def export_motion_and_policy_as_onnx(
+    actor: object,
+    motion_command: object,
+    onnx_file_path: str,
+    device: str,
+):
+    policy_exporter = _OnnxMotionPolicyExporter(motion_command, actor, device)
+    policy_exporter.export(onnx_file_path)
+
+
+def attach_onnx_metadata(onnx_path: str, metadata: dict[str, Any]) -> None:
+    """Attach custom metadata to an ONNX model file.
+
+    Loads the ONNX model, appends metadata key-value pairs (values are serialized as JSON),
+    and saves the modified model back to the same file.
+
+    Parameters
+    ----------
+    onnx_path : str
+        Path to the ONNX model file to modify.
+    metadata : dict[str, Any]
+        Dictionary of metadata to attach. Values are JSON-serialized before storage.
+    """
+    model = onnx.load(onnx_path)
+
+    def reject_nonfinite_json(constant: str):
+        raise ValueError(f"non-finite JSON constant {constant!r}")
+
+    existing_keys: set[str] = set()
+    duplicate_existing_keys: list[str] = []
+    for prop in model.metadata_props:
+        if not prop.key:
+            raise ValueError("Cannot attach metadata to an ONNX model with an empty metadata key.")
+        if prop.key in existing_keys and prop.key not in duplicate_existing_keys:
+            duplicate_existing_keys.append(prop.key)
+        existing_keys.add(prop.key)
+        try:
+            json.loads(prop.value, parse_constant=reject_nonfinite_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Existing ONNX metadata value for {prop.key!r} is not strict finite JSON."
+            ) from exc
+    if duplicate_existing_keys:
+        raise ValueError(
+            "Cannot attach metadata to an ONNX model with ambiguous duplicate keys: "
+            f"{duplicate_existing_keys}."
+        )
+
+    invalid_keys = [key for key in metadata if not isinstance(key, str) or not key]
+    if invalid_keys:
+        raise ValueError(f"ONNX metadata keys must be non-empty strings, got {invalid_keys!r}.")
+
+    # A policy graph may already carry exporter metadata.  Replacing a key by
+    # appending another metadata_props entry creates a duplicate whose
+    # interpretation depends on the consumer (first-wins vs last-wins). Keep
+    # unrelated entries and publish exactly one value for every updated key.
+    retained_entries = [
+        (prop.key, prop.value)
+        for prop in model.metadata_props
+        if prop.key not in metadata
+    ]
+    del model.metadata_props[:]
+    for key, value in retained_entries:
+        entry = model.metadata_props.add()
+        entry.key = key
+        entry.value = value
+
+    for k, v in metadata.items():
+        entry = onnx.StringStringEntryProto()
+        entry.key = k
+        try:
+            # NaN/Infinity are accepted by Python's JSON implementation but
+            # are outside standard JSON and make scientific metadata
+            # consumer-dependent. Refuse to serialize them into an artifact.
+            entry.value = json.dumps(v, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"ONNX metadata value for {k!r} is not finite JSON data.") from exc
+        model.metadata_props.append(entry)
+
+    onnx.save(model, onnx_path)
+
+
+def get_control_gains_from_config(robot_config: RobotConfig) -> tuple[list[float], list[float]]:
+    """Extract Kp & Kd gains from env.
+
+    The order of returned lists is determined by `env.robot_config.dof_names`.
+    """
+
+    kp_list = []
+    kd_list = []
+    stiffness_dict = robot_config.control.stiffness
+    damping_dict = robot_config.control.damping
+
+    for dof_name in robot_config.dof_names:
+        # Map each DOF to its corresponding kp/kd value using substring matching
+        # e.g. `left_hip_pitch_joint` from `dof_names` to  `hip_pitch` in `robot_config.control.stiffness`
+        matches = [p for p in stiffness_dict if p in dof_name]
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly 1 pattern match for '{dof_name}', got {len(matches)}: {matches}")
+
+        pattern = matches[0]
+        kp_list.append(float(stiffness_dict[pattern]))
+        kd_list.append(float(damping_dict[pattern]))
+
+    return kp_list, kd_list
+
+
+def get_command_ranges_from_env(env: BaseTask) -> dict | None:
+    """Extract command limits from env command manager."""
+
+    if env.command_manager is not None:
+        locomotion_cmd = env.command_manager.get_state("locomotion_command")
+        if locomotion_cmd is not None and hasattr(locomotion_cmd, "command_ranges"):
+            return locomotion_cmd.command_ranges
+    return None
+
+
+def get_urdf_text_from_robot_config(robot_config: RobotConfig) -> tuple[str, str]:
+    """Extract URDF text from the robot config.
+
+    Returns
+    -------
+    tuple[str, str]
+        (urdf_file_path, urdf_str) - Path to URDF file and its contents
+    """
+    asset_root = robot_config.asset.asset_root
+    if asset_root.startswith("@holosoma/"):
+        asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+
+    asset_file = robot_config.asset.urdf_file
+    urdf_file_path = os.path.join(asset_root, asset_file)
+    urdf_str = Path(urdf_file_path).read_text(encoding="utf-8")
+    return urdf_file_path, urdf_str

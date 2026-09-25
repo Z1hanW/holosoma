@@ -1,0 +1,110 @@
+import tyro
+from typing_extensions import Annotated
+
+from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.config_values.loco.g1.experiment import g1_29dof, g1_29dof_fast_sac
+from holosoma.config_values.loco.t1.experiment import t1_29dof, t1_29dof_fast_sac
+from holosoma.config_values.wbt.g1.experiment import (
+    g1_29dof_wbt_terrain_transformer,
+    g1_29dof_wbt,
+    g1_29dof_wbt_fast_sac,
+    g1_29dof_wbt_fast_sac_w_object,
+    g1_29dof_wbt_motion_tracking,
+    g1_29dof_wbt_motion_tracking_mlp_encoder,
+    g1_29dof_wbt_motion_tracking_transformer,
+    g1_29dof_wbt_terrain_distill_sparse_root_cmd,
+    g1_29dof_wbt_videomimic_mlp,
+    g1_29dof_wbt_videomimic_mlp_w_gru,
+    g1_29dof_wbt_videomimic_transformer,
+    g1_29dof_wbt_w_object,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    g1_29dof_wbt_w_object_hybrid_stage2,
+    g1_29dof_wbt_w_object_hybrid_velocity,
+    g1_29dof_wbt_w_object_hybrid_world_velocity,
+    g1_29dof_wbt_w_object_hmi_depth_stage1,
+    g1_29dof_wbt_w_object_hmi_depth_stage2,
+    g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy,
+    g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy,
+    g1_29dof_wbt_w_object_policy_world_root_error,
+    g1_29dof_wbt_w_object_policy_world_velocity,
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift,
+    g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_contact_aware_debug,
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy,
+    g1_29dof_wbt_w_object_extend,
+    g1_29dof_wbt_w_object_generalist,
+    g1_29dof_wbt_w_object_generalist_teacher_linvel,
+    g1_29dof_wbt_w_object_generalist_legacy_obs,
+)
+
+DEFAULTS = {
+    "g1_29dof": g1_29dof,
+    "g1_29dof_fast_sac": g1_29dof_fast_sac,
+    "t1_29dof": t1_29dof,
+    "t1_29dof_fast_sac": t1_29dof_fast_sac,
+    "g1_29dof_wbt": g1_29dof_wbt,
+    "g1_29dof_wbt_motion_tracking": g1_29dof_wbt_motion_tracking,
+    "g1_29dof_wbt_motion_tracking_mlp_encoder": g1_29dof_wbt_motion_tracking_mlp_encoder,
+    "g1_29dof_wbt_motion_tracking_transformer": g1_29dof_wbt_motion_tracking_transformer,
+    "g1_29dof_wbt_terrain_distill_sparse_root_cmd": g1_29dof_wbt_terrain_distill_sparse_root_cmd,
+    "g1_29dof_wbt_terrain_transformer": g1_29dof_wbt_terrain_transformer,
+    "g1_29dof_wbt_videomimic_mlp": g1_29dof_wbt_videomimic_mlp,
+    "w_gru": g1_29dof_wbt_videomimic_mlp_w_gru,
+    "g1_29dof_wbt_videomimic_transformer": g1_29dof_wbt_videomimic_transformer,
+    "g1_29dof_wbt_w_object": g1_29dof_wbt_w_object,
+    "g1_29dof_wbt_w_object_extend": g1_29dof_wbt_w_object_extend,
+    "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_w_object_generalist,
+    "g1_29dof_wbt_w_object_generalist_teacher_linvel": g1_29dof_wbt_w_object_generalist_teacher_linvel,
+    "g1_29dof_wbt_w_object_generalist_legacy_obs": g1_29dof_wbt_w_object_generalist_legacy_obs,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    "g1_29dof_wbt_w_object_hybrid_stage2": g1_29dof_wbt_w_object_hybrid_stage2,
+    "g1_29dof_wbt_w_object_hybrid_velocity": g1_29dof_wbt_w_object_hybrid_velocity,
+    "g1_29dof_wbt_w_object_hybrid_world_velocity": (
+        g1_29dof_wbt_w_object_hybrid_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage1": (
+        g1_29dof_wbt_w_object_hmi_depth_stage1
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage2": (
+        g1_29dof_wbt_w_object_hmi_depth_stage2
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy": (
+        g1_29dof_wbt_w_object_hmi_depth_stage2_object_xy
+    ),
+    "g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy": (
+        g1_29dof_wbt_w_object_hmi_depth_stage2_root_xy
+    ),
+    "g1_29dof_wbt_w_object_policy_world_velocity": (
+        g1_29dof_wbt_w_object_policy_world_velocity
+    ),
+    "g1_29dof_wbt_w_object_policy_world_root_error": (
+        g1_29dof_wbt_w_object_policy_world_root_error
+    ),
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift": (
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift
+    ),
+    "g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317": (
+        g1_29dof_wbt_w_object_pure_rl_policy_command_after_lift_critic317
+    ),
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel": g1_29dof_wbt_w_object_distill_sparse_root_cmd_teacher_linvel,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_contact_aware_debug": g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_contact_aware_debug,
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy": g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy,
+    "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac,
+    "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
+}
+
+AnnotatedExperimentConfig = Annotated[
+    ExperimentConfig,
+    tyro.conf.arg(
+        constructor=tyro.extras.subcommand_type_from_defaults(
+            {f"exp:{k.replace('_', '-')}": v for k, v in DEFAULTS.items()}
+        )
+    ),
+]
