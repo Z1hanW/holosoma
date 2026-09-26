@@ -567,7 +567,7 @@ def _source_bundle_digest(source_root: Path) -> str:
                 and ".git" not in path.parts
                 and "__pycache__" not in path.parts
             )
-        for pattern in ("distill*.sh", "train*.sh", "train*.py", "batch*.sh"):
+        for pattern in ("distill*.sh", "train*.sh", "train*.py", "rollout.sh", "batch*.sh"):
             candidates.update(path for path in source_root.glob(pattern) if path.is_file())
         return candidates
 

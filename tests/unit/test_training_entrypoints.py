@@ -8,8 +8,8 @@ import sys
 import pytest
 
 from scripts import _training
-import train_teacher
-import train_distillation
+from scripts import _teacher as train_teacher
+from scripts import _student as train_distillation
 
 
 def arguments(role, tmp_path, *, check=False):

@@ -41,6 +41,7 @@ def run(command, env, *, capture=False):
 
 def prepare(role, cli_template, environment, nodes, argv=None):
     parser = argparse.ArgumentParser(
+        prog="train_teacher.sh" if role == "teacher" else "train_student.sh",
         description=f"Train {role}: {nodes} node(s), 8 GPUs per node, 2048 environments per GPU."
     )
     parser.add_argument("--motion-bank", type=Path, required=True,
@@ -196,5 +197,5 @@ def teacher_onnx_preflight(path, cli):
 
 if __name__ == "__main__":
     if len(sys.argv) < 4 or sys.argv[1] != "--teacher-onnx":
-        raise SystemExit("Use train_teacher.py or train_distillation.py")
+        raise SystemExit("Use train_teacher.sh or train_student.sh")
     teacher_onnx_preflight(sys.argv[2], sys.argv[3:])
