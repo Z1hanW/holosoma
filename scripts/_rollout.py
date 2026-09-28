@@ -45,6 +45,10 @@ def prepare(argv=None):
     if not clips or motion_ids != set(clips):
         parser.error("Motion NPZ files and object-map clips must match exactly")
 
+    # Independent rollout processes all use LOCAL_RANK=0. Give each output its
+    # own conversion caches so forced robot USD imports cannot overwrite assets
+    # being loaded by another process from the same checkout.
+    runtime_cache = output.parent / (output.name + "_runtime")
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("HOLOSOMA_", "WANDB_", "TEACHER_ROLLOUT_")) and key not in {
                "WORLD_SIZE", "RANK", "GROUP_RANK", "ROLE_RANK", "ROLE_WORLD_SIZE",
@@ -67,6 +71,8 @@ def prepare(argv=None):
         "HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK": "0",
         "HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE": "mesh",
         "HOLOSOMA_OBJECT_COLLIDER_TYPE": "convex_decomposition",
+        "HOLOSOMA_ROBOT_USD_CACHE_DIR": str(runtime_cache / "robot_usd"),
+        "HOLOSOMA_OBJECT_USD_CACHE_DIR": str(runtime_cache / "object_usd"),
     })
     motion = "--command.setup-terms.motion-command.params.motion-config."
     # Native tracking generates the distillation reference trajectories. Every

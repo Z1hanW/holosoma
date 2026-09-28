@@ -1,10 +1,12 @@
 """Rollout must cover the supplied bank without inheriting training state."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from scripts._rollout import prepare
+from holosoma.simulator.isaacsim.usd_cache import resolve_robot_usd_conversion_dir
 
 
 def inputs(tmp_path):
@@ -50,3 +52,20 @@ def test_existing_output_is_preserved(tmp_path):
     with pytest.raises(SystemExit):
         prepare(argv)
     assert (output / "keep.txt").read_text() == "existing output"
+
+
+def test_parallel_rollouts_do_not_share_forced_robot_usd_conversion(tmp_path, monkeypatch):
+    _, argv = inputs(tmp_path)
+    monkeypatch.setenv("HOLOSOMA_ROBOT_USD_CACHE_DIR", str(tmp_path / "stale_shared_cache"))
+    _, _, first_env, _ = prepare(argv)
+    second_argv = list(argv)
+    second_argv[second_argv.index("--output") + 1] = str(tmp_path / "other_output")
+    _, _, second_env, _ = prepare(second_argv)
+    asset_root = tmp_path / "shared_checkout" / "robots"
+    first_cache = resolve_robot_usd_conversion_dir(asset_root, 0, environ=first_env)
+    second_cache = resolve_robot_usd_conversion_dir(asset_root, 0, environ=second_env)
+    assert first_cache != second_cache
+    assert not first_cache.is_relative_to(asset_root)
+    assert not second_cache.is_relative_to(asset_root)
+    assert first_env["HOLOSOMA_OBJECT_USD_CACHE_DIR"] != second_env["HOLOSOMA_OBJECT_USD_CACHE_DIR"]
+    assert not Path(first_env["HOLOSOMA_ROBOT_USD_CACHE_DIR"]).exists()
