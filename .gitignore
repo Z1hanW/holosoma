@@ -23,3 +23,11 @@ src/holosoma/holosoma/data/robots/converted_rank*/
 # other
 *.egg-info
 __pycache__
+
+# Python package builds and local PRISM artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+outputs/
+_ckpts/

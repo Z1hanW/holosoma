@@ -1,12 +1,22 @@
+import os
 from dataclasses import replace
 
 from holosoma.config_types.robot import (
+    ObjectConfig,
     RobotAssetConfig,
     RobotBridgeConfig,
     RobotConfig,
     RobotControlConfig,
     RobotInitState,
 )
+
+
+def _env_float(name: str, default: float | None = None) -> float | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
 
 g1_29dof = RobotConfig(
     num_bodies=32,
@@ -1095,7 +1105,7 @@ g1_29dof_w_object = replace(
     g1_29dof,
     asset=replace(
         g1_29dof.asset,
-        urdf_file="g1/main_mesh_collision_halfspherehand.urdf",
+        urdf_file=os.getenv("HOLOSOMA_W_OBJECT_URDF", "g1/g1_29dof.urdf"),
     ),
     control=replace(
         g1_29dof.control,
@@ -1104,8 +1114,33 @@ g1_29dof_w_object = replace(
     ),
 )
 
+g1_29dof_w_object_mujoco = replace(
+    g1_29dof_w_object,
+    object=ObjectConfig(
+        enabled=True,
+        object_urdf_path=os.getenv("HOLOSOMA_MJ_OBJECT_URDF", "data_demo/objects/box_75.urdf"),
+        mujoco_use_training_urdf_scene=True,
+        mujoco_add_default_actuators=True,
+        mujoco_copy_joint_defaults_from_robot_xml=True,
+        mujoco_copy_tendons_from_robot_xml=True,
+        mujoco_copy_collision_geoms_from_robot_xml=True,
+        mujoco_copy_contact_pairs_from_robot_xml=True,
+        mujoco_object_mass_override=_env_float("HOLOSOMA_MJ_OBJECT_MASS"),
+    ),
+)
+
+g1_29dof_stairs = replace(
+    g1_29dof,
+    asset=replace(
+        g1_29dof.asset,
+        xml_file="g1/g1_29dof_stairs.xml",
+    ),
+)
+
 DEFAULTS = {
     "g1_29dof": g1_29dof,
     "t1_29dof_waist_wrist": t1_29dof_waist_wrist,
     "g1_29dof_w_object": g1_29dof_w_object,
+    "g1_29dof_w_object_mujoco": g1_29dof_w_object_mujoco,
+    "g1_29dof_stairs": g1_29dof_stairs,
 }

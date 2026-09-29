@@ -158,10 +158,15 @@ class TerrainTermCfg:
     """Width of each terrain tile in meters."""
 
     num_rows: int = 10
-    """Number of terrain rows (difficulty levels)."""
+    """Number of terrain rows (difficulty levels).
+
+    For load_obj with multiple OBJ files, this controls how many times the OBJ
+    column set is repeated along Y (rows)."""
 
     num_cols: int = 20
-    """Number of terrain columns (terrain types)."""
+    """Number of terrain columns (terrain types).
+
+    For load_obj with multiple OBJ files, columns are set to the number of files."""
 
     spawn: SpawnCfg = field(default_factory=SpawnCfg)
     """Spawn behavior configuration."""
@@ -197,7 +202,22 @@ class TerrainTermCfg:
     """Slope threshold for trimesh correction to vertical surfaces."""
 
     obj_file_path: str = ""
-    """Path to OBJ file for custom terrain mesh."""
+    """Path to OBJ file (or directory/glob of OBJ files) for custom terrain mesh.
+
+    When a directory or glob resolves to multiple OBJ files, each OBJ becomes a column
+    and the set of columns is repeated across num_rows."""
+
+    obj_metadata_path: str | None = None
+    """Optional JSON metadata for prebuilt OBJ tiles (tile names/offsets/stride)."""
+
+    add_ground_plane_collision: bool = False
+    """For load_obj terrain, also add a flat collision plane at z=0.
+
+    This is useful when the OBJ represents local structure such as stairs but you
+    still want a fallback floor collision outside or underneath the mesh.
+    When enabled in IsaacSim, the extra plane is also exposed to the terrain
+    height scanner so height queries can fall back to the plane where the OBJ
+    mesh has no hit."""
 
     scale_factor: float = 1.0
     """Use for performance to scale border_size, terrain_length, terrain_width, num_ros and num_cols."""

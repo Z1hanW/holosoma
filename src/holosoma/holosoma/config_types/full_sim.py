@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic.dataclasses import dataclass
 
+from holosoma.config_types.command import CommandManagerCfg
 from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.logger import LoggerConfig
 from holosoma.config_types.robot import RobotConfig
@@ -17,6 +18,9 @@ class FullSimConfig:
     training: TrainingConfig
     logger: LoggerConfig
     """Logger configuration for video recording and output directories."""
+
+    command: CommandManagerCfg | None = None
+    """Optional command-manager configuration for simulator-side scene specialization."""
 
     experiment_dir: str | None = None
     """Experiment directory path (computed from logger config in base_task)."""

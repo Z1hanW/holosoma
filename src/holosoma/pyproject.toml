@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holosoma"
 version = "0.0.1"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     "astor",
     "easydict",
@@ -13,6 +13,7 @@ dependencies = [
     "ipdb",
     "joblib",
     "loguru",
+    "lzfse>=0.4.2",
     "lxml",
     "lxml-stubs",
     "matplotlib",
@@ -20,7 +21,7 @@ dependencies = [
     "mypy==1.14.1",
     "notebook",
     "numpy-stl",
-    "numpy==1.23.5",
+    "numpy==1.26.0",
     "omegaconf",  # Used for config resolvers and DictConfig type hints
     "onnx",
     "onnxruntime",
@@ -45,6 +46,7 @@ dependencies = [
     "types-requests",
     "types-tqdm",
     "tyro>=1.0.0",
+    "viser>=0.2.23",
     "wandb==0.22.0", # pin version until https://github.com/wandb/wandb/issues/10647 is fixed
     "warp-lang==1.10.0",
     "yourdfpy>=0.0.58",
@@ -57,6 +59,7 @@ dynamic = ["optional-dependencies"]
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["holosoma*"]
 
 [tool.pytest.ini_options]
 markers = [

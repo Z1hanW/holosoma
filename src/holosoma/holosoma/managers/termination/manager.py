@@ -40,6 +40,9 @@ class TerminationManager:
         self._term_instances: dict[str, TerminationTermBase] = {}
         self._term_names: list[str] = []
         self._term_cfgs: list[TerminationTermCfg] = []
+        self._last_term_results: dict[str, torch.Tensor] = {}
+        self.terminated = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+        self.time_outs = torch.zeros_like(self.terminated)
 
         self._initialize_terms()
 
@@ -80,6 +83,7 @@ class TerminationManager:
         reset_flags = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
         timeout_flags = torch.zeros_like(reset_flags)
 
+        self._last_term_results = {}
         for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
             if term_name in self._term_instances:
                 result = self._term_instances[term_name](self.env, **term_cfg.params)
@@ -95,8 +99,33 @@ class TerminationManager:
                 timeout_flags |= result
             else:
                 reset_flags |= result
+            # Keep per-term masks for downstream curriculum diagnostics.
+            self._last_term_results[term_name] = result
 
+        self.terminated = reset_flags.clone()
+        self.time_outs = timeout_flags.clone()
         return reset_flags, timeout_flags
+
+    def get_last_term_result(self, term_name: str) -> torch.Tensor | None:
+        """Return the latest boolean mask emitted by a termination term."""
+        result = self._last_term_results.get(term_name)
+        if result is None:
+            return None
+        return result
+
+    def get_last_term_components(self, term_name: str) -> dict[str, torch.Tensor]:
+        """Return optional condition-level masks emitted by a stateful term."""
+
+        instance = self._term_instances.get(term_name)
+        getter = getattr(instance, "get_last_component_results", None)
+        if not callable(getter):
+            return {}
+        components = getter()
+        if not isinstance(components, dict):
+            raise TypeError(
+                f"Termination term '{term_name}' component results must be a dictionary."
+            )
+        return components
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         """Reset stateful terms.
@@ -108,3 +137,10 @@ class TerminationManager:
         """
         for instance in self._term_instances.values():
             instance.reset(env_ids=env_ids)
+
+        if env_ids is None:
+            self.terminated.zero_()
+            self.time_outs.zero_()
+        else:
+            self.terminated[env_ids] = False
+            self.time_outs[env_ids] = False

@@ -38,6 +38,8 @@ import mujoco
 import torch
 from loguru import logger
 
+from holosoma.simulator.mujoco.mjw_views import quat_rotate_inverse_wxyz_torch
+
 from .base import IMujocoBackend
 from .warp_bridge import WarpBridge
 
@@ -219,6 +221,14 @@ class WarpBackend(IMujocoBackend):
             wp.capture_launch(self.step_graph)
             # No wp.synchronize() - let GPU work in parallel with CPU
 
+    def forward(self) -> None:
+        """Update MuJoCo Warp derived state after direct qpos/qvel writes."""
+        import mujoco_warp as mjw
+        import warp as wp
+
+        with wp.ScopedDevice(self.mjw_device):
+            mjw.forward(self.mjw_model, self.mjw_data)
+
     def get_render_data(self, world_id: int = 0) -> mujoco.MjData:
         """Sync GPU data to CPU for rendering.
 
@@ -280,9 +290,8 @@ class WarpBackend(IMujocoBackend):
         contact_history_tensor : torch.Tensor
             Contact force history buffer [num_envs, history_len, num_bodies, 3]
         """
-        # cfrc_ext is already computed by Warp: [num_envs, num_bodies, 6]
-        # Take first 3 components (forces, ignore torques)
-        forces = self.cfrc_t[..., :3]  # [num_envs, num_bodies, 3]
+        # cfrc_ext includes MuJoCo world body at slot 0; holosoma body tensors exclude it.
+        forces = self.cfrc_t[:, 1:, :3]  # [num_envs, num_bodies_without_world, 3]
 
         # Update history: shift old values right, add current at position 0
         contact_history_tensor[:] = torch.cat([forces.unsqueeze(1), contact_history_tensor[:, :-1]], dim=1)
@@ -396,8 +405,8 @@ class WarpBackend(IMujocoBackend):
         torch.Tensor
             Contact forces [num_envs, num_bodies, 3] - native PyTorch tensor
         """
-        # cfrc_ext is [num_envs, num_bodies, 6], take first 3 components (forces only)
-        return self.cfrc_t[..., :3]
+        # cfrc_ext includes MuJoCo world body at slot 0; drop it to match simulator.body_names.
+        return self.cfrc_t[:, 1:, :3]
 
     def create_dof_state_view(self, dof_addrs: dict, num_dof: int) -> BaseMujocoView:
         """Create DOF state view using zero-copy GPU tensors.
@@ -491,15 +500,15 @@ class WarpBackend(IMujocoBackend):
             - angular_vel: [num_envs, num_bodies, 3] - angular velocities
         """
         # Position: already in correct format
-        positions = self.xpos_t  # [N, nbody, 3]
+        positions = self.xpos_t[:, 1:, :]  # [N, nbody_without_world, 3]
 
         # Orientation: convert MuJoCo [w,x,y,z] → holosoma [x,y,z,w]
-        quat_mj = self.xquat_t  # [N, nbody, 4] - [w,x,y,z]
+        quat_mj = self.xquat_t[:, 1:, :]  # [N, nbody_without_world, 4] - [w,x,y,z]
         orientations = quat_mj[..., [1, 2, 3, 0]]  # [x,y,z,w]
 
         # Velocities: split cvel [angular(3), linear(3)]
-        angular_vel = self.cvel_t[..., 0:3]  # [N, nbody, 3]
-        linear_vel = self.cvel_t[..., 3:6]  # [N, nbody, 3]
+        angular_vel = self.cvel_t[:, 1:, 0:3]  # [N, nbody_without_world, 3]
+        linear_vel = self.cvel_t[:, 1:, 3:6]  # [N, nbody_without_world, 3]
 
         return positions, orientations, linear_vel, angular_vel
 
@@ -523,10 +532,11 @@ class WarpBackend(IMujocoBackend):
         pos = root_states[:, :3]  # [N, 3]
         quat_holo = root_states[:, 3:7]  # [N, 4] [qx, qy, qz, qw]
         lin_vel = root_states[:, 7:10]  # [N, 3]
-        ang_vel = root_states[:, 10:13]  # [N, 3]
+        ang_vel_world = root_states[:, 10:13]  # [N, 3]
 
         # Convert quaternion: holosoma [qx,qy,qz,qw] -> MuJoCo [qw,qx,qy,qz]
         quat_mj = quat_holo[:, [3, 0, 1, 2]]
+        ang_vel_local = quat_rotate_inverse_wxyz_torch(quat_mj, ang_vel_world)
 
         # Get addresses
         qpos_addr = root_addrs["robot_qpos_addr"]
@@ -557,7 +567,7 @@ class WarpBackend(IMujocoBackend):
         col_idx_ang = torch.arange(3, device=env_ids.device) + qvel_addr + 3
         env_idx = env_ids.unsqueeze(1).expand(N, 3)  # [N, 3]
         col_idx = col_idx_ang.unsqueeze(0).expand(N, 3)  # [N, 3]
-        self.qvel_t[env_idx, col_idx] = ang_vel
+        self.qvel_t[env_idx, col_idx] = ang_vel_local
 
         # No mj_forward call - next step() will handle forward kinematics
 

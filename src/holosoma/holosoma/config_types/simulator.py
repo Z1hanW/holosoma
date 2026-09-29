@@ -86,6 +86,30 @@ class PhysxConfig:
     bounce_threshold_velocity: float = 0.5
     """Velocity threshold below which bounce responses are suppressed."""
 
+    gpu_max_rigid_contact_count: int | None = None
+    """Maximum rigid contact count for the PhysX GPU contact stream (IsaacSim only)."""
+
+    gpu_collision_stack_size: int | None = None
+    """GPU collision stack size in bytes for PhysX (IsaacSim only)."""
+
+    gpu_max_rigid_patch_count: int | None = None
+    """Maximum rigid contact patch count for PhysX GPU narrow phase (IsaacSim only)."""
+
+    gpu_found_lost_pairs_capacity: int | None = None
+    """Capacity of found/lost broadphase pairs in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_found_lost_aggregate_pairs_capacity: int | None = None
+    """Capacity of aggregate found/lost pair buffers in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_total_aggregate_pairs_capacity: int | None = None
+    """Capacity of aggregate pair tracking buffers in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_heap_capacity: int | None = None
+    """Initial PhysX GPU heap capacity in bytes (IsaacSim only)."""
+
+    gpu_temp_buffer_capacity: int | None = None
+    """Temporary PhysX GPU buffer capacity in bytes (IsaacSim only)."""
+
 
 @dataclass(frozen=True)
 class MujocoXMLFilterCfg:
@@ -385,10 +409,10 @@ class SceneConfig:
     asset_root: str | None = None
     """Optional root directory for relative asset paths."""
 
-    scene_files: list[SceneFileConfig] | None = None  # Renamed from sources
+    scene_files: list[SceneFileConfig] = field(default_factory=list)  # Renamed from sources
     """List of scene files (USD/URDF) to load."""
 
-    rigid_objects: list[RigidObjectConfig] | None = None
+    rigid_objects: list[RigidObjectConfig] = field(default_factory=list)
     """Standalone rigid objects to instantiate."""
 
     env_spacing: float = 20.0
@@ -418,6 +442,18 @@ class VirtualGantryCfg:
 
     point: list[float] | None = None
     """3D position of gantry anchor point [x, y, z]. If None, defaults to [0, 0, height]."""
+
+    follow_robot_on_episode_start: bool = True
+    """Reset gantry anchor to the robot position on episode start."""
+
+    reset_to_gantry_xy: bool = False
+    """Reset robot XY to the current gantry anchor point when resetting the environment."""
+
+    reset_z: float | None = None
+    """Override Z position for reset when reset_to_gantry_xy is True."""
+
+    reset_match_length: bool = False
+    """Recompute gantry length to match the reset pose (avoids bounce)."""
 
     length: float = 0.0
     """Rest length of the elastic band (zero force distance)."""
@@ -465,6 +501,55 @@ class BridgeConfig:
     use_ros: bool = False
     """Whether to use ROS for communication."""
 
+    publish_sim_state: bool = False
+    """Publish simulator robot/object state over ZMQ for split sim2sim inference."""
+
+    clock_port: int = 5555
+    """ZMQ port used for split sim2sim simulator clock publishing."""
+
+    sim_state_port: int = 5557
+    """ZMQ port used for split sim2sim simulator state publishing."""
+
+    listen_control: bool = False
+    """Listen for split sim2sim control requests such as reset."""
+
+    control_port: int = 5559
+    """ZMQ port used to receive split sim2sim control requests."""
+
+    use_zmq_lowcmd: bool = False
+    """Use the split sim-control ZMQ channel for lowcmd instead of Unitree DDS."""
+
+    publish_perception_obs: bool = False
+    """Publish simulator perception observations over ZMQ for split sim2sim inference."""
+
+    perception_obs_port: int = 5558
+    """ZMQ port used for split sim2sim perception observation publishing."""
+
+    publish_perception_obs_shm: bool = False
+    """Publish simulator perception observations through shared memory for depth-policy parity."""
+
+    perception_obs_shm_name: str = "depth_img_shm"
+    """Shared-memory name used for split sim2sim perception observation publishing."""
+
+    ignore_default_idle_command: bool = False
+    """Ignore backend-provided placeholder low commands when no real command has arrived yet.
+
+    This is primarily useful for MuJoCo split sim2sim, where the Unitree bridge can
+    surface a non-zero default command before inference starts publishing lowcmd.
+    """
+
+    log_first_command_summary: bool = False
+    """Log a one-time summary for the first non-idle lowcmd received by the bridge."""
+
+    hold_default_pose_until_first_command: bool = False
+    """Apply a default-pose PD hold until the first external lowcmd arrives."""
+
+    hold_initial_pose_until_first_command: bool = False
+    """Apply a PD hold at the simulator's current initial joint pose until the first external lowcmd arrives."""
+
+    freeze_until_first_command: bool = False
+    """For split sim2sim, keep MuJoCo physics paused at the initialized state until the first active lowcmd arrives."""
+
 
 @dataclass(frozen=True)
 class SimulatorInitConfig:
@@ -479,6 +564,15 @@ class SimulatorInitConfig:
     debug_viz: bool = True
     """Enable debug visualization (gantry lines, etc.)."""
 
+    contact_force_viz: bool = True
+    """Enable contact force visualization (net force vectors per body)."""
+
+    contact_force_viz_scale: float = 0.001
+    """Scale factor for contact force visualization (meters per Newton)."""
+
+    contact_force_viz_threshold: float = 1.0
+    """Minimum contact force magnitude (N) to visualize."""
+
     scene: SceneConfig = field(default_factory=SceneConfig)
     """Scene composition and asset configuration."""
 
@@ -487,6 +581,9 @@ class SimulatorInitConfig:
 
     contact_sensor_history_length: int = 3
     """Number of frames of contact data retained for sensors."""
+
+    object_filtered_contact_sensor_body_names: list[str] = field(default_factory=list)
+    """Optional list of robot body names that should get object-filtered IsaacSim contact sensors."""
 
     robot_mjcf_filter: MujocoXMLFilterCfg = field(default_factory=MujocoXMLFilterCfg)
     """MuJoCo-specific XML filtering configuration for robot MJCF files."""
@@ -521,6 +618,12 @@ class SimulatorInitConfig:
         --simulator.config.mujoco-warp.nconmax-per-env=128
         --simulator.config.mujoco-warp.njmax-per-env=1024
     """
+
+    mujoco_show_object_collision: bool = False
+    """Highlight object collision geoms in the MuJoCo viewer."""
+
+    mujoco_hide_object_visuals_when_showing_collision: bool = False
+    """When object collision highlighting is enabled, dim object visual geoms to expose the collision shape."""
 
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     """Robot SDK bridge configuration."""

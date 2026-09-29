@@ -1,6 +1,6 @@
 import platform
 
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 UNITREE_VERSION = "0.1.1"
 UNITREE_REPO = "https://github.com/amazon-far/unitree_sdk2"
@@ -32,7 +32,7 @@ setup(
     long_description="",
     long_description_content_type="text/markdown",
     author="Amazon FAR Team",
-    packages=find_packages(),
+    packages=find_namespace_packages(include=["holosoma_inference*"]),
     python_requires=">=3.8",
     install_requires=[
         "pydantic",

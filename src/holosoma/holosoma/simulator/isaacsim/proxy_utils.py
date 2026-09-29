@@ -27,6 +27,38 @@ class AllRootStatesProxy:
     def __init__(self, state_adapter):
         self._adapter = state_adapter
 
+    def _normalize_tensor_indices(self, tensor_indices) -> torch.Tensor:
+        if not isinstance(tensor_indices, torch.Tensor):
+            tensor_indices = torch.tensor(tensor_indices, device=self._adapter.device)
+        tensor_indices = tensor_indices.to(device=self._adapter.device, dtype=torch.long).reshape(-1)
+        return tensor_indices
+
+    def _decode_indices(self, tensor_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        registry = self._adapter._object_registry
+        if registry.objects_per_env <= 0:
+            raise RuntimeError("Object registry is not initialized (objects_per_env <= 0).")
+
+        total_actors = registry.num_envs * registry.objects_per_env
+        if tensor_indices.numel() and (
+            bool(torch.any(tensor_indices < 0)) or bool(torch.any(tensor_indices >= total_actors))
+        ):
+            raise ValueError(
+                f"Actor indices {tensor_indices.tolist()} are out of range [0, {total_actors})."
+            )
+
+        env_ids = torch.div(tensor_indices, registry.objects_per_env, rounding_mode="floor")
+        pos_in_env = torch.remainder(tensor_indices, registry.objects_per_env)
+        return env_ids, pos_in_env
+
+    def _position_to_object_name(self, pos_in_env: int) -> str:
+        registry = self._adapter._object_registry
+        if pos_in_env < 0 or pos_in_env >= len(registry._position_to_name):
+            raise KeyError(f"Object position {pos_in_env} is out of range.")
+        name = registry._position_to_name[pos_in_env]
+        if not name:
+            raise KeyError(f"No object registered at position {pos_in_env}.")
+        return name
+
     def __getitem__(self, indices):
         """Get states using StateAdapter resolution.
 
@@ -51,20 +83,20 @@ class AllRootStatesProxy:
         else:
             tensor_indices, column_slice = indices, slice(None)
 
-        if not isinstance(tensor_indices, torch.Tensor):
-            tensor_indices = torch.tensor(tensor_indices, device=self._adapter.device)
+        tensor_indices = self._normalize_tensor_indices(tensor_indices)
+        if tensor_indices.numel() == 0:
+            return torch.empty(0, 13, device=self.device, dtype=self.dtype)[:, column_slice]
 
-        resolved_objects = self._adapter.resolve_indices(tensor_indices)
-        if not resolved_objects:
-            raise KeyError(f"No objects found for indices: {tensor_indices}")
+        env_ids, pos_in_env = self._decode_indices(tensor_indices)
+        result = torch.empty(tensor_indices.numel(), 13, device=self.device, dtype=self.dtype)
 
-        # iterate over all objects and get views into their state tensors
-        results = []
-        for obj_name, env_ids in resolved_objects:
-            obj_states = self._adapter.get_object_states(obj_name, env_ids)
-            results.append(obj_states[:, column_slice])
+        for pos in torch.unique(pos_in_env):
+            mask = pos_in_env == pos
+            obj_name = self._position_to_object_name(int(pos.item()))
+            obj_env_ids = env_ids[mask]
+            result[mask] = self._adapter.get_object_states(obj_name, obj_env_ids)
 
-        return torch.cat(results, dim=0) if len(results) > 1 else results[0]
+        return result[:, column_slice]
 
     def __setitem__(self, indices, values):
         """Setters to write directly into tensor. Routes to adapter functions."""
@@ -74,20 +106,34 @@ class AllRootStatesProxy:
         else:
             tensor_indices, column_slice = indices, slice(None)
 
-        if not isinstance(tensor_indices, torch.Tensor):
-            tensor_indices = torch.tensor(tensor_indices, device=self._adapter.device)
+        tensor_indices = self._normalize_tensor_indices(tensor_indices)
+        if tensor_indices.numel() == 0:
+            return
 
-        resolved_objects = self._adapter.resolve_indices(tensor_indices)
-        if not resolved_objects:
-            raise KeyError(f"No objects found for indices: {tensor_indices}")
+        if not isinstance(values, torch.Tensor):
+            values = torch.tensor(values, device=self.device, dtype=self.dtype)
+        else:
+            values = values.to(device=self.device, dtype=self.dtype)
 
-        # Route to write method via adapter
-        values_offset = 0
-        for obj_name, env_ids in resolved_objects:
-            num_envs_for_obj = len(env_ids)
-            obj_values = values[values_offset : values_offset + num_envs_for_obj]
-            values_offset += num_envs_for_obj
-            self._adapter.write_object_states(obj_name, obj_values, env_ids)
+        if values.ndim == 1:
+            values = values.unsqueeze(0)
+        if values.shape[0] == 1 and tensor_indices.numel() > 1:
+            values = values.expand(tensor_indices.numel(), -1).clone()
+        if values.shape[0] != tensor_indices.numel():
+            raise ValueError(
+                f"Values first dimension ({values.shape[0]}) must match index count ({tensor_indices.numel()})."
+            )
+
+        if column_slice != slice(None):
+            full_values = self.__getitem__(tensor_indices)
+            full_values[:, column_slice] = values
+            values = full_values
+
+        env_ids, pos_in_env = self._decode_indices(tensor_indices)
+        for pos in torch.unique(pos_in_env):
+            mask = pos_in_env == pos
+            obj_name = self._position_to_object_name(int(pos.item()))
+            self._adapter.write_object_states(obj_name, values[mask], env_ids[mask])
 
         # Dirty flag is automatically set in adapter.write_object_states()
 
@@ -109,17 +155,14 @@ class AllRootStatesProxy:
 
     def clone(self):
         """Return a clone of the unified tensor (for compatibility)"""
-        resolved_objects = self._adapter._object_registry.resolved_objects()
-
-        if not resolved_objects:
+        if self.shape[0] == 0:
             return torch.empty(0, 13, device=self.device, dtype=self.dtype)
 
-        results = []
-        for obj_name, env_ids in resolved_objects:
-            obj_states = self._adapter.get_object_states(obj_name, env_ids)
-            results.append(obj_states)
-
-        return torch.cat(results, dim=0) if len(results) > 1 else results[0]
+        # Preserve the ObjectRegistry flat-address contract exactly.  The
+        # registry is env-major/interleaved, whereas resolved_objects() groups
+        # rows by object and therefore cannot be concatenated directly here.
+        actor_indices = torch.arange(self.shape[0], device=self.device, dtype=torch.long)
+        return self[actor_indices, :].clone()
 
 
 class RootStatesProxy:
@@ -178,7 +221,67 @@ class RootStatesProxy:
             Values to set with quaternions in xyzw format.
         """
         self.tensor_xyzw[index] = value_xyzw
-        self.tensor_wxyz = fullstate_xyzw_to_wxyz(self.tensor_xyzw)
+        row_index = self._direct_row_index(index)
+        if row_index is None:
+            row_index = self._affected_rows(index)
+
+        # Convert complete states for only the rows touched by the assignment.
+        # Reading the rows back from tensor_xyzw (rather than converting the
+        # assignment value directly) preserves PyTorch's broadcasting,
+        # duplicate-index, and partial-column assignment semantics exactly.
+        selected_xyzw = self.tensor_xyzw[row_index]
+        if selected_xyzw.ndim == 0 or selected_xyzw.shape[-1] != self.tensor_xyzw.shape[-1]:
+            # Covers uncommon valid selectors such as nested/Python boolean
+            # masks that cannot be identified reliably from type alone.
+            row_index = self._affected_rows(index)
+            selected_xyzw = self.tensor_xyzw[row_index]
+        selected_shape = selected_xyzw.shape
+        selected_xyzw_2d = selected_xyzw.reshape(-1, self.tensor_xyzw.shape[-1])
+        selected_wxyz = fullstate_xyzw_to_wxyz(selected_xyzw_2d).reshape(selected_shape)
+
+        # Keep the IsaacSim-owned backing tensor alive.  Rebinding here breaks
+        # aliases held by the simulator and also turns every small reset write
+        # into a full [num_envs, 13] conversion/allocation.
+        self.tensor_wxyz[row_index] = selected_wxyz
+
+    @staticmethod
+    def _direct_row_index(index):
+        """Return the first-axis selector for common two-dimensional indices.
+
+        ``None`` means that the index changes tensor dimensionality or uses a
+        multi-dimensional boolean mask, so exact affected rows must be derived
+        through :meth:`_affected_rows` instead.
+        """
+
+        if isinstance(index, tuple):
+            if not index:
+                return slice(None)
+            row_index = index[0]
+            if row_index is Ellipsis:
+                # Ellipsis can consume either the row dimension or zero
+                # dimensions (for example ``[..., row_ids, columns]``).
+                return None
+        else:
+            row_index = index
+
+        if row_index is Ellipsis:
+            return slice(None)
+        if row_index is None or isinstance(row_index, bool):
+            return None
+        if isinstance(row_index, torch.Tensor) and row_index.dtype == torch.bool:
+            return row_index if row_index.ndim == 1 else None
+        return row_index
+
+    def _affected_rows(self, index) -> torch.Tensor:
+        """Resolve rows changed by an uncommon but valid PyTorch index."""
+
+        row_ids = torch.arange(
+            self.tensor_xyzw.shape[0],
+            device=self.tensor_xyzw.device,
+            dtype=torch.long,
+        )
+        row_grid = row_ids[:, None].expand_as(self.tensor_xyzw)
+        return torch.unique(row_grid[index].reshape(-1))
 
     def _get_wxyz(self, env_ids=None):
         """Get tensor in wxyz quaternion format for IsaacSim interfacing.

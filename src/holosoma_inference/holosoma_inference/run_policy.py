@@ -10,6 +10,7 @@ Usage:
     python run_policy.py inference:g1-29dof-loco --task.model-path https://wandb-url/files/model.onnx
 """
 
+import os
 import sys
 import traceback
 
@@ -27,6 +28,12 @@ from holosoma_inference.utils.misc import restore_terminal_settings
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
+    keyboard_root_command = str(os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND", "0")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     logger.info("=" * 80)
     logger.info("🎮 POLICY CONTROLS")
@@ -66,7 +73,13 @@ def _print_control_guide(policy_class, use_joystick: bool):
         if is_wbt:
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
-            logger.info("  s  - Start motion clip")
+            if keyboard_root_command:
+                logger.info("  w/s        - Command x +/-")
+                logger.info("  a/d        - Command y +/-")
+                logger.info("  q/e        - Command yaw +/-")
+                logger.info("  release    - Command axis returns to zero")
+            else:
+                logger.info("  s  - Start motion clip")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")
@@ -89,6 +102,29 @@ def _print_control_guide(policy_class, use_joystick: bool):
     logger.info("")
 
 
+def _is_wbt_observation(obs_dict: dict[str, list[str]]) -> bool:
+    wbt_terms = {
+        "motion_command",
+        "motion_ref_ori_b",
+        "motion_future_target_poses",
+        "sparse_target_root_trajectory_command",
+        "sparse_target_root_trajectory_command_contact_aware",
+        "pickup_button",
+        "drop_button",
+        "torso_real",
+        "torso_xy_rel",
+        "torso_yaw_rel",
+        "target_joints",
+        "target_root_roll",
+        "target_root_pitch",
+        "obj_current_pose_size_b",
+    }
+    for terms in obs_dict.values():
+        if any(term in wbt_terms for term in terms):
+            return True
+    return False
+
+
 def run_policy(config: InferenceConfig):
     """Run policy with Tyro configuration."""
     logger.info("🚀 Starting Policy with Tyro configuration...")
@@ -99,8 +135,7 @@ def run_policy(config: InferenceConfig):
 
     try:
         # Determine policy class based on observation type
-        actor_obs = config.observation.obs_dict.get("actor_obs", [])
-        policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
+        policy_class = WholeBodyTrackingPolicy if _is_wbt_observation(config.observation.obs_dict) else LocomotionPolicy
         logger.info(f"Using {policy_class.__name__}")
         policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
@@ -109,6 +144,8 @@ def run_policy(config: InferenceConfig):
         policy.run()
         logger.info("✅ Policy execution completed!")
 
+    except KeyboardInterrupt:
+        logger.info("Policy interrupted; shutting down.")
     except Exception as e:
         logger.error(f"❌ Error running policy: {e}")
         traceback.print_exc()

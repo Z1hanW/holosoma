@@ -6,7 +6,7 @@ from pathlib import Path
 import wandb
 
 _WANDB_PREFIX = "wandb://"
-_WANDB_HTTPS_PATTERN = re.compile(r"https://[^/]+/([^/]+)/([^/]+)/runs/([^/]+)/files/(.+)")
+_WANDB_HTTPS_PATTERN = re.compile(r"https://[^/]+/([^/]+)/([^/]+)/runs/([^/]+)/(?:files/)?(.+)")
 
 
 def load_checkpoint(

@@ -54,3 +54,11 @@ class ObservationManagerCfg:
 
     clip_observations: float = 100.0
     """Global observation clipping threshold (applied to all observations)."""
+
+    reuse_exact_base_terms: bool = False
+    """Reuse explicitly marked, parameter-free base terms within one ``compute()`` call.
+
+    This is an opt-in collection optimization.  It never reuses processed
+    observations (noise, scale, clipping, history, and concatenation remain
+    group-local), and it never retains values across environment steps.
+    """

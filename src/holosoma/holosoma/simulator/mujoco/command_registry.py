@@ -42,12 +42,17 @@ class CommandRegistry:
         }
 
         # Gantry commands (using new enum-based system with parameters)
+        gantry_move_step = 0.1
         self.gantry_commands = {
             glfw.KEY_7: GantryCommandData(GantryCommand.LENGTH_ADJUST, {"amount": -0.1}),
             glfw.KEY_8: GantryCommandData(GantryCommand.LENGTH_ADJUST, {"amount": 0.1}),
             glfw.KEY_9: GantryCommandData(GantryCommand.TOGGLE),
             glfw.KEY_0: GantryCommandData(GantryCommand.FORCE_ADJUST),
             glfw.KEY_MINUS: GantryCommandData(GantryCommand.FORCE_SIGN_TOGGLE),
+            glfw.KEY_UP: GantryCommandData(GantryCommand.POSITION_ADJUST, {"dy": gantry_move_step}),
+            glfw.KEY_DOWN: GantryCommandData(GantryCommand.POSITION_ADJUST, {"dy": -gantry_move_step}),
+            glfw.KEY_LEFT: GantryCommandData(GantryCommand.POSITION_ADJUST, {"dx": -gantry_move_step}),
+            glfw.KEY_RIGHT: GantryCommandData(GantryCommand.POSITION_ADJUST, {"dx": gantry_move_step}),
         }
 
     def execute_command(self, keycode: int) -> bool:

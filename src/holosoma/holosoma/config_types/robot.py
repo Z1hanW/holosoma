@@ -74,6 +74,24 @@ class RobotForceControlConfig:
 @dataclass(frozen=True)
 class ObjectConfig:
     object_urdf_path: str | None = None
+    enabled: bool = False
+    scale: list[float] | None = None
+    mujoco_use_training_urdf_scene: bool = False
+    mujoco_limit_object_contacts_to_carry_bodies: bool = False
+    mujoco_object_contact_body_name_markers: list[str] | None = None
+    mujoco_add_default_actuators: bool = False
+    mujoco_copy_joint_defaults_from_robot_xml: bool = False
+    mujoco_copy_tendons_from_robot_xml: bool = False
+    mujoco_copy_collision_geoms_from_robot_xml: bool = False
+    mujoco_copy_contact_pairs_from_robot_xml: bool = False
+    mujoco_object_mass_scale: float | None = None
+    mujoco_object_mass_override: float | None = None
+    mujoco_object_geom_friction: list[float] | None = None
+    mujoco_object_terrain_pair_friction: list[float] | None = None
+    mujoco_object_lateral_friction: float | None = None
+    mujoco_object_rolling_friction: float | None = None
+    mujoco_object_contact_stiffness: float | None = None
+    mujoco_object_contact_damping: float | None = None
 
 
 @dataclass(frozen=True)

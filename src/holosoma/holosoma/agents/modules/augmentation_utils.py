@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Sequence
 
 import torch
@@ -523,6 +524,153 @@ class SymmetryUtils:
             Outputs: [a_mapped0 * sign0, a_mapped1 * sign1, ..., a_mappedN * signN] (mirrored and sign-flipped).
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
+
+    def mirror_obs_torso_real(self, torso_real: torch.Tensor) -> torch.Tensor:
+        """Mirror the VideoMimic-style torso_real vector."""
+        total_dim = torso_real.shape[-1]
+        num_dof = int(self.joint_index_map.numel())
+        if total_dim < 6 + 2 * num_dof:
+            raise ValueError(f"torso_real dim too small: {total_dim}")
+
+        base_ang_vel = torso_real[..., :3]
+        projected_gravity = torso_real[..., 3:6]
+        remaining = torso_real[..., 6:]
+
+        dof_pos = remaining[..., :num_dof]
+        dof_vel = remaining[..., num_dof : 2 * num_dof]
+        actions = remaining[..., 2 * num_dof :]
+        if actions.shape[-1] not in (0, num_dof):
+            raise ValueError(f"Unexpected actions dim in torso_real: {actions.shape[-1]}")
+
+        base_ang_vel = self.mirror_obs_base_ang_vel(base_ang_vel)
+        projected_gravity = self.mirror_obs_projected_gravity(projected_gravity)
+        dof_pos = self.mirror_obs_dof_pos(dof_pos)
+        dof_vel = self.mirror_obs_dof_vel(dof_vel)
+        if actions.shape[-1]:
+            actions = self.mirror_obs_actions(actions)
+
+        return torch.cat([base_ang_vel, projected_gravity, dof_pos, dof_vel, actions], dim=-1)
+
+    def mirror_obs_torso_xy_rel(self, torso_xy_rel: torch.Tensor) -> torch.Tensor:
+        """Mirror local-frame torso XY offset."""
+        torso_xy_rel[..., 1] = -torso_xy_rel[..., 1]
+        return torso_xy_rel
+
+    def mirror_obs_torso_yaw_rel(self, torso_yaw_rel: torch.Tensor) -> torch.Tensor:
+        """Mirror local-frame torso yaw offset."""
+        torso_yaw_rel[..., 0] = -torso_yaw_rel[..., 0]
+        return torso_yaw_rel
+
+    def mirror_obs_target_joints(self, target_joints: torch.Tensor) -> torch.Tensor:
+        """Mirror target joint angles using joint mapping and sign flips."""
+        return target_joints[..., self.joint_index_map] * self.sign_flip_mask
+
+    def mirror_obs_target_root_roll(self, target_root_roll: torch.Tensor) -> torch.Tensor:
+        """Mirror target root roll."""
+        target_root_roll[..., 0] = -target_root_roll[..., 0]
+        return target_root_roll
+
+    def mirror_obs_target_root_pitch(self, target_root_pitch: torch.Tensor) -> torch.Tensor:
+        """Mirror target root pitch (no sign flip)."""
+        return target_root_pitch
+
+    def _mirror_vec3_flat(self, vec: torch.Tensor) -> torch.Tensor:
+        if vec.shape[-1] % 3 != 0:
+            raise ValueError("Expected last dim to be multiple of 3 for vec3 mirroring.")
+        reshaped = vec.view(*vec.shape[:-1], -1, 3)
+        reshaped[..., 1] = -reshaped[..., 1]
+        return reshaped.view(vec.shape)
+
+    def _mirror_mat3x2_flat(self, mat: torch.Tensor) -> torch.Tensor:
+        if mat.shape[-1] % 6 != 0:
+            raise ValueError("Expected last dim to be multiple of 6 for 3x2 matrix mirroring.")
+        reshaped = mat.view(*mat.shape[:-1], -1, 3, 2)
+        reshaped[..., 1, :] = -reshaped[..., 1, :]
+        return reshaped.view(mat.shape)
+
+    def mirror_obs_motion_command(self, motion_command: torch.Tensor) -> torch.Tensor:
+        """Mirrors the motion command ([qpos, qvel]) with joint mapping and sign flips."""
+        total_dim = motion_command.shape[-1]
+        if total_dim % 2 != 0:
+            raise ValueError("motion_command must be concatenated [dof_pos, dof_vel].")
+        half = total_dim // 2
+        dof_pos = motion_command[..., :half]
+        dof_vel = motion_command[..., half:]
+        dof_pos = dof_pos[..., self.joint_index_map] * self.sign_flip_mask
+        dof_vel = dof_vel[..., self.joint_index_map] * self.sign_flip_mask
+        return torch.cat([dof_pos, dof_vel], dim=-1)
+
+    def mirror_obs_motion_ref_pos_b(self, motion_ref_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(motion_ref_pos_b)
+
+    def mirror_obs_motion_ref_ori_b(self, motion_ref_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(motion_ref_ori_b)
+
+    def mirror_obs_robot_body_pos_b(self, robot_body_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(robot_body_pos_b)
+
+    def mirror_obs_robot_body_ori_b(self, robot_body_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(robot_body_ori_b)
+
+    def mirror_obs_obj_pos_b(self, obj_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_pos_b)
+
+    def mirror_obs_obj_ori_b(self, obj_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(obj_ori_b)
+
+    def mirror_obs_obj_target_pos_b(self, obj_target_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_target_pos_b)
+
+    def mirror_obs_obj_target_ori_b(self, obj_target_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(obj_target_ori_b)
+
+    def mirror_obs_obj_size(self, obj_size: torch.Tensor) -> torch.Tensor:
+        return obj_size
+
+    def mirror_obs_obj_lin_vel_b(self, obj_lin_vel_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_lin_vel_b)
+
+    def mirror_obs_obj_target_pose_size_b(self, obj_target_pose_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [obj_pos_b(3), obj_rot_6d(6), obj_size(3)] blocks."""
+        if obj_target_pose_size_b.shape[-1] % 12 != 0:
+            raise ValueError("Expected last dim to be multiple of 12 for obj_target_pose_size_b mirroring.")
+        reshaped = obj_target_pose_size_b.view(*obj_target_pose_size_b.shape[:-1], -1, 12)
+        reshaped[..., 1] = -reshaped[..., 1]
+        ori = reshaped[..., 3:9].clone().view(*reshaped.shape[:-1], 3, 2)
+        ori[..., 1, :] = -ori[..., 1, :]
+        reshaped[..., 3:9] = ori.view(*reshaped.shape[:-1], 6)
+        return reshaped.view(obj_target_pose_size_b.shape)
+
+    def mirror_obs_obj_goal_pos_size_b(self, obj_goal_pos_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [goal_pos_b(3), obj_size(3)] blocks."""
+        if obj_goal_pos_size_b.shape[-1] % 6 != 0:
+            raise ValueError("Expected last dim to be multiple of 6 for obj_goal_pos_size_b mirroring.")
+        reshaped = obj_goal_pos_size_b.view(*obj_goal_pos_size_b.shape[:-1], -1, 6)
+        reshaped[..., 1] = -reshaped[..., 1]
+        return reshaped.view(obj_goal_pos_size_b.shape)
+
+    def mirror_obs_obj_goal_pose_size_b(self, obj_goal_pose_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [goal_pos_b(3), goal_rot_6d(6), obj_size(3)] blocks."""
+        return self.mirror_obs_obj_target_pose_size_b(obj_goal_pose_size_b)
+
+    def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
+        """Pass-through for future target poses.
+
+        This observation is a flattened multi-step target pose buffer. Mirroring it
+        requires a per-body mapping, so we keep it unchanged for now.
+        """
+        return motion_future_target_poses
+
+    def mirror_obs_perception(self, perception: torch.Tensor) -> torch.Tensor:
+        """Mirror perception grids by flipping the lateral axis."""
+        flat = perception.reshape(-1, perception.shape[-1])
+        dim = flat.shape[-1]
+        side = int(math.sqrt(dim))
+        if side * side != dim:
+            return perception
+        grid = flat.view(-1, side, side)
+        mirrored = torch.flip(grid, dims=[2])
+        return mirrored.view(perception.shape)
 
     def mirror_obs_ee_apply_force(self, ee_apply_force: torch.Tensor) -> torch.Tensor:
         """Mirrors the end-effector applied forces in base frame.

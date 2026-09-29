@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any, List, Union
+from typing import Annotated, Any, List, Union
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+
+# A Flow policy executes one neural-network forward per Euler step.  This cap
+# is already far beyond useful deployment resolution while keeping a malformed
+# configuration from turning one action evaluation into an effectively
+# unbounded loop.
+MAX_FLOW_INTEGRATION_STEPS = 4096
+
+# Flow targets square the sampled Gaussian displacement in a float32 MSE.  At
+# 1e18, even an approximately 18-sigma sample remains below float32's maximum;
+# larger values have no practical policy meaning and can create Inf/NaN before
+# the optimizer gets a chance to fail closed.
+MAX_FLOW_NOISE_STD = 1.0e18
 
 
 @dataclass(frozen=True)
@@ -27,6 +41,12 @@ class LayerConfig:
     activation: str = "ELU"
     """Activation function name."""
 
+    lstm_hidden_dim: Annotated[int, Field(strict=True, ge=1, le=4096)] = 256
+    """Hidden-state width for full-policy LSTM modules."""
+
+    lstm_num_layers: Annotated[int, Field(strict=True, ge=1, le=8)] = 1
+    """Number of stacked recurrent layers for full-policy LSTM modules."""
+
     dropout_prob: float = 0.0
     """Dropout probability."""
 
@@ -44,6 +64,42 @@ class LayerConfig:
 
     encoder_input_name: str = ""
     """Input name for encoder. Only used for encoder modules."""
+
+    encoder_obs_token_name: str | None = None
+    """Optional input name for a transformer "current-obs" token."""
+
+    perception_input_name: str = ""
+    """Optional input name for perception encoder."""
+
+    perception_output_dim: int | None = None
+    """Output dimension for perception encoder."""
+
+    perception_encoder_type: str = "gated_linear"
+    """Perception encoder type, including far-tracking GAP and spatial-softmax CNN variants."""
+
+    perception_input_height: int | None = None
+    """Optional input height for structured perception encoders."""
+
+    perception_input_width: int | None = None
+    """Optional input width for structured perception encoders."""
+
+    perception_pretrained: bool = False
+    """Whether to load pretrained weights for an external perception backbone."""
+
+    perception_pretrained_path: str | None = None
+    """Optional local checkpoint path for external perception encoders."""
+
+    perception_pretrained_sha256: str | None = None
+    """Authenticated SHA-256 for an external perception checkpoint."""
+
+    perception_freeze_backbone: bool = False
+    """Freeze an external perception backbone and train only its projection when supported."""
+
+    perception_target_size: int | tuple[int, int] | None = None
+    """Optional target size used by external perception preprocessors."""
+
+    perception_patch_size: int | None = None
+    """Optional patch-size alignment used by external perception preprocessors."""
 
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
@@ -69,6 +125,57 @@ class LayerConfig:
     module_input_name: tuple[str, ...] = ()
     """Input names for module. Only used for encoder modules."""
 
+    encoder_num_steps: int | None = None
+    """Sequence length for transformer-style encoders."""
+
+    encoder_obs_dim: int | None = None
+    """Per-step feature dimension for transformer-style encoders."""
+
+    transformer_latent_dim: int = 256
+    """Latent dimension for transformer-style encoders."""
+
+    transformer_num_layers: int = 2
+    """Number of transformer encoder layers."""
+
+    transformer_num_heads: int = 2
+    """Number of attention heads in the transformer encoder."""
+
+    transformer_ff_dim: int = 512
+    """Feed-forward dimension inside transformer encoder layers."""
+
+    transformer_dropout: float = 0.0
+    """Dropout for transformer encoder layers."""
+
+    transformer_pooling: str = "first"
+    """Pooling for transformer encoder output: 'first' or 'mean'."""
+
+    extra_input_to_hidden: bool = False
+    """Whether to add an extra input projection to the first hidden layer."""
+
+    flow_integration_steps: Annotated[
+        int,
+        Field(strict=True, ge=1, le=MAX_FLOW_INTEGRATION_STEPS),
+    ] = 4
+    """Number of Euler integration steps used by flow actor inference."""
+
+    flow_train_noise_std: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=MAX_FLOW_NOISE_STD, allow_inf_nan=False),
+    ] = 1.0
+    """Standard deviation of the base Gaussian used for flow-matching targets."""
+
+    flow_time_epsilon: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=0.49, allow_inf_nan=False),
+    ] = 1e-4
+    """Minimum distance from 0/1 when sampling flow-matching time values."""
+
+    flow_inference_noise_std: Annotated[
+        float,
+        Field(strict=True, ge=0.0, le=MAX_FLOW_NOISE_STD, allow_inf_nan=False),
+    ] = 0.0
+    """Initial noise std for flow actor inference; 0 keeps deployment deterministic."""
+
 
 @dataclass(frozen=True)
 class ModuleConfig:
@@ -91,6 +198,175 @@ class ModuleConfig:
 
     min_mean_noise_std: float | None = None
     """Minimum mean noise standard deviation."""
+
+    max_noise_std: float | None = None
+    """Optional upper bound for each policy action noise standard deviation."""
+
+
+@dataclass(frozen=True)
+class DistillationConfig:
+    """Configuration for behavior cloning/distillation from a teacher policy."""
+
+    enabled: bool = False
+    """Enable distillation loss against a teacher policy."""
+
+    teacher_checkpoint: str | None = None
+    """Path to teacher checkpoint (local path or wandb:// URI)."""
+
+    loss_coef: float = 1.0
+    """Weight for the distillation loss added to actor loss."""
+
+    mode: str = "mse"
+    """Distillation mode: "mse" (legacy) or "dagger" (VideoMimic-style BC)."""
+
+    policy_to_clone: str | list[str] | None = None
+    """Teacher checkpoint path(s) for dagger (aliases teacher_checkpoint)."""
+
+    teacher_obs_keys: list[str] | str | None = None
+    """Observation keys to feed the teacher policy (defaults to actor_obs keys)."""
+
+    teacher_use_stochastic_actions: bool = False
+    """Use sampled teacher actions for DAgger labels/rollout mixing instead of deterministic teacher means."""
+
+    bc_loss_coef: float | None = None
+    """Behavior cloning loss coefficient for dagger. Defaults to loss_coef if unset."""
+
+    clip_teacher_actions: bool = False
+    """Whether to clip teacher actions when computing BC loss."""
+
+    clip_actions_threshold: float = 100.0
+    """Absolute action clip value for BC loss when clip_teacher_actions is enabled."""
+
+    take_teacher_actions: bool = False
+    """Whether to step the environment with teacher actions instead of student actions."""
+
+    teacher_action_mix_ratio: float = 0.0
+    """Per-step env mix ratio for teacher actions in DAgger rollout (0.0=student only, 1.0=teacher only)."""
+
+    teacher_action_mix_ratio_start: float | None = None
+    """Optional initial teacher-action rollout mix ratio for linear scheduling."""
+
+    teacher_action_mix_ratio_end: float | None = None
+    """Optional final teacher-action rollout mix ratio for linear scheduling."""
+
+    teacher_action_mix_ratio_end_iteration: int = -1
+    """Iteration where teacher-action rollout mix reaches ``teacher_action_mix_ratio_end``."""
+
+    schedule_name: str | None = None
+    """Optional human-readable name for the active distillation schedule."""
+
+    schedule_notes: str | None = None
+    """Optional free-form notes describing the distillation curriculum."""
+
+    teacher_compat_profile: str | None = None
+    """Optional name for the teacher compatibility profile applied by the launcher."""
+
+    teacher_compat_notes: str | None = None
+    """Optional notes describing any teacher compatibility adjustments or remaining mismatches."""
+
+    teacher_perception_preset: str | None = None
+    """Optional perception preset name used only for the teacher policy (e.g. heightmap)."""
+
+    teacher_perception_obs_key: str | None = None
+    """Optional observation key used to feed teacher-only perception into the teacher policy."""
+
+    critic_perception_preset: str | None = None
+    """Optional perception preset name used only for the critic policy (e.g. heightmap)."""
+
+    critic_perception_obs_key: str | None = None
+    """Optional observation key used to feed critic-only perception into the critic policy."""
+
+    switch_to_rl_after: int = -1
+    """Iteration to switch off BC loss (set to 0 or negative to disable)."""
+
+    use_multi_teacher: bool = False
+    """Whether to use multiple teacher checkpoints (requires policy_to_clone list)."""
+
+    multi_teacher_select_obs_var: str = "teacher_checkpoint_index"
+    """Observation key used to select teacher policy when use_multi_teacher is True."""
+
+    # Far-tracking DepthDistillationPPO parity controls.
+    ppo_start_epoch: int = -1
+    """Epoch to start mixing PPO loss in dagger mode (-1 disables schedule)."""
+
+    dagger_end_epoch: int = -1
+    """Epoch where PPO contribution saturates in dagger mode (-1 disables schedule)."""
+
+    ppo_target_coeff: float = 0.9
+    """Final PPO blend coefficient reached at ``dagger_end_epoch`` in scheduled PPO+DAgger mode."""
+
+    ppo_start_coeff: float = 0.0
+    """Initial PPO blend coefficient at ``ppo_start_epoch`` in scheduled PPO+DAgger mode."""
+
+    ppo_start_noise_std: float | None = None
+    """Optional max policy noise std enforced while PPO first enters scheduled PPO+DAgger mode."""
+
+    ppo_start_noise_std_until_coeff: float = 0.1
+    """Keep ``ppo_start_noise_std`` active until PPO blend coefficient exceeds this value."""
+
+    ppo_schedule_step_epochs: int = 0
+    """Optional PPO/DAgger step interval; values > 0 use staircase blending instead of a linear ramp."""
+
+    dagger_loss_coef: float = 10.0
+    """Scale on dagger/distillation loss term in scheduled PPO+DAgger mode."""
+
+    distill_loss_type: str = "mse"
+    """DAgger loss type: 'mse' or 'huber'."""
+
+    dagger_ignore_zero_teacher_actions: bool = True
+    """Ignore samples where teacher action is exactly zero across all dims."""
+
+    dagger_ignore_episode_initial_steps: int = 0
+    """Ignore BC samples from the first N episode steps (useful when reset states are outside teacher distribution)."""
+
+    dagger_replay_enabled: Annotated[bool, Field(strict=True)] = False
+    """Enable bounded rank-local deterministic replay for pure-BC DAgger only."""
+
+    dagger_replay_capacity: Annotated[int, Field(strict=True, ge=1)] = 512
+    """Maximum number of valid teacher-labelled rows retained on each rank."""
+
+    dagger_replay_batch_size: Annotated[int, Field(strict=True, ge=1)] = 512
+    """Rank-local replay rows sampled (with replacement) for each actor update."""
+
+    dagger_replay_fraction: Annotated[
+        float,
+        Field(strict=True, gt=0.0, lt=1.0, allow_inf_nan=False),
+    ] = 0.5
+    """Replay share in ``(1-fraction) * current_BC + fraction * replay_BC``."""
+
+    dagger_replay_seed: Annotated[int, Field(strict=True, ge=0)] = 0
+    """Base seed for the independent rank-local replay sampler/reservoir RNG."""
+
+    dagger_match_std: bool = False
+    """Match policy std against teacher std in BC loss (legacy behavior)."""
+
+    strict_teacher_load: bool = True
+    """Fail fast on teacher architecture/obs mismatch instead of fallback loading."""
+
+    fixed_bc_eval_num_samples: int = 4096
+    """DAgger-only fixed teacher-labeled evaluation budget (0 disables)."""
+
+    fixed_bc_eval_log_interval: int = 1
+    """Log fixed-set BC evaluation metrics every N learning iterations."""
+
+    fixed_bc_guard_enabled: bool = False
+    """Fail closed when the frozen-set student mean-action MSE regresses beyond its reference bound."""
+
+    fixed_bc_guard_reference_end_epoch: int = 600
+    """Inclusive final iteration used to establish the fixed-BC reference minimum."""
+
+    fixed_bc_guard_max_reference_ratio: float = 2.0
+    """Maximum allowed multiple of the best reference-period fixed-BC mean-action MSE."""
+
+    fixed_bc_guard_absolute_max_mu_mse: float = 0.160
+    """Absolute fixed-BC mean-action MSE ceiling; the effective bound is the tighter ceiling."""
+
+    fixed_bc_guard_start_epoch: int = -1
+    """First iteration eligible to count a post-reference regression (-1 is invalid when enabled)."""
+
+    fixed_bc_guard_consecutive_evals: int = 3
+    """Number of consecutive over-bound fixed-BC evaluations that trip the fail-closed guard."""
+
 
 
 @dataclass(frozen=True)
@@ -130,7 +406,16 @@ class PPOConfig:
     """Value loss coefficient."""
 
     entropy_coef: float = 0.01
-    """Entropy coefficient for exploration."""
+    """Initial entropy coefficient for exploration."""
+
+    entropy_coef_end: float | None = None
+    """Final entropy coefficient. ``None`` keeps ``entropy_coef`` fixed."""
+
+    entropy_coef_decay_start_iteration: int = 0
+    """First absolute learning iteration of the linear entropy decay."""
+
+    entropy_coef_decay_end_iteration: int = 0
+    """Absolute learning iteration at which ``entropy_coef_end`` is reached."""
 
     actor_learning_rate: float = 1e-5
     """Learning rate for actor network."""
@@ -165,8 +450,20 @@ class PPOConfig:
     num_steps_per_env: int = 24
     """Number of steps per environment."""
 
-    save_interval: int = 100
+    save_interval: int = 1000
     """Interval for saving model checkpoints."""
+
+    reset_rollout_at_checkpoint: bool = False
+    """Force an all-environment reset after non-final checkpoints.
+
+    The default keeps ordinary checkpoint publication observational: the live
+    rollout continues without truncating episodes.  Enable this only when a
+    compact checkpoint must define the same canonical new-episode boundary for
+    uninterrupted and resumed training.  With the default disabled, a full
+    resume restores model/optimizer/curriculum/RNG state but begins a new
+    rollout stream and is therefore a recovery continuation, not an identical
+    trajectory continuation.
+    """
 
     load_optimizer: bool = True
     """Whether to load optimizer state."""
@@ -183,10 +480,25 @@ class PPOConfig:
     eval_callbacks: Any = None
     """Evaluation callbacks configuration."""
 
+    normalize_actor_obs: bool = False
+    """Whether to apply empirical normalization to actor observations."""
+
+    normalize_critic_obs: bool = False
+    """Whether to apply empirical normalization to critic observations."""
+
+    obs_normalizer_eps: float = 1e-2
+    """Epsilon for observation normalization."""
+
+    obs_normalizer_until: int | None = None
+    """Optional cap on number of samples used to update the obs normalizer."""
+
     max_actor_learning_rate: float | None = None
     min_actor_learning_rate: float | None = None
     max_critic_learning_rate: float | None = None
     min_critic_learning_rate: float | None = None
+
+    distill: DistillationConfig = field(default_factory=DistillationConfig)
+    """Optional teacher distillation configuration."""
 
 
 @dataclass(frozen=True)
@@ -256,6 +568,15 @@ class FastSACConfig:
 
     use_tanh: bool = True
     """whether to use tanh for the action"""
+
+    action_boundary_mode: str = "joint_limit_affine_v2"
+    """Mapping from the actor's tanh output to environment actions.
+
+    ``joint_limit_affine_v2`` uses the live joint-position action term's
+    per-joint scale and an affine bias so tanh ``[-1, 1]`` maps exactly to the
+    configured joint limits. ``legacy_max_range_scalar_v1`` exists only to
+    reproduce checkpoints written before this contract was versioned.
+    """
 
     log_std_max: float = 0.0
     """the maximum value of the log std"""

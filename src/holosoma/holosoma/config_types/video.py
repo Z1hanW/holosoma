@@ -77,7 +77,7 @@ class VideoConfig:
     IsaacGym, MuJoCo, and IsaacSim simulators.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     """Whether video recording is enabled."""
 
     interval: int = 10

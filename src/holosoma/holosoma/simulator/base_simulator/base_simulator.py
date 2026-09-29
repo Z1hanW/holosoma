@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from loguru import logger
 
@@ -145,6 +145,7 @@ class BaseSimulator:
         self.training_config = tyro_config.training
         self.simulator_config = tyro_config.simulator
         self.robot_config = tyro_config.robot
+        self.command_config = tyro_config.command
         self.video_config = tyro_config.logger.video
         self.sim_device = device
         self.headless = False
@@ -411,6 +412,48 @@ class BaseSimulator:
     def draw_debug_viz(self):
         pass
 
+    def _draw_contact_forces(self, env_id: int | None = None) -> None:
+        """Draw net contact forces as debug lines."""
+        if not self.simulator_config.contact_force_viz:
+            return
+
+        if not hasattr(self, "contact_forces") or not hasattr(self, "_rigid_body_pos"):
+            return
+
+        if self.contact_forces is None or self._rigid_body_pos is None:
+            return
+
+        if self.contact_forces.numel() == 0 or self._rigid_body_pos.numel() == 0:
+            return
+
+        if env_id is None:
+            env_id = getattr(self, "current_world_id", 0)
+
+        if env_id < 0 or env_id >= self.contact_forces.shape[0]:
+            return
+
+        forces = self.contact_forces[env_id]
+        positions = self._rigid_body_pos[env_id]
+        body_count = min(forces.shape[0], positions.shape[0])
+        if body_count == 0:
+            return
+
+        forces = forces[:body_count]
+        positions = positions[:body_count]
+
+        magnitudes = torch.linalg.norm(forces, dim=-1)
+        threshold = self.simulator_config.contact_force_viz_threshold
+        mask = magnitudes > threshold
+        if torch.count_nonzero(mask) == 0:
+            return
+
+        scale = self.simulator_config.contact_force_viz_scale
+        color = (1.0, 0.2, 0.1)
+        for idx in torch.nonzero(mask, as_tuple=False).flatten().tolist():
+            start = positions[idx].detach().cpu()
+            end = (positions[idx] + forces[idx] * scale).detach().cpu()
+            self.draw_line(start.tolist(), end.tolist(), color, env_id)
+
     # ----- Bridge System Helper Methods -----
 
     def _init_bridge(self) -> None:
@@ -450,6 +493,42 @@ class BaseSimulator:
             self.bridge.step()
 
     # ----- Video Recording Interface -----
+    def requires_episode_callbacks(self) -> bool:
+        """Whether reset must notify simulator episode lifecycle hooks.
+
+        The built-in hooks only drive the video recorder and virtual gantry, so
+        the normal headless-training configuration can skip them entirely.  A
+        subclass that overrides either the scalar or batched lifecycle hook is
+        conservatively treated as active to preserve custom simulator behavior.
+        Subclasses with a more precise capability may override this method.
+        """
+
+        if self.video_recorder is not None or self.virtual_gantry is not None:
+            return True
+
+        simulator_type = type(self)
+        return any(
+            getattr(simulator_type, hook_name) is not getattr(BaseSimulator, hook_name)
+            for hook_name in (
+                "on_episode_start",
+                "on_episode_end",
+                "on_episodes_start",
+                "on_episodes_end",
+            )
+        )
+
+    def on_episodes_start(self, env_ids: Sequence[int]) -> None:
+        """Notify episode starts for a host-side batch of environment IDs."""
+
+        for env_id in env_ids:
+            self.on_episode_start(env_id)
+
+    def on_episodes_end(self, env_ids: Sequence[int]) -> None:
+        """Notify episode ends for a host-side batch of environment IDs."""
+
+        for env_id in env_ids:
+            self.on_episode_end(env_id)
+
     def on_episode_start(self, env_id: int = 0) -> None:
         """Called when an episode starts.
 
@@ -463,8 +542,8 @@ class BaseSimulator:
             The environment ID where the episode is starting.
         """
         if self.virtual_gantry is not None and env_id == 0:
-            # Follow robot on start (may want this configurable later)
-            self.virtual_gantry.set_position_to_robot()
+            if self.simulator_config.virtual_gantry.follow_robot_on_episode_start:
+                self.virtual_gantry.set_position_to_robot()
 
         if self.video_recorder is not None:
             self.video_recorder.on_episode_start(env_id)
@@ -484,7 +563,7 @@ class BaseSimulator:
         if self.video_recorder is not None:
             self.video_recorder.on_episode_end(env_id)
 
-    def capture_video_frame(self, env_id: int = 0) -> None:
+    def capture_video_frame(self, env_id: int = 0, *, respect_decimation: bool = True) -> None:
         """Capture a video frame during simulation.
 
         This method should be called during each simulation step when video
@@ -495,9 +574,13 @@ class BaseSimulator:
         ----------
         env_id : int, default=0
             The environment ID where the frame is being captured.
+        respect_decimation : bool, default=True
+            When False, bypass the video recorder's control-decimation gate and
+            capture on every call. Replay/preview loops that already step at the
+            motion command rate should use this mode.
         """
         if self.video_recorder is not None:
-            self.video_recorder.capture_frame(env_id)
+            self.video_recorder.capture_frame(env_id, respect_decimation=respect_decimation)
 
     # ----- Actor/Object Access Interface -----
     # These methods provide unified access to objects registered with ObjectType enum

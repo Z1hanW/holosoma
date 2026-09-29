@@ -143,3 +143,7 @@ If you use Holosoma in your research, please cite it according to the "Cite this
 ## License
 
 This project is licensed under the Apache-2.0 License.
+
+## PRISM
+
+See [PRISM runtime installation](docs/prism.md) for the teacher training and depth-policy distillation integration.
