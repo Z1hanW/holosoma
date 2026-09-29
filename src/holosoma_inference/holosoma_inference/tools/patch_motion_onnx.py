@@ -173,10 +173,9 @@ def _verify_training_motion_manifest(
         from holosoma.utils.compute_training_provenance import _motion_manifest_digest
     except (ImportError, ModuleNotFoundError) as exc:
         raise RuntimeError(
-            "Scientific contact-sidecar patching requires the repository training provenance "
-            "module to verify motion NPZ/object/URDF/shard bytes. Run patch_motion_onnx from the "
-            "Holosoma source checkout with src/holosoma on PYTHONPATH; inference-only installs "
-            "cannot publish this digest-bound artifact."
+            "Scientific contact-sidecar patching requires the holosoma training package "
+            "to verify motion NPZ/object/URDF/shard bytes. Install holosoma and "
+            "holosoma-inference from the same Git revision before publishing this artifact."
         ) from exc
     actual = _motion_manifest_digest(
         motion_bank_dir,

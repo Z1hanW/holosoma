@@ -1657,7 +1657,8 @@ def _build_sim2sim_commands(
 
     run_sim_cmd = [
         sim2sim_cfg.sim_python or sys.executable,
-        "src/holosoma/holosoma/run_sim.py",
+        "-m",
+        "holosoma.run_sim",
         f"simulator:{sim2sim_cfg.simulator}",
         f"robot:{run_sim_robot}",
     ]
@@ -1709,7 +1710,8 @@ def _build_sim2sim_commands(
 
     run_policy_cmd = [
         sim2sim_cfg.policy_python or sys.executable,
-        "src/holosoma_inference/holosoma_inference/run_policy.py",
+        "-m",
+        "holosoma_inference.run_policy",
         inference_cfg,
         "--task.model-path",
         model_path,
